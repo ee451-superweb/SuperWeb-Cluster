@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import argparse
 import socket
+import threading
 import time
+import uuid
+from dataclasses import dataclass, field
 
 from tcp_speed import (
     DEFAULT_CHUNK_SIZE,
@@ -13,6 +16,7 @@ from tcp_speed import (
     DEFAULT_DURATION,
     DEFAULT_PORT,
     DEFAULT_PROGRESS_INTERVAL,
+    DEFAULT_STREAMS,
     ThroughputResult,
     format_bytes,
     parse_byte_count,
@@ -20,6 +24,55 @@ from tcp_speed import (
     send_json_line,
     summarize_result,
 )
+
+
+@dataclass(slots=True)
+class SenderSessionState:
+    streams: int
+    bytes_sent: list[int] = field(init=False)
+    sender_end_times: list[float | None] = field(init=False)
+    start_time: float | None = None
+    receiver_result: ThroughputResult | None = None
+    metrics_lock: threading.Lock = field(default_factory=threading.Lock)
+    receiver_lock: threading.Lock = field(default_factory=threading.Lock)
+    errors: list[str] = field(default_factory=list)
+    error_lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def __post_init__(self) -> None:
+        self.bytes_sent = [0] * self.streams
+        self.sender_end_times = [None] * self.streams
+
+    def mark_start(self) -> None:
+        with self.metrics_lock:
+            self.start_time = time.perf_counter()
+
+    def add_bytes(self, stream_index: int, amount: int) -> None:
+        with self.metrics_lock:
+            self.bytes_sent[stream_index] += amount
+
+    def mark_stream_end(self, stream_index: int, end_time: float) -> None:
+        with self.metrics_lock:
+            self.sender_end_times[stream_index] = end_time
+
+    def snapshot(self) -> tuple[int, float | None]:
+        with self.metrics_lock:
+            return sum(self.bytes_sent), self.start_time
+
+    def set_receiver_result(self, result: ThroughputResult) -> None:
+        with self.receiver_lock:
+            if self.receiver_result is None:
+                self.receiver_result = result
+
+    def record_error(self, message: str) -> None:
+        with self.error_lock:
+            self.errors.append(message)
+
+
+@dataclass(slots=True)
+class StreamOutcome:
+    stream_index: int
+    send_buffer: int
+    sender_result: ThroughputResult
 
 
 def parse_args() -> argparse.Namespace:
@@ -52,6 +105,12 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Optional SO_SNDBUF override such as 4MiB. Default keeps the OS value.",
     )
+    parser.add_argument(
+        "--streams",
+        type=int,
+        default=DEFAULT_STREAMS,
+        help="Number of parallel TCP streams to open.",
+    )
     parser.add_argument("--tcp-nodelay", action="store_true", help="Enable TCP_NODELAY on the socket.")
 
     group = parser.add_mutually_exclusive_group()
@@ -67,6 +126,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("--connect-timeout must be positive")
     if args.progress_interval < 0:
         parser.error("--progress-interval cannot be negative")
+    if args.streams <= 0:
+        parser.error("--streams must be positive")
+    if args.total_bytes is not None and args.total_bytes < args.streams:
+        parser.error("--bytes must be at least as large as --streams")
     return args
 
 
@@ -75,46 +138,70 @@ def print_progress(total_sent: int, start_time: float, now: float) -> None:
     print(f"progress {summarize_result(result)}")
 
 
-def run_send_loop(sock: socket.socket, args: argparse.Namespace) -> ThroughputResult:
-    payload = b"\0" * args.chunk_size
+def split_total_bytes(total_bytes: int, streams: int, stream_index: int) -> int:
+    base = total_bytes // streams
+    remainder = total_bytes % streams
+    return base + (1 if stream_index < remainder else 0)
+
+
+def stream_target_label(args: argparse.Namespace, stream_index: int) -> str:
+    if args.total_bytes is None:
+        return f"{args.duration:.3f}s"
+    return format_bytes(split_total_bytes(args.total_bytes, args.streams, stream_index))
+
+
+def run_send_loop(
+    sock: socket.socket,
+    *,
+    chunk_size: int,
+    duration: float | None,
+    total_bytes: int | None,
+    stream_index: int,
+    session_state: SenderSessionState,
+) -> ThroughputResult:
+    payload = b"\0" * chunk_size
     total_sent = 0
     start_time = time.perf_counter()
-    next_progress = start_time + args.progress_interval
 
-    if args.total_bytes is not None:
-        remaining = args.total_bytes
+    if total_bytes is not None:
+        remaining = total_bytes
         while remaining > 0:
-            block_size = min(args.chunk_size, remaining)
+            block_size = min(chunk_size, remaining)
             sock.sendall(payload[:block_size])
             total_sent += block_size
             remaining -= block_size
-
-            now = time.perf_counter()
-            if args.progress_interval > 0 and now >= next_progress:
-                print_progress(total_sent, start_time, now)
-                next_progress = now + args.progress_interval
+            session_state.add_bytes(stream_index, block_size)
     else:
-        deadline = start_time + args.duration
+        assert duration is not None
+        deadline = start_time + duration
         while True:
             sock.sendall(payload)
-            total_sent += args.chunk_size
-
-            now = time.perf_counter()
-            if args.progress_interval > 0 and now >= next_progress:
-                print_progress(total_sent, start_time, now)
-                next_progress = now + args.progress_interval
-            if now >= deadline:
+            total_sent += chunk_size
+            session_state.add_bytes(stream_index, chunk_size)
+            if time.perf_counter() >= deadline:
                 break
 
     end_time = time.perf_counter()
+    session_state.mark_stream_end(stream_index, end_time)
     return ThroughputResult(total_sent, max(end_time - start_time, 0.0))
 
 
-def main() -> int:
-    args = parse_args()
+def run_stream(
+    stream_index: int,
+    args: argparse.Namespace,
+    *,
+    session_id: str,
+    start_barrier: threading.Barrier,
+    session_state: SenderSessionState,
+    outcomes: list[StreamOutcome | None],
+) -> None:
+    stream_total_bytes = None
+    if args.total_bytes is not None:
+        stream_total_bytes = split_total_bytes(args.total_bytes, args.streams, stream_index)
 
-    sock = socket.create_connection((args.host, args.port), timeout=args.connect_timeout)
+    sock: socket.socket | None = None
     try:
+        sock = socket.create_connection((args.host, args.port), timeout=args.connect_timeout)
         sock.settimeout(None)
         if args.send_buffer > 0:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, args.send_buffer)
@@ -122,14 +209,17 @@ def main() -> int:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
         actual_send_buffer = sock.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF)
-        print(f"connected to {args.host}:{args.port}")
-        print(f"socket send buffer {format_bytes(actual_send_buffer)}")
+        print(f"stream {stream_index} connected to {args.host}:{args.port}")
+        print(f"stream {stream_index} socket send buffer {format_bytes(actual_send_buffer)}")
 
         control = {
-            "mode": "bytes" if args.total_bytes is not None else "duration",
+            "mode": "bytes" if stream_total_bytes is not None else "duration",
             "chunk_size": args.chunk_size,
-            "duration": args.duration,
-            "total_bytes": args.total_bytes,
+            "duration": args.duration if stream_total_bytes is None else None,
+            "total_bytes": stream_total_bytes,
+            "session_id": session_id,
+            "stream_index": stream_index,
+            "streams": args.streams,
         }
         send_json_line(sock, control)
 
@@ -138,10 +228,17 @@ def main() -> int:
             message = ready.get("message", "receiver did not acknowledge the test")
             raise RuntimeError(str(message))
 
-        target = f"{args.duration:.3f}s" if args.total_bytes is None else format_bytes(args.total_bytes)
-        print(f"starting test, target {target}, chunk {format_bytes(args.chunk_size)}")
+        print(f"stream {stream_index} ready, target {stream_target_label(args, stream_index)}")
+        start_barrier.wait()
 
-        sender_result = run_send_loop(sock, args)
+        sender_result = run_send_loop(
+            sock,
+            chunk_size=args.chunk_size,
+            duration=args.duration if stream_total_bytes is None else None,
+            total_bytes=stream_total_bytes,
+            stream_index=stream_index,
+            session_state=session_state,
+        )
         sock.shutdown(socket.SHUT_WR)
 
         summary = recv_json_line(sock)
@@ -149,21 +246,124 @@ def main() -> int:
             message = summary.get("message", "receiver reported an error")
             raise RuntimeError(str(message))
 
-        receiver_result = ThroughputResult(
-            total_bytes=int(summary["total_bytes"]),
-            elapsed_seconds=float(summary["elapsed_seconds"]),
+        session_state.set_receiver_result(
+            ThroughputResult(
+                total_bytes=int(summary["session_total_bytes"]),
+                elapsed_seconds=float(summary["session_elapsed_seconds"]),
+            )
         )
 
-        print(f"sender   {summarize_result(sender_result)}")
-        print(f"receiver {summarize_result(receiver_result)}")
+        outcomes[stream_index] = StreamOutcome(
+            stream_index=stream_index,
+            send_buffer=actual_send_buffer,
+            sender_result=sender_result,
+        )
+    except Exception as exc:
+        session_state.record_error(f"stream {stream_index}: {exc}")
+        start_barrier.abort()
+    finally:
+        if sock is not None:
+            sock.close()
+
+
+def build_sender_result(session_state: SenderSessionState) -> ThroughputResult:
+    total_sent, start_time = session_state.snapshot()
+    if start_time is None:
+        return ThroughputResult(total_sent, 0.0)
+
+    with session_state.metrics_lock:
+        end_times = [value for value in session_state.sender_end_times if value is not None]
+
+    if not end_times:
+        return ThroughputResult(total_sent, 0.0)
+    return ThroughputResult(total_sent, max(max(end_times) - start_time, 0.0))
+
+
+def progress_worker(
+    args: argparse.Namespace,
+    session_state: SenderSessionState,
+    threads: list[threading.Thread],
+    stop_event: threading.Event,
+) -> None:
+    if args.progress_interval <= 0:
+        return
+
+    while not stop_event.wait(args.progress_interval):
+        total_sent, start_time = session_state.snapshot()
+        if start_time is not None:
+            print_progress(total_sent, start_time, time.perf_counter())
+        if not any(thread.is_alive() for thread in threads):
+            return
+
+
+def report_stream_results(outcomes: list[StreamOutcome | None]) -> None:
+    for outcome in outcomes:
+        if outcome is None:
+            continue
+        print(
+            f"stream {outcome.stream_index} sender {summarize_result(outcome.sender_result)} "
+            f"with socket buffer {format_bytes(outcome.send_buffer)}"
+        )
+
+
+def main() -> int:
+    args = parse_args()
+    session_id = uuid.uuid4().hex
+    session_state = SenderSessionState(streams=args.streams)
+    start_barrier = threading.Barrier(args.streams, action=session_state.mark_start)
+    outcomes: list[StreamOutcome | None] = [None] * args.streams
+
+    target = f"{args.duration:.3f}s" if args.total_bytes is None else format_bytes(args.total_bytes)
+    print(f"starting test to {args.host}:{args.port} with {args.streams} stream(s), total target {target}")
+    print(f"stream chunk size {format_bytes(args.chunk_size)}")
+
+    threads = [
+        threading.Thread(
+            target=run_stream,
+            args=(stream_index, args),
+            kwargs={
+                "session_id": session_id,
+                "start_barrier": start_barrier,
+                "session_state": session_state,
+                "outcomes": outcomes,
+            },
+        )
+        for stream_index in range(args.streams)
+    ]
+
+    for thread in threads:
+        thread.start()
+
+    stop_event = threading.Event()
+    progress_thread = threading.Thread(
+        target=progress_worker,
+        args=(args, session_state, threads, stop_event),
+        daemon=True,
+    )
+    progress_thread.start()
+
+    for thread in threads:
+        thread.join()
+
+    stop_event.set()
+
+    if session_state.errors:
+        for message in session_state.errors:
+            print(f"error {message}")
+        return 1
+
+    sender_result = build_sender_result(session_state)
+    receiver_result = session_state.receiver_result
+    report_stream_results(outcomes)
+    print(f"sender   {summarize_result(sender_result)} across {args.streams} stream(s)")
+    if receiver_result is not None:
+        print(f"receiver {summarize_result(receiver_result)} across {args.streams} stream(s)")
         if receiver_result.total_bytes != sender_result.total_bytes:
             print(
                 "warning: sender and receiver byte counts differ "
                 f"({sender_result.total_bytes} sent vs {receiver_result.total_bytes} received)"
             )
-        return 0
-    finally:
-        sock.close()
+    return 0
 
 
 if __name__ == "__main__":

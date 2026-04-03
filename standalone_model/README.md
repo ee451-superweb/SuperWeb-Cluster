@@ -11,7 +11,7 @@
 - `sender.py`: mDNS 发送端。从临时 UDP 端口发一个 PTR 查询，然后等待响应。
 - `mdns_minimal.py`: mDNS 两端共用的最小 DNS/mDNS 编解码和 socket 帮助函数。
 - `tcp_receiver.py`: TCP 吞吐测试接收端。监听一个 TCP 端口，接收测试流量并回传统计。
-- `tcp_sender.py`: TCP 吞吐测试发送端。连接到 `tcp_receiver.py`，持续发数据并打印两端统计。
+- `tcp_sender.py`: TCP 吞吐测试发送端。连接到 `tcp_receiver.py`，支持单流或多流并发发送，并打印两端统计。
 - `tcp_speed.py`: TCP 两端共用的控制消息和速率格式化帮助函数。
 
 默认 mDNS 服务名是 `_homecluster-hs._tcp.local.`，和主项目 discovery 的服务类型一致。
@@ -57,6 +57,12 @@ python3 standalone_model/tcp_receiver.py --bind 0.0.0.0 --port 52021 --once
 python3 standalone_model/tcp_sender.py 192.168.1.23 --port 52021 --duration 10
 ```
 
+如果你想模拟 `iperf3 -P 4` 这种多流并发，可以这样：
+
+```bash
+python3 standalone_model/tcp_sender.py 192.168.1.23 --port 52021 --duration 15 --streams 4 --chunk-size 1MiB --send-buffer 4MiB
+```
+
 如果你想固定测试总数据量，也可以这样：
 
 ```bash
@@ -68,11 +74,13 @@ python3 standalone_model/tcp_sender.py 192.168.1.23 --port 52021 --bytes 1GiB
 - `--chunk-size 1MiB`: 调大发送块大小，减少 Python 循环开销。
 - `--send-buffer 4MiB`: 调整发送端 `SO_SNDBUF`。
 - `--recv-buffer 4MiB`: 调整接收端 `SO_RCVBUF`。
+- `--streams 4`: 同时开 4 条 TCP 流，适合排查“单流吃不满链路”的情况。
 - `--progress-interval 0.5`: 更频繁打印进度。
 
 ### TCP 结果判断
 
 - `sender.py` 和 `receiver.py` 的 mDNS 输出只回答“能不能发现”，不回答“TCP 能跑多快”。
 - `tcp_sender.py` 会打印发送侧统计和接收侧统计；接收侧统计更接近真实链路吞吐。
+- 如果 `--streams 1` 只能跑到几百 Mbps，而 `--streams 4` 明显更高，说明瓶颈更像是“单条 TCP 流吃不满链路”，这时应用层并发传输是可行方向。
 - 如果想测反方向速度，把两台机器角色对调再跑一遍，因为很多 Wi-Fi/路由场景上下行并不完全对称。
 - 这套脚本测的是 Python 应用层 TCP 吞吐，不是网卡理论线速；如果你想做更标准的基准，`iperf3` 会更专业。
