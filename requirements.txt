@@ -1,1 +1,2 @@
-# Kickoff version intentionally uses only the Python standard library.
+# Core project stays mostly stdlib; standalone ZeroMQ benchmarks need pyzmq.
+pyzmq>=27.1.0

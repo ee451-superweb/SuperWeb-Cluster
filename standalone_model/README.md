@@ -13,6 +13,8 @@
 - `tcp_receiver.py`: TCP 吞吐测试接收端。监听一个 TCP 端口，接收测试流量并回传统计。
 - `tcp_sender.py`: TCP 吞吐测试发送端。连接到 `tcp_receiver.py`，支持单流或多流并发发送，并打印两端统计。
 - `tcp_speed.py`: TCP 两端共用的控制消息和速率格式化帮助函数。
+- `zmq_receiver.py`: ZeroMQ 吞吐测试接收端，依赖 `pyzmq`。
+- `zmq_sender.py`: ZeroMQ 吞吐测试发送端，依赖 `pyzmq`。
 
 默认 mDNS 服务名是 `_homecluster-hs._tcp.local.`，和主项目 discovery 的服务类型一致。
 
@@ -84,3 +86,31 @@ python3 standalone_model/tcp_sender.py 192.168.1.23 --port 52021 --bytes 1GiB
 - 如果 `--streams 1` 只能跑到几百 Mbps，而 `--streams 4` 明显更高，说明瓶颈更像是“单条 TCP 流吃不满链路”，这时应用层并发传输是可行方向。
 - 如果想测反方向速度，把两台机器角色对调再跑一遍，因为很多 Wi-Fi/路由场景上下行并不完全对称。
 - 这套脚本测的是 Python 应用层 TCP 吞吐，不是网卡理论线速；如果你想做更标准的基准，`iperf3` 会更专业。
+
+## ZeroMQ 对比测试
+
+先创建并使用项目里的虚拟环境：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python -m pip install pyzmq
+```
+
+在接收端机器上先启动：
+
+```powershell
+.\.venv\Scripts\python standalone_model\zmq_receiver.py --bind 0.0.0.0 --port 52041 --rcvbuf 4MiB
+```
+
+在发送端机器上连接它：
+
+```powershell
+.\.venv\Scripts\python standalone_model\zmq_sender.py 192.168.1.23 --port 52041 --duration 15 --chunk-size 1MiB --sndbuf 4MiB
+```
+
+说明：
+
+- 这里用的是 ZeroMQ `PAIR`，只适合一对一 benchmark，优点是收发协议很小，便于先看“换成消息库以后”吞吐有没有变化。
+- ZeroMQ 发送侧可能因为内部队列而看起来特别快，所以对比时优先看 `zmq_receiver.py` 打出来的吞吐。
+- 如果 ZeroMQ 明显比当前 TCP 版更好，说明你的负载可能更适合“消息分帧 + 库内缓冲”这种风格。
+- 如果结果差不多甚至更低，也很正常，因为 ZeroMQ 主要解决的是消息模式、队列和连接管理，不保证一定比原始 TCP 更快。
