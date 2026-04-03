@@ -1,0 +1,79 @@
+syntax = "proto3";
+
+package homecluster.runtime;
+
+enum MessageKind {
+  MESSAGE_KIND_UNSPECIFIED = 0;
+  REGISTER_WORKER = 1;
+  REGISTER_OK = 2;
+  HEARTBEAT = 3;
+  HEARTBEAT_OK = 4;
+  CLIENT_JOIN = 5;
+  CLIENT_REQUEST = 6;
+  CLIENT_RESPONSE = 7;
+}
+
+message HardwareProfile {
+  string hostname = 1;
+  string local_ip = 2;
+  string mac_address = 3;
+  string system = 4;
+  string release = 5;
+  string machine = 6;
+  string processor = 7;
+  uint32 logical_cpu_count = 8;
+  uint64 memory_bytes = 9;
+}
+
+message RegisterWorker {
+  string node_name = 1;
+  HardwareProfile hardware = 2;
+}
+
+message RegisterOk {
+  string scheduler_name = 1;
+  string scheduler_ip = 2;
+  uint32 scheduler_port = 3;
+}
+
+message Heartbeat {
+  string scheduler_name = 1;
+  uint64 unix_time_ms = 2;
+}
+
+message HeartbeatOk {
+  string node_name = 1;
+  uint64 heartbeat_unix_time_ms = 2;
+  uint64 received_unix_time_ms = 3;
+}
+
+message ClientJoin {
+  string client_name = 1;
+}
+
+message ClientRequest {
+  string client_name = 1;
+  string request_id = 2;
+  string command = 3;
+  string payload = 4;
+}
+
+message ClientResponse {
+  string request_id = 1;
+  bool ok = 2;
+  string message = 3;
+  string payload = 4;
+  uint32 worker_count = 5;
+  uint32 client_count = 6;
+}
+
+message RuntimeEnvelope {
+  MessageKind kind = 1;
+  RegisterWorker register_worker = 2;
+  RegisterOk register_ok = 3;
+  Heartbeat heartbeat = 4;
+  HeartbeatOk heartbeat_ok = 5;
+  ClientJoin client_join = 6;
+  ClientRequest client_request = 7;
+  ClientResponse client_response = 8;
+}

@@ -1,0 +1,77 @@
+开工版真实要做的功能范围（必须实现）:
+
+1. OS 识别
+   - Windows / Linux / macOS / WSL 识别
+   - 权限状态识别
+   - Windows 提权入口
+
+2. 防火墙
+   - 至少 Windows 实现
+   - 只处理 discovery 阶段需要的 UDP 规则
+   - ensure_rules()
+   - cleanup_rules()
+
+3. 组网 / discovery
+   - UDP multicast 发送与接收
+   - pairing 流程
+   - discovery 成功后打印对端地址/结果
+   - 暂时不进入 TCP runtime
+
+4. 手动键入 / 打印文本
+   - discovery 失败后允许用户手动输入 IP 或文本地址
+   - supervisor 打印当前状态
+   - scripts/print_status.py 打印平台与运行状态
+
+
+给 Codex 的明确开发边界说明:
+
+1. 当前版本是“开工版”，只实现：
+   - OS/platform detection
+   - privilege check / Windows elevation hook
+   - firewall setup/cleanup
+   - UDP multicast discovery
+   - manual input fallback
+   - text printing / status output
+
+2. 不要实现：
+   - TCP 会话
+   - scheduler runtime
+   - worker runtime
+   - task dispatch
+   - result aggregation
+   - heartbeat
+   - compute backend
+
+3. 对于未进入当前范围的模块，只创建 skeleton：
+   - 文件存在
+   - 类/函数签名存在
+   - docstring 说明职责
+   - 用 NotImplementedError 或 pass
+
+建议当前最先开发的文件清单:
+
+1. README.md
+2. requirements.txt
+3. bootstrap.py
+4. supervisor.py
+5. config.py
+6. constants.py
+7. logging_setup.py
+8. protocol.py
+9. common/messages.py
+10. common/types.py
+11. common/state.py
+12. discovery/pairing.py
+13. discovery/multicast.py
+14. discovery/fallback.py
+15. adapters/platform.py
+16. adapters/network.py
+17. adapters/firewall/__init__.py
+18. adapters/firewall/windows.py
+19. scripts/multicast_sender.py
+20. scripts/multicast_receiver.py
+21. scripts/run_bootstrap.py
+22. scripts/print_status.py
+23. scripts/cleanup_firewall.py
+24. tests/test_platform.py
+25. tests/test_protocol.py

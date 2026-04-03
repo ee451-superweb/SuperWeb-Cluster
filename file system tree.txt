@@ -1,0 +1,484 @@
+project/
+├── README.md
+│   模块介绍:
+│   - 项目总说明
+│   - 当前“开工版”目标
+│   - 运行方式
+│   - 开发边界说明
+│
+│   开工版要求:
+│   - 写完整内容
+│
+├── requirements.txt
+│   模块介绍:
+│   - Python 依赖列表
+│
+│   开工版要求:
+│   - 只保留最小依赖
+│   - 优先只用标准库
+│   - 如果 Windows 提权/防火墙需要第三方库，再单独注明
+│
+├── bootstrap.py
+│   模块介绍:
+│   - 程序统一入口
+│   - 调用平台识别、权限检查、防火墙初始化
+│   - 启动最小 supervisor
+│
+│   开工版要求:
+│   - 需要真正实现
+│   - 当前只做:
+│     1. OS 识别
+│     2. 权限检查/提权入口
+│     3. 防火墙 ensure 调用
+│     4. 启动 supervisor
+│
+├── supervisor.py
+│   模块介绍:
+│   - 最小常驻控制器
+│   - 负责 signal handler
+│   - 负责调用 discovery
+│   - 负责切换“手动输入模式”或“打印模式”
+│
+│   开工版要求:
+│   - 需要真正实现
+│   - 当前只做:
+│     1. 注册 SIGINT / SIGTERM
+│     2. 调用 discovery/pairing
+│     3. 若 discovery 失败则进入 manual_input
+│     4. 打印当前运行状态
+│     5. 退出时 best-effort 调用 firewall cleanup
+│
+├── config.py
+│   模块介绍:
+│   - 管理默认配置
+│   - 提供端口、地址、超时、模式等配置
+│
+│   开工版要求:
+│   - 需要真正实现最小版本
+│   - 当前只做:
+│     1. 默认 multicast 地址
+│     2. 默认 UDP 端口
+│     3. 默认 TCP 端口（预留）
+│     4. discovery 超时
+│     5. 是否启用手动输入 fallback
+│
+├── constants.py
+│   模块介绍:
+│   - 统一常量定义
+│
+│   开工版要求:
+│   - 需要真正实现最小版本
+│   - 当前只做:
+│     1. 规则命名常量
+│     2. 默认消息文本
+│     3. 默认日志标签
+│
+├── logging_setup.py
+│   模块介绍:
+│   - 统一日志输出配置
+│
+│   开工版要求:
+│   - 需要真正实现最小版本
+│   - 当前只做控制台 logging
+│
+├── protocol.py
+│   模块介绍:
+│   - 协议定义中心
+│   - 统一 discovery 文本消息格式
+│   - 后续可扩展 TCP 消息
+│
+│   开工版要求:
+│   - 需要真正实现最小版本
+│   - 当前只做:
+│     1. DISCOVER 文本
+│     2. ANNOUNCE 文本
+│     3. MANUAL 地址字符串格式
+│   - 不要实现复杂序列化体系
+│
+├── recovery.py
+│   模块介绍:
+│   - 启动恢复和陈旧状态清理
+│
+│   开工版要求:
+│   - 只写 skeleton
+│   - 不实现实际逻辑
+│
+├── common/
+│   ├── __init__.py
+│   │   模块介绍:
+│   │   - common 包初始化
+│   │
+│   │   开工版要求:
+│   │   - skeleton 即可
+│   │
+│   ├── messages.py
+│   │   模块介绍:
+│   │   - 放共享消息定义
+│   │
+│   │   开工版要求:
+│   │   - 只保留最小文本消息常量
+│   │   - 可与 protocol.py 协同
+│   │
+│   ├── types.py
+│   │   模块介绍:
+│   │   - 放共享数据结构
+│   │
+│   │   开工版要求:
+│   │   - 需要真正实现最小版本
+│   │   - 当前只做:
+│   │     1. DiscoveryResult
+│   │     2. PlatformInfo
+│   │     3. FirewallStatus
+│   │
+│   ├── state.py
+│   │   模块介绍:
+│   │   - 放运行状态枚举
+│   │
+│   │   开工版要求:
+│   │   - 需要真正实现最小版本
+│   │   - 当前只做:
+│   │     1. INIT
+│   │     2. DISCOVERY
+│   │     3. MANUAL_INPUT
+│   │     4. IDLE
+│   │     5. SHUTDOWN
+│   │
+│   └── errors.py
+│       模块介绍:
+│       - 自定义异常
+│
+│       开工版要求:
+│       - skeleton 即可
+│
+├── discovery/
+│   ├── __init__.py
+│   │   模块介绍:
+│   │   - discovery 包初始化
+│   │
+│   │   开工版要求:
+│   │   - skeleton 即可
+│   │
+│   ├── pairing.py
+│   │   模块介绍:
+│   │   - 发现流程入口
+│   │   - 调用 multicast 发送/接收
+│   │   - 失败时交还 supervisor 进入手动输入模式
+│   │
+│   │   开工版要求:
+│   │   - 需要真正实现
+│   │   - 当前只做:
+│   │     1. 发送 discovery 消息
+│   │     2. 等待 announce 回复
+│   │     3. 返回 DiscoveryResult
+│   │     4. discovery 超时后返回失败
+│   │
+│   ├── multicast.py
+│   │   模块介绍:
+│   │   - 低层 UDP multicast 工具
+│   │   - 建立 socket
+│   │   - 发送消息
+│   │   - 接收消息
+│   │   - signal 友好关闭
+│   │
+│   │   开工版要求:
+│   │   - 需要真正实现
+│   │   - 当前只做:
+│   │     1. create_sender()
+│   │     2. create_receiver()
+│   │     3. send_discover()
+│   │     4. recv_announce()
+│   │     5. close()
+│   │
+│   └── fallback.py
+│       模块介绍:
+│       - discovery 失败时的替代方案
+│
+│       开工版要求:
+│       - 需要实现最小版本
+│       - 当前只做:
+│         1. 从命令行读取用户输入 IP/host
+│         2. 打印用户输入结果
+│       - 不实现 subnet scan
+│
+├── adapters/
+│   ├── __init__.py
+│   │   模块介绍:
+│   │   - adapters 包初始化
+│   │
+│   │   开工版要求:
+│   │   - skeleton 即可
+│   │
+│   ├── network.py
+│   │   模块介绍:
+│   │   - 网络底层工具封装
+│   │   - 给 discovery/multicast.py 提供辅助
+│   │
+│   │   开工版要求:
+│   │   - 需要真正实现最小版本
+│   │   - 当前只做:
+│   │     1. socket 创建辅助
+│   │     2. 超时设置
+│   │     3. 关闭辅助
+│   │   - 不实现 TCP runtime
+│   │
+│   ├── platform.py
+│   │   模块介绍:
+│   │   - OS 识别
+│   │   - WSL 识别
+│   │   - 权限检查
+│   │   - Windows 提权入口
+│   │
+│   │   开工版要求:
+│   │   - 需要真正实现
+│   │   - 当前只做:
+│   │     1. detect_os()
+│   │     2. is_wsl()
+│   │     3. is_admin()
+│   │     4. relaunch_as_admin() 仅 Windows
+│   │
+│   ├── audit_log.py
+│   │   模块介绍:
+│   │   - 审计/事件日志接口
+│   │
+│   │   开工版要求:
+│   │   - skeleton 即可
+│   │   - 可只包装 logging
+│   │
+│   ├── process.py
+│   │   模块介绍:
+│   │   - 外部进程封装
+│   │
+│   │   开工版要求:
+│   │   - skeleton 即可
+│   │
+│   └── firewall/
+│       ├── __init__.py
+│       │   模块介绍:
+│       │   - 防火墙统一入口
+│       │
+│       │   开工版要求:
+│       │   - 需要真正实现最小版本
+│       │   - 当前导出:
+│       │     1. ensure_rules()
+│       │     2. cleanup_rules()
+│       │
+│       ├── windows.py
+│       │   模块介绍:
+│       │   - Windows 防火墙适配
+│       │   - 负责添加和删除开工版需要的 UDP 规则
+│       │
+│       │   开工版要求:
+│       │   - 需要真正实现
+│       │   - 当前只做:
+│       │     1. 添加 UDP multicast 端口入站规则
+│       │     2. 删除本项目命名规则
+│       │     3. 仅支持 Private profile
+│       │   - 可用 PowerShell/netsh 或官方 API
+│       │
+│       ├── linux.py
+│       │   模块介绍:
+│       │   - Linux 防火墙适配
+│       │
+│       │   开工版要求:
+│       │   - skeleton 即可
+│       │   - 可以先返回“未实现”
+│       │
+│       └── macos.py
+│           模块介绍:
+│           - macOS 防火墙适配
+│
+│           开工版要求:
+│           - skeleton 即可
+│           - 可以先返回“依赖系统授权/未实现”
+│
+├── main_node/
+│   ├── __init__.py
+│   │   模块介绍:
+│   │   - main_node 包初始化
+│   │
+│   │   开工版要求:
+│   │   - skeleton 即可
+│   │
+│   ├── runtime.py
+│   │   模块介绍:
+│   │   - 后续 scheduler 主循环
+│   │
+│   │   开工版要求:
+│   │   - skeleton only
+│   │   - 不实现调度逻辑
+│   │
+│   ├── registry.py
+│   │   模块介绍:
+│   │   - 后续 worker registry
+│   │
+│   │   开工版要求:
+│   │   - skeleton only
+│   │
+│   ├── dispatcher.py
+│   │   模块介绍:
+│   │   - 后续任务下发
+│   │
+│   │   开工版要求:
+│   │   - skeleton only
+│   │
+│   ├── aggregator.py
+│   │   模块介绍:
+│   │   - 后续结果汇总
+│   │
+│   │   开工版要求:
+│   │   - skeleton only
+│   │
+│   ├── heartbeat.py
+│   │   模块介绍:
+│   │   - 后续 heartbeat 逻辑
+│   │
+│   │   开工版要求:
+│   │   - skeleton only
+│   │
+│   └── handlers.py
+│       模块介绍:
+│       - 后续 scheduler 消息处理
+│
+│       开工版要求:
+│       - skeleton only
+│
+├── compute_node/
+│   ├── __init__.py
+│   │   模块介绍:
+│   │   - compute_node 包初始化
+│   │
+│   │   开工版要求:
+│   │   - skeleton 即可
+│   │
+│   ├── runtime.py
+│   │   模块介绍:
+│   │   - 后续 worker 主循环
+│   │
+│   │   开工版要求:
+│   │   - skeleton only
+│   │
+│   ├── session.py
+│   │   模块介绍:
+│   │   - 后续 worker TCP 会话
+│   │
+│   │   开工版要求:
+│   │   - skeleton only
+│   │
+│   ├── heartbeat.py
+│   │   模块介绍:
+│   │   - 后续 heartbeat 响应
+│   │
+│   │   开工版要求:
+│   │   - skeleton only
+│   │
+│   ├── handlers.py
+│   │   模块介绍:
+│   │   - 后续 worker 消息处理
+│   │
+│   │   开工版要求:
+│   │   - skeleton only
+│   │
+│   └── executor.py
+│       模块介绍:
+│       - 后续 mock/real executor
+│
+│       开工版要求:
+│       - skeleton only
+│
+├── tests/
+│   ├── __init__.py
+│   │   模块介绍:
+│   │   - tests 包初始化
+│   │
+│   │   开工版要求:
+│   │   - skeleton 即可
+│   │
+│   ├── test_platform.py
+│   │   模块介绍:
+│   │   - 测 OS 识别和权限检测
+│   │
+│   │   开工版要求:
+│   │   - 需要最小测试
+│   │
+│   ├── test_firewall.py
+│   │   模块介绍:
+│   │   - 测防火墙接口调用层
+│   │
+│   │   开工版要求:
+│   │   - skeleton 或 minimal mock test
+│   │
+│   ├── test_multicast.py
+│   │   模块介绍:
+│   │   - 测 discovery/multicast 基础行为
+│   │
+│   │   开工版要求:
+│   │   - skeleton 或最小测试
+│   │
+│   ├── test_protocol.py
+│   │   模块介绍:
+│   │   - 测简单文本协议格式
+│   │
+│   │   开工版要求:
+│   │   - 最小测试
+│   │
+│   └── test_manual_fallback.py
+│       模块介绍:
+│       - 测手动输入 fallback
+│
+│       开工版要求:
+│       - skeleton 即可
+│
+├── scripts/
+│   ├── multicast_sender.py
+│   │   模块介绍:
+│   │   - 独立测试发送 multicast
+│   │
+│   │   开工版要求:
+│   │   - 需要真正实现
+│   │
+│   ├── multicast_receiver.py
+│   │   模块介绍:
+│   │   - 独立测试接收 multicast
+│   │
+│   │   开工版要求:
+│   │   - 需要真正实现
+│   │
+│   ├── run_bootstrap.py
+│   │   模块介绍:
+│   │   - 简单启动入口
+│   │
+│   │   开工版要求:
+│   │   - 需要最小实现
+│   │
+│   ├── print_status.py
+│   │   模块介绍:
+│   │   - 打印当前平台、权限、防火墙、discovery 状态
+│   │
+│   │   开工版要求:
+│   │   - 需要最小实现
+│   │
+│   └── cleanup_firewall.py
+│       模块介绍:
+│       - 手动清理项目防火墙规则
+│
+│       开工版要求:
+│       - 需要最小实现
+│
+└── runtime/
+    ├── logs/                              [预留目录]
+    │   模块介绍:
+    │   - 日志输出目录
+    │
+    ├── cache/                             [预留目录]
+    │   模块介绍:
+    │   - 预留缓存
+    │
+    ├── tmp/                               [预留目录]
+    │   模块介绍:
+    │   - 临时文件
+    │
+    └── pids/                              [预留目录]
+        模块介绍:
+        - 预留 pid 文件
+
+
