@@ -4,8 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import socket
-import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -18,10 +18,10 @@ from tcp_speed import (
     DEFAULT_PROGRESS_INTERVAL,
     DEFAULT_STREAMS,
     ThroughputResult,
+    async_recv_json_line,
+    async_send_json_line,
     format_bytes,
     parse_byte_count,
-    recv_json_line,
-    send_json_line,
     summarize_result,
 )
 
@@ -32,40 +32,37 @@ class SenderSessionState:
     bytes_sent: list[int] = field(init=False)
     sender_end_times: list[float | None] = field(init=False)
     start_time: float | None = None
+    ready_count: int = 0
+    start_event: asyncio.Event = field(default_factory=asyncio.Event)
     receiver_result: ThroughputResult | None = None
-    metrics_lock: threading.Lock = field(default_factory=threading.Lock)
-    receiver_lock: threading.Lock = field(default_factory=threading.Lock)
     errors: list[str] = field(default_factory=list)
-    error_lock: threading.Lock = field(default_factory=threading.Lock)
 
     def __post_init__(self) -> None:
         self.bytes_sent = [0] * self.streams
         self.sender_end_times = [None] * self.streams
 
-    def mark_start(self) -> None:
-        with self.metrics_lock:
+    def record_error(self, message: str) -> None:
+        self.errors.append(message)
+        self.start_event.set()
+
+    def mark_ready(self) -> None:
+        self.ready_count += 1
+        if self.ready_count == self.streams:
             self.start_time = time.perf_counter()
+            self.start_event.set()
 
     def add_bytes(self, stream_index: int, amount: int) -> None:
-        with self.metrics_lock:
-            self.bytes_sent[stream_index] += amount
+        self.bytes_sent[stream_index] += amount
 
     def mark_stream_end(self, stream_index: int, end_time: float) -> None:
-        with self.metrics_lock:
-            self.sender_end_times[stream_index] = end_time
+        self.sender_end_times[stream_index] = end_time
 
     def snapshot(self) -> tuple[int, float | None]:
-        with self.metrics_lock:
-            return sum(self.bytes_sent), self.start_time
+        return sum(self.bytes_sent), self.start_time
 
     def set_receiver_result(self, result: ThroughputResult) -> None:
-        with self.receiver_lock:
-            if self.receiver_result is None:
-                self.receiver_result = result
-
-    def record_error(self, message: str) -> None:
-        with self.error_lock:
-            self.errors.append(message)
+        if self.receiver_result is None:
+            self.receiver_result = result
 
 
 @dataclass(slots=True)
@@ -150,8 +147,8 @@ def stream_target_label(args: argparse.Namespace, stream_index: int) -> str:
     return format_bytes(split_total_bytes(args.total_bytes, args.streams, stream_index))
 
 
-def run_send_loop(
-    sock: socket.socket,
+async def run_send_loop(
+    writer: asyncio.StreamWriter,
     *,
     chunk_size: int,
     duration: float | None,
@@ -167,7 +164,8 @@ def run_send_loop(
         remaining = total_bytes
         while remaining > 0:
             block_size = min(chunk_size, remaining)
-            sock.sendall(payload[:block_size])
+            writer.write(payload[:block_size])
+            await writer.drain()
             total_sent += block_size
             remaining -= block_size
             session_state.add_bytes(stream_index, block_size)
@@ -175,7 +173,8 @@ def run_send_loop(
         assert duration is not None
         deadline = start_time + duration
         while True:
-            sock.sendall(payload)
+            writer.write(payload)
+            await writer.drain()
             total_sent += chunk_size
             session_state.add_bytes(stream_index, chunk_size)
             if time.perf_counter() >= deadline:
@@ -186,12 +185,29 @@ def run_send_loop(
     return ThroughputResult(total_sent, max(end_time - start_time, 0.0))
 
 
-def run_stream(
+async def open_stream(
+    args: argparse.Namespace,
+) -> tuple[asyncio.StreamReader, asyncio.StreamWriter, socket.socket, int]:
+    connect_task = asyncio.open_connection(args.host, args.port)
+    reader, writer = await asyncio.wait_for(connect_task, timeout=args.connect_timeout)
+    sock = writer.get_extra_info("socket")
+    if sock is None:
+        raise RuntimeError("socket not available from asyncio transport")
+
+    if args.send_buffer > 0:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, args.send_buffer)
+    if args.tcp_nodelay:
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+    actual_send_buffer = sock.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF)
+    return reader, writer, sock, actual_send_buffer
+
+
+async def run_stream(
     stream_index: int,
     args: argparse.Namespace,
     *,
     session_id: str,
-    start_barrier: threading.Barrier,
     session_state: SenderSessionState,
     outcomes: list[StreamOutcome | None],
 ) -> None:
@@ -200,15 +216,9 @@ def run_stream(
         stream_total_bytes = split_total_bytes(args.total_bytes, args.streams, stream_index)
 
     sock: socket.socket | None = None
+    writer: asyncio.StreamWriter | None = None
     try:
-        sock = socket.create_connection((args.host, args.port), timeout=args.connect_timeout)
-        sock.settimeout(None)
-        if args.send_buffer > 0:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, args.send_buffer)
-        if args.tcp_nodelay:
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-
-        actual_send_buffer = sock.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF)
+        reader, writer, sock, actual_send_buffer = await open_stream(args)
         print(f"stream {stream_index} connected to {args.host}:{args.port}")
         print(f"stream {stream_index} socket send buffer {format_bytes(actual_send_buffer)}")
 
@@ -221,27 +231,35 @@ def run_stream(
             "stream_index": stream_index,
             "streams": args.streams,
         }
-        send_json_line(sock, control)
+        await async_send_json_line(writer, control)
 
-        ready = recv_json_line(sock)
+        ready = await async_recv_json_line(reader)
         if ready.get("status") != "ready":
             message = ready.get("message", "receiver did not acknowledge the test")
             raise RuntimeError(str(message))
 
         print(f"stream {stream_index} ready, target {stream_target_label(args, stream_index)}")
-        start_barrier.wait()
+        session_state.mark_ready()
+        await session_state.start_event.wait()
+        if session_state.errors:
+            return
 
-        sender_result = run_send_loop(
-            sock,
+        sender_result = await run_send_loop(
+            writer,
             chunk_size=args.chunk_size,
             duration=args.duration if stream_total_bytes is None else None,
             total_bytes=stream_total_bytes,
             stream_index=stream_index,
             session_state=session_state,
         )
-        sock.shutdown(socket.SHUT_WR)
+        try:
+            if sock is None:
+                raise RuntimeError("socket missing for half-close")
+            sock.shutdown(socket.SHUT_WR)
+        except OSError:
+            writer.close()
 
-        summary = recv_json_line(sock)
+        summary = await async_recv_json_line(reader)
         if summary.get("status") != "ok":
             message = summary.get("message", "receiver reported an error")
             raise RuntimeError(str(message))
@@ -252,7 +270,6 @@ def run_stream(
                 elapsed_seconds=float(summary["session_elapsed_seconds"]),
             )
         )
-
         outcomes[stream_index] = StreamOutcome(
             stream_index=stream_index,
             send_buffer=actual_send_buffer,
@@ -260,10 +277,10 @@ def run_stream(
         )
     except Exception as exc:
         session_state.record_error(f"stream {stream_index}: {exc}")
-        start_barrier.abort()
     finally:
-        if sock is not None:
-            sock.close()
+        if writer is not None:
+            writer.close()
+            await writer.wait_closed()
 
 
 def build_sender_result(session_state: SenderSessionState) -> ThroughputResult:
@@ -271,28 +288,24 @@ def build_sender_result(session_state: SenderSessionState) -> ThroughputResult:
     if start_time is None:
         return ThroughputResult(total_sent, 0.0)
 
-    with session_state.metrics_lock:
-        end_times = [value for value in session_state.sender_end_times if value is not None]
-
+    end_times = [value for value in session_state.sender_end_times if value is not None]
     if not end_times:
         return ThroughputResult(total_sent, 0.0)
     return ThroughputResult(total_sent, max(max(end_times) - start_time, 0.0))
 
 
-def progress_worker(
-    args: argparse.Namespace,
-    session_state: SenderSessionState,
-    threads: list[threading.Thread],
-    stop_event: threading.Event,
-) -> None:
+async def progress_worker(args: argparse.Namespace, session_state: SenderSessionState) -> None:
     if args.progress_interval <= 0:
         return
 
-    while not stop_event.wait(args.progress_interval):
+    while True:
+        await asyncio.sleep(args.progress_interval)
         total_sent, start_time = session_state.snapshot()
         if start_time is not None:
             print_progress(total_sent, start_time, time.perf_counter())
-        if not any(thread.is_alive() for thread in threads):
+        if session_state.errors:
+            return
+        if all(end_time is not None for end_time in session_state.sender_end_times):
             return
 
 
@@ -306,46 +319,36 @@ def report_stream_results(outcomes: list[StreamOutcome | None]) -> None:
         )
 
 
-def main() -> int:
-    args = parse_args()
+async def async_main(args: argparse.Namespace) -> int:
     session_id = uuid.uuid4().hex
     session_state = SenderSessionState(streams=args.streams)
-    start_barrier = threading.Barrier(args.streams, action=session_state.mark_start)
     outcomes: list[StreamOutcome | None] = [None] * args.streams
 
     target = f"{args.duration:.3f}s" if args.total_bytes is None else format_bytes(args.total_bytes)
     print(f"starting test to {args.host}:{args.port} with {args.streams} stream(s), total target {target}")
     print(f"stream chunk size {format_bytes(args.chunk_size)}")
 
-    threads = [
-        threading.Thread(
-            target=run_stream,
-            args=(stream_index, args),
-            kwargs={
-                "session_id": session_id,
-                "start_barrier": start_barrier,
-                "session_state": session_state,
-                "outcomes": outcomes,
-            },
+    tasks = [
+        asyncio.create_task(
+            run_stream(
+                stream_index,
+                args,
+                session_id=session_id,
+                session_state=session_state,
+                outcomes=outcomes,
+            )
         )
         for stream_index in range(args.streams)
     ]
+    progress_task = asyncio.create_task(progress_worker(args, session_state))
 
-    for thread in threads:
-        thread.start()
-
-    stop_event = threading.Event()
-    progress_thread = threading.Thread(
-        target=progress_worker,
-        args=(args, session_state, threads, stop_event),
-        daemon=True,
-    )
-    progress_thread.start()
-
-    for thread in threads:
-        thread.join()
-
-    stop_event.set()
+    await asyncio.gather(*tasks)
+    if not progress_task.done():
+        progress_task.cancel()
+        try:
+            await progress_task
+        except asyncio.CancelledError:
+            pass
 
     if session_state.errors:
         for message in session_state.errors:
@@ -364,6 +367,11 @@ def main() -> int:
                 f"({sender_result.total_bytes} sent vs {receiver_result.total_bytes} received)"
             )
     return 0
+
+
+def main() -> int:
+    args = parse_args()
+    return asyncio.run(async_main(args))
 
 
 if __name__ == "__main__":

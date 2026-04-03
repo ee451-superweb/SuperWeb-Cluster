@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import socket
@@ -132,3 +133,36 @@ def recv_json_line(sock: socket.socket, *, limit: int = MAX_CONTROL_LINE) -> dic
         if not isinstance(payload, dict):
             raise ValueError("control message must be a JSON object")
         return payload
+
+
+async def async_send_json_line(writer: asyncio.StreamWriter, payload: dict[str, Any]) -> None:
+    """Send a newline-delimited JSON control message over asyncio streams."""
+
+    data = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8") + b"\n"
+    writer.write(data)
+    await writer.drain()
+
+
+async def async_recv_json_line(
+    reader: asyncio.StreamReader,
+    *,
+    limit: int = MAX_CONTROL_LINE,
+) -> dict[str, Any]:
+    """Receive one newline-delimited JSON control message over asyncio streams."""
+
+    try:
+        line = await reader.readuntil(b"\n")
+    except asyncio.IncompleteReadError as exc:
+        if exc.partial:
+            raise ConnectionError("connection closed while waiting for control message") from exc
+        raise ConnectionError("connection closed while waiting for control message") from exc
+    except asyncio.LimitOverrunError as exc:
+        raise ValueError("control message exceeds maximum length") from exc
+
+    if len(line) > limit:
+        raise ValueError("control message exceeds maximum length")
+
+    payload = json.loads(line[:-1].decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("control message must be a JSON object")
+    return payload

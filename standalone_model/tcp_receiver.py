@@ -4,8 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import socket
-import threading
 import time
 from dataclasses import dataclass, field
 
@@ -13,11 +13,12 @@ from tcp_speed import (
     DEFAULT_IDLE_TIMEOUT,
     DEFAULT_PORT,
     DEFAULT_PROGRESS_INTERVAL,
+    MAX_CONTROL_LINE,
     ThroughputResult,
+    async_recv_json_line,
+    async_send_json_line,
     format_bytes,
     parse_byte_count,
-    recv_json_line,
-    send_json_line,
     summarize_result,
 )
 
@@ -28,19 +29,19 @@ class SessionState:
     expected_streams: int
     mode: str
     duration: float | None
-    condition: threading.Condition = field(default_factory=threading.Condition)
     connected_streams: set[int] = field(default_factory=set)
     completed_streams: set[int] = field(default_factory=set)
-    failures: list[str] = field(default_factory=list)
     total_bytes: int = 0
     start_time: float | None = None
     end_time: float | None = None
     active_handlers: int = 0
+    ready_event: asyncio.Event = field(default_factory=asyncio.Event)
+    done_event: asyncio.Event = field(default_factory=asyncio.Event)
+    failure_message: str | None = None
 
 
 class SessionRegistry:
     def __init__(self) -> None:
-        self._lock = threading.Lock()
         self._sessions: dict[str, SessionState] = {}
 
     def register_stream(
@@ -52,41 +53,36 @@ class SessionRegistry:
         mode: str,
         duration: float | None,
     ) -> SessionState:
-        with self._lock:
-            session = self._sessions.get(session_id)
-            if session is None:
-                session = SessionState(
-                    session_id=session_id,
-                    expected_streams=streams,
-                    mode=mode,
-                    duration=duration,
-                )
-                self._sessions[session_id] = session
-            elif session.expected_streams != streams or session.mode != mode:
-                raise ValueError("session parameters do not match earlier streams")
+        session = self._sessions.get(session_id)
+        if session is None:
+            session = SessionState(
+                session_id=session_id,
+                expected_streams=streams,
+                mode=mode,
+                duration=duration,
+            )
+            self._sessions[session_id] = session
+        elif session.expected_streams != streams or session.mode != mode:
+            raise ValueError("session parameters do not match earlier streams")
 
-        with session.condition:
-            if stream_index in session.connected_streams:
-                raise ValueError(f"duplicate stream index {stream_index}")
-            session.connected_streams.add(stream_index)
-            session.active_handlers += 1
-            if len(session.connected_streams) == session.expected_streams:
-                session.condition.notify_all()
-            return session
+        if stream_index in session.connected_streams:
+            raise ValueError(f"duplicate stream index {stream_index}")
 
-    def wait_until_ready(self, session: SessionState, timeout: float) -> None:
-        deadline = time.monotonic() + timeout
-        with session.condition:
-            while len(session.connected_streams) < session.expected_streams and not session.failures:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    session.failures.append("timed out waiting for all streams to connect")
-                    session.condition.notify_all()
-                    break
-                session.condition.wait(remaining)
+        session.connected_streams.add(stream_index)
+        session.active_handlers += 1
+        if len(session.connected_streams) == session.expected_streams:
+            session.ready_event.set()
+        return session
 
-            if session.failures:
-                raise RuntimeError(session.failures[0])
+    async def wait_until_ready(self, session: SessionState, timeout: float) -> None:
+        if not session.ready_event.is_set():
+            try:
+                await asyncio.wait_for(session.ready_event.wait(), timeout=timeout)
+            except asyncio.TimeoutError:
+                self.fail_session(session, "timed out waiting for all streams to connect")
+
+        if session.failure_message is not None:
+            raise RuntimeError(session.failure_message)
 
     def add_stream_result(
         self,
@@ -97,54 +93,42 @@ class SessionRegistry:
         start_time: float | None,
         end_time: float,
     ) -> None:
-        with session.condition:
-            if stream_index in session.completed_streams:
-                raise ValueError(f"duplicate result for stream {stream_index}")
+        if stream_index in session.completed_streams:
+            raise ValueError(f"duplicate result for stream {stream_index}")
 
-            session.completed_streams.add(stream_index)
-            session.total_bytes += total_bytes
-            if start_time is not None:
-                session.start_time = start_time if session.start_time is None else min(session.start_time, start_time)
-            session.end_time = end_time if session.end_time is None else max(session.end_time, end_time)
+        session.completed_streams.add(stream_index)
+        session.total_bytes += total_bytes
+        if start_time is not None:
+            session.start_time = start_time if session.start_time is None else min(session.start_time, start_time)
+        session.end_time = end_time if session.end_time is None else max(session.end_time, end_time)
 
-            if len(session.completed_streams) == session.expected_streams:
-                session.condition.notify_all()
+        if len(session.completed_streams) == session.expected_streams:
+            session.done_event.set()
 
     def fail_session(self, session: SessionState, message: str) -> None:
-        with session.condition:
-            if not session.failures:
-                session.failures.append(message)
-            session.condition.notify_all()
+        if session.failure_message is None:
+            session.failure_message = message
+        session.ready_event.set()
+        session.done_event.set()
 
-    def wait_for_session_result(self, session: SessionState, timeout: float) -> ThroughputResult:
-        deadline = time.monotonic() + timeout
-        with session.condition:
-            while len(session.completed_streams) < session.expected_streams and not session.failures:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    session.failures.append("timed out waiting for all streams to finish")
-                    session.condition.notify_all()
-                    break
-                session.condition.wait(remaining)
+    async def wait_for_session_result(self, session: SessionState, timeout: float) -> ThroughputResult:
+        if not session.done_event.is_set():
+            try:
+                await asyncio.wait_for(session.done_event.wait(), timeout=timeout)
+            except asyncio.TimeoutError:
+                self.fail_session(session, "timed out waiting for all streams to finish")
 
-            if session.failures:
-                raise RuntimeError(session.failures[0])
+        if session.failure_message is not None:
+            raise RuntimeError(session.failure_message)
 
-            elapsed = 0.0
-            if session.start_time is not None and session.end_time is not None:
-                elapsed = max(session.end_time - session.start_time, 0.0)
-            return ThroughputResult(session.total_bytes, elapsed)
+        elapsed = 0.0
+        if session.start_time is not None and session.end_time is not None:
+            elapsed = max(session.end_time - session.start_time, 0.0)
+        return ThroughputResult(session.total_bytes, elapsed)
 
     def release_stream(self, session: SessionState) -> None:
-        remove_session = False
-        with session.condition:
-            session.active_handlers -= 1
-            remove_session = session.active_handlers <= 0
-
-        if not remove_session:
-            return
-
-        with self._lock:
+        session.active_handlers -= 1
+        if session.active_handlers <= 0:
             existing = self._sessions.get(session.session_id)
             if existing is session:
                 self._sessions.pop(session.session_id, None)
@@ -231,26 +215,38 @@ def session_wait_timeout(mode: str, duration: float | None, idle_timeout: float)
     return idle_timeout + 5.0
 
 
-def handle_client(
-    conn: socket.socket,
-    addr: tuple[str, int],
+async def read_payload(reader: asyncio.StreamReader, size: int, idle_timeout: float) -> bytes:
+    return await asyncio.wait_for(reader.read(size), timeout=idle_timeout)
+
+
+async def handle_client(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
     args: argparse.Namespace,
     registry: SessionRegistry,
-    completed_session: threading.Event,
+    completed_session: asyncio.Event,
 ) -> None:
     session: SessionState | None = None
-    conn.settimeout(args.idle_timeout)
-    if args.recv_buffer > 0:
-        conn.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, args.recv_buffer)
+    sock = writer.get_extra_info("socket")
+    if sock is None:
+        writer.close()
+        await writer.wait_closed()
+        return
 
-    actual_recv_buffer = conn.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
-    print(f"accepted connection from {addr[0]}:{addr[1]}")
+    if args.recv_buffer > 0:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, args.recv_buffer)
+
+    actual_recv_buffer = sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+    peername = writer.get_extra_info("peername")
+    peer_host, peer_port = peername[0], peername[1]
+    print(f"accepted connection from {peer_host}:{peer_port}")
     print(f"socket receive buffer {format_bytes(actual_recv_buffer)}")
 
     try:
-        control = recv_json_line(conn)
+        control = await asyncio.wait_for(async_recv_json_line(reader), timeout=args.idle_timeout)
         mode, duration, total_bytes, chunk_size, session_id, stream_index, streams = validate_control_message(control)
         read_size = min(max(chunk_size, 64 * 1024), 1024 * 1024)
+
         session = registry.register_stream(
             session_id=session_id,
             streams=streams,
@@ -258,10 +254,10 @@ def handle_client(
             mode=mode,
             duration=duration,
         )
-        registry.wait_until_ready(session, args.idle_timeout)
+        await registry.wait_until_ready(session, args.idle_timeout)
 
-        send_json_line(
-            conn,
+        await async_send_json_line(
+            writer,
             {
                 "status": "ready",
                 "read_size": read_size,
@@ -279,7 +275,7 @@ def handle_client(
         next_progress = 0.0
 
         while True:
-            chunk = conn.recv(read_size)
+            chunk = await read_payload(reader, read_size, args.idle_timeout)
             if not chunk:
                 break
 
@@ -307,13 +303,13 @@ def handle_client(
             start_time=start_time,
             end_time=end_time,
         )
-        session_result = registry.wait_for_session_result(
+        session_result = await registry.wait_for_session_result(
             session,
             session_wait_timeout(mode, duration, args.idle_timeout),
         )
 
-        send_json_line(
-            conn,
+        await async_send_json_line(
+            writer,
             {
                 "status": "ok",
                 "stream_total_bytes": stream_result.total_bytes,
@@ -332,59 +328,46 @@ def handle_client(
             print(f"session {session_id} aggregate {summarize_result(session_result)} across {streams} stream(s)")
             if args.once:
                 completed_session.set()
-    except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
-        print(f"client {addr[0]}:{addr[1]} failed: {exc}")
+    except (ConnectionError, OSError, RuntimeError, ValueError, asyncio.TimeoutError) as exc:
+        print(f"client {peer_host}:{peer_port} failed: {exc}")
         if session is not None:
             registry.fail_session(session, str(exc))
         try:
-            send_json_line(conn, {"status": "error", "message": str(exc)})
-        except OSError:
+            await async_send_json_line(writer, {"status": "error", "message": str(exc)})
+        except (ConnectionError, OSError, ValueError):
             pass
     finally:
         if session is not None:
             registry.release_stream(session)
-        conn.close()
+        writer.close()
+        await writer.wait_closed()
+
+
+async def async_main(args: argparse.Namespace) -> int:
+    registry = SessionRegistry()
+    completed_session = asyncio.Event()
+
+    server = await asyncio.start_server(
+        lambda reader, writer: handle_client(reader, writer, args, registry, completed_session),
+        host=args.bind,
+        port=args.port,
+        limit=MAX_CONTROL_LINE,
+    )
+
+    actual_port = server.sockets[0].getsockname()[1]
+    print(f"listening on {args.bind}:{actual_port}")
+
+    async with server:
+        if args.once:
+            await completed_session.wait()
+        else:
+            await server.serve_forever()
+    return 0
 
 
 def main() -> int:
     args = parse_args()
-    registry = SessionRegistry()
-    completed_session = threading.Event()
-    worker_threads: list[threading.Thread] = []
-
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind((args.bind, args.port))
-    listener.listen()
-    listener.settimeout(0.5)
-
-    actual_port = listener.getsockname()[1]
-    print(f"listening on {args.bind}:{actual_port}")
-
-    try:
-        while True:
-            worker_threads = [thread for thread in worker_threads if thread.is_alive()]
-            if args.once and completed_session.is_set():
-                return 0
-
-            try:
-                conn, addr = listener.accept()
-            except socket.timeout:
-                continue
-
-            worker = threading.Thread(
-                target=handle_client,
-                args=(conn, addr, args, registry, completed_session),
-            )
-            worker.start()
-            worker_threads.append(worker)
-    except KeyboardInterrupt:
-        print("stopped by user")
-        return 130
-    finally:
-        listener.close()
-        for worker in worker_threads:
-            worker.join(timeout=1.0)
+    return asyncio.run(async_main(args))
 
 
 if __name__ == "__main__":
