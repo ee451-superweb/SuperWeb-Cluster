@@ -19,6 +19,8 @@ The current version implements:
 - scheduler heartbeat plus `HEARTBEAT_OK` acknowledgement handling
 - separate home scheduler connection pools for workers and clients
 - minimal client join and request/response handling on the scheduler
+- a local `performance metrics/` workspace for repeatable CPU/CUDA compute
+  benchmarking
 - automatic promotion into the home scheduler runtime in `main_node/runtime.py`
   when no home scheduler is found
 - manual address fallback when discovery fails
@@ -47,6 +49,10 @@ the implementation plan and can be extended incrementally.
 - `discovery/`: multicast pairing and manual fallback
 - `adapters/`: platform, network, and firewall adapters
 - `proto/`: protobuf schema documents for cross-language interoperability
+- `performance metrics/`: fixed matrix-vector multiplication benchmark suite
+  with Windows C++ CPU and optional CUDA backends
+- `standalone_model/`: small self-contained network experiments for mDNS, TCP,
+  and ZeroMQ throughput checks
 - `scripts/`: helper entry points for manual testing
 - `tests/`: automated checks for discovery and runtime behavior
 
@@ -113,6 +119,18 @@ Start a one-off multicast listener:
 python scripts/multicast_receiver.py --udp-port 5353
 ```
 
+List benchmark presets:
+
+```bash
+python "performance metrics/benchmark.py" --list-presets
+```
+
+Run the local CPU benchmark:
+
+```bash
+python "performance metrics/benchmark.py" --backend cpu --preset standard
+```
+
 ## Notes
 
 - The project is implemented with the Python standard library only.
@@ -134,3 +152,9 @@ python scripts/multicast_receiver.py --udp-port 5353
   report "not implemented" in this kickoff version.
 - Cleanup is best-effort. Windows firewall cleanup can also be called manually
   with `python scripts/cleanup_firewall.py`.
+- The benchmark workspace writes a summary-only report to
+  `performance metrics/result.json` and auto-builds local backend binaries under
+  backend-specific `build/` directories.
+- Benchmark datasets under `performance metrics/.../input matrix/generated/`
+  and benchmark reports are treated as local generated artifacts and are not
+  meant to stay tracked in git.

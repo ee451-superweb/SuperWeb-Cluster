@@ -5,6 +5,10 @@
 1. mDNS 收发端，用来验证局域网或校园 Wi-Fi 上的 `224.0.0.251:5353` 是否能通。
 2. TCP 吞吐测试端，用来粗测两台机器之间应用层 TCP 发送/接收速度。
 
+如果你要跑固定矩阵向量乘法的 CPU/CUDA benchmark，现在请看
+`../performance metrics/README.md`。`standalone_model/` 只保留网络连通性和
+吞吐实验，不负责计算性能评分。
+
 ## 文件
 
 - `receiver.py`: mDNS 接收端。加入组播组，收到目标服务的 PTR 查询后，回一个包含 `PTR + SRV + TXT + A` 的单播响应。

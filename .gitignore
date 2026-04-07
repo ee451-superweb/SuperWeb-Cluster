@@ -205,3 +205,14 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Performance metrics generated artifacts
+/performance metrics/result.json
+/performance metrics/fixed_matrix_vector_multiplication/input matrix/generated/
+/performance metrics/**/build/
+/performance metrics/**/*.exe
+/performance metrics/**/*.obj
+/performance metrics/**/*.ilk
+/performance metrics/**/*.pdb
+/performance metrics/**/*.lib
+/performance metrics/**/*.exp
