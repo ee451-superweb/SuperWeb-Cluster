@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import signal
 import socket
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Awaitable, Callable, TypeVar
 
 DEFAULT_PORT = 52021
 DEFAULT_CHUNK_SIZE = 256 * 1024
@@ -16,7 +17,9 @@ DEFAULT_PROGRESS_INTERVAL = 1.0
 DEFAULT_CONNECT_TIMEOUT = 5.0
 DEFAULT_IDLE_TIMEOUT = 15.0
 DEFAULT_STREAMS = 1
+INTERRUPT_POLL_INTERVAL = 0.25
 MAX_CONTROL_LINE = 64 * 1024
+T = TypeVar("T")
 
 SIZE_RE = re.compile(r"^(?P<number>\d+(?:\.\d+)?)(?P<unit>[a-zA-Z]*)$")
 SIZE_UNITS = {
@@ -57,6 +60,10 @@ class ThroughputResult:
         if self.elapsed_seconds <= 0:
             return 0.0
         return (self.total_bytes * 8.0) / self.elapsed_seconds / 1_000_000
+
+
+class UserInterrupted(Exception):
+    """Raised when the user requests shutdown with Ctrl-C or SIGTERM."""
 
 
 def parse_byte_count(text: str) -> int:
@@ -166,3 +173,86 @@ async def async_recv_json_line(
     if not isinstance(payload, dict):
         raise ValueError("control message must be a JSON object")
     return payload
+
+
+def install_interrupt_event(
+    loop: asyncio.AbstractEventLoop,
+    *,
+    announce: bool = True,
+) -> tuple[asyncio.Event, Callable[[], None]]:
+    """Install SIGINT/SIGTERM handlers that flip an asyncio Event."""
+
+    stop_event = asyncio.Event()
+    installed: dict[int, Any] = {}
+    announced = False
+
+    def handler(signum: int, _frame: object) -> None:
+        nonlocal announced
+        if announce and not announced:
+            print("stopping...")
+            announced = True
+        loop.call_soon_threadsafe(stop_event.set)
+
+    signals = [signal.SIGINT]
+    if hasattr(signal, "SIGTERM"):
+        signals.append(signal.SIGTERM)
+
+    for current in signals:
+        installed[current] = signal.getsignal(current)
+        signal.signal(current, handler)
+
+    def restore() -> None:
+        for current, previous in installed.items():
+            signal.signal(current, previous)
+
+    return stop_event, restore
+
+
+async def wait_for_interruptible(
+    awaitable_factory: Callable[[], Awaitable[T]],
+    stop_event: asyncio.Event,
+    *,
+    timeout: float | None = None,
+    poll_interval: float = INTERRUPT_POLL_INTERVAL,
+) -> T:
+    """Repeatedly await an operation while checking for Ctrl-C."""
+
+    deadline = None if timeout is None else asyncio.get_running_loop().time() + timeout
+
+    while True:
+        if stop_event.is_set():
+            raise UserInterrupted()
+
+        current_timeout = poll_interval
+        if deadline is not None:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            current_timeout = min(current_timeout, remaining)
+
+        try:
+            return await asyncio.wait_for(awaitable_factory(), timeout=current_timeout)
+        except asyncio.TimeoutError:
+            if stop_event.is_set():
+                raise UserInterrupted() from None
+            if deadline is not None and asyncio.get_running_loop().time() >= deadline:
+                raise
+
+
+async def sleep_interruptible(
+    delay: float,
+    stop_event: asyncio.Event,
+    *,
+    poll_interval: float = INTERRUPT_POLL_INTERVAL,
+) -> None:
+    """Sleep in small slices so Ctrl-C stays responsive."""
+
+    deadline = asyncio.get_running_loop().time() + delay
+    while True:
+        if stop_event.is_set():
+            raise UserInterrupted()
+
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            return
+        await asyncio.sleep(min(poll_interval, remaining))

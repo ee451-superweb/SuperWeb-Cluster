@@ -80,6 +80,9 @@ def main() -> int:
 
         print("no matching mDNS response received")
         return 1
+    except KeyboardInterrupt:
+        print("stopped by user")
+        return 130
     finally:
         safe_close(sock)
 

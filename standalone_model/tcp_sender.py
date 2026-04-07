@@ -17,12 +17,17 @@ from tcp_speed import (
     DEFAULT_PORT,
     DEFAULT_PROGRESS_INTERVAL,
     DEFAULT_STREAMS,
+    INTERRUPT_POLL_INTERVAL,
     ThroughputResult,
+    UserInterrupted,
     async_recv_json_line,
     async_send_json_line,
     format_bytes,
+    install_interrupt_event,
     parse_byte_count,
+    sleep_interruptible,
     summarize_result,
+    wait_for_interruptible,
 )
 
 
@@ -155,6 +160,7 @@ async def run_send_loop(
     total_bytes: int | None,
     stream_index: int,
     session_state: SenderSessionState,
+    stop_event: asyncio.Event,
 ) -> ThroughputResult:
     payload = b"\0" * chunk_size
     total_sent = 0
@@ -163,6 +169,8 @@ async def run_send_loop(
     if total_bytes is not None:
         remaining = total_bytes
         while remaining > 0:
+            if stop_event.is_set():
+                raise UserInterrupted()
             block_size = min(chunk_size, remaining)
             writer.write(payload[:block_size])
             await writer.drain()
@@ -173,6 +181,8 @@ async def run_send_loop(
         assert duration is not None
         deadline = start_time + duration
         while True:
+            if stop_event.is_set():
+                raise UserInterrupted()
             writer.write(payload)
             await writer.drain()
             total_sent += chunk_size
@@ -210,6 +220,7 @@ async def run_stream(
     session_id: str,
     session_state: SenderSessionState,
     outcomes: list[StreamOutcome | None],
+    stop_event: asyncio.Event,
 ) -> None:
     stream_total_bytes = None
     if args.total_bytes is not None:
@@ -233,14 +244,14 @@ async def run_stream(
         }
         await async_send_json_line(writer, control)
 
-        ready = await async_recv_json_line(reader)
+        ready = await wait_for_interruptible(lambda: async_recv_json_line(reader), stop_event)
         if ready.get("status") != "ready":
             message = ready.get("message", "receiver did not acknowledge the test")
             raise RuntimeError(str(message))
 
         print(f"stream {stream_index} ready, target {stream_target_label(args, stream_index)}")
         session_state.mark_ready()
-        await session_state.start_event.wait()
+        await wait_for_interruptible(lambda: session_state.start_event.wait(), stop_event)
         if session_state.errors:
             return
 
@@ -251,6 +262,7 @@ async def run_stream(
             total_bytes=stream_total_bytes,
             stream_index=stream_index,
             session_state=session_state,
+            stop_event=stop_event,
         )
         try:
             if sock is None:
@@ -259,7 +271,7 @@ async def run_stream(
         except OSError:
             writer.close()
 
-        summary = await async_recv_json_line(reader)
+        summary = await wait_for_interruptible(lambda: async_recv_json_line(reader), stop_event)
         if summary.get("status") != "ok":
             message = summary.get("message", "receiver reported an error")
             raise RuntimeError(str(message))
@@ -275,6 +287,8 @@ async def run_stream(
             send_buffer=actual_send_buffer,
             sender_result=sender_result,
         )
+    except UserInterrupted:
+        session_state.record_error("stopped by user")
     except Exception as exc:
         session_state.record_error(f"stream {stream_index}: {exc}")
     finally:
@@ -294,19 +308,26 @@ def build_sender_result(session_state: SenderSessionState) -> ThroughputResult:
     return ThroughputResult(total_sent, max(max(end_times) - start_time, 0.0))
 
 
-async def progress_worker(args: argparse.Namespace, session_state: SenderSessionState) -> None:
+async def progress_worker(
+    args: argparse.Namespace,
+    session_state: SenderSessionState,
+    stop_event: asyncio.Event,
+) -> None:
     if args.progress_interval <= 0:
         return
 
-    while True:
-        await asyncio.sleep(args.progress_interval)
-        total_sent, start_time = session_state.snapshot()
-        if start_time is not None:
-            print_progress(total_sent, start_time, time.perf_counter())
-        if session_state.errors:
-            return
-        if all(end_time is not None for end_time in session_state.sender_end_times):
-            return
+    try:
+        while True:
+            await sleep_interruptible(args.progress_interval, stop_event)
+            total_sent, start_time = session_state.snapshot()
+            if start_time is not None:
+                print_progress(total_sent, start_time, time.perf_counter())
+            if session_state.errors or stop_event.is_set():
+                return
+            if all(end_time is not None for end_time in session_state.sender_end_times):
+                return
+    except UserInterrupted:
+        return
 
 
 def report_stream_results(outcomes: list[StreamOutcome | None]) -> None:
@@ -320,6 +341,7 @@ def report_stream_results(outcomes: list[StreamOutcome | None]) -> None:
 
 
 async def async_main(args: argparse.Namespace) -> int:
+    stop_event, restore_handlers = install_interrupt_event(asyncio.get_running_loop())
     session_id = uuid.uuid4().hex
     session_state = SenderSessionState(streams=args.streams)
     outcomes: list[StreamOutcome | None] = [None] * args.streams
@@ -336,42 +358,69 @@ async def async_main(args: argparse.Namespace) -> int:
                 session_id=session_id,
                 session_state=session_state,
                 outcomes=outcomes,
+                stop_event=stop_event,
             )
         )
         for stream_index in range(args.streams)
     ]
-    progress_task = asyncio.create_task(progress_worker(args, session_state))
+    progress_task = asyncio.create_task(progress_worker(args, session_state, stop_event))
 
-    await asyncio.gather(*tasks)
-    if not progress_task.done():
-        progress_task.cancel()
-        try:
-            await progress_task
-        except asyncio.CancelledError:
-            pass
+    try:
+        while True:
+            if stop_event.is_set():
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                return 130
+            if all(task.done() for task in tasks):
+                break
+            await asyncio.sleep(INTERRUPT_POLL_INTERVAL)
 
-    if session_state.errors:
-        for message in session_state.errors:
-            print(f"error {message}")
-        return 1
+        await asyncio.gather(*tasks)
+        if not progress_task.done():
+            progress_task.cancel()
+            try:
+                await progress_task
+            except asyncio.CancelledError:
+                pass
 
-    sender_result = build_sender_result(session_state)
-    receiver_result = session_state.receiver_result
-    report_stream_results(outcomes)
-    print(f"sender   {summarize_result(sender_result)} across {args.streams} stream(s)")
-    if receiver_result is not None:
-        print(f"receiver {summarize_result(receiver_result)} across {args.streams} stream(s)")
-        if receiver_result.total_bytes != sender_result.total_bytes:
-            print(
-                "warning: sender and receiver byte counts differ "
-                f"({sender_result.total_bytes} sent vs {receiver_result.total_bytes} received)"
-            )
-    return 0
+        if session_state.errors:
+            messages = [message for message in session_state.errors if message != "stopped by user"]
+            if not messages and stop_event.is_set():
+                return 130
+            for message in messages or session_state.errors:
+                print(f"error {message}")
+            return 1
+
+        sender_result = build_sender_result(session_state)
+        receiver_result = session_state.receiver_result
+        report_stream_results(outcomes)
+        print(f"sender   {summarize_result(sender_result)} across {args.streams} stream(s)")
+        if receiver_result is not None:
+            print(f"receiver {summarize_result(receiver_result)} across {args.streams} stream(s)")
+            if receiver_result.total_bytes != sender_result.total_bytes:
+                print(
+                    "warning: sender and receiver byte counts differ "
+                    f"({sender_result.total_bytes} sent vs {receiver_result.total_bytes} received)"
+                )
+        return 0
+    finally:
+        if not progress_task.done():
+            progress_task.cancel()
+            try:
+                await progress_task
+            except asyncio.CancelledError:
+                pass
+        restore_handlers()
 
 
 def main() -> int:
     args = parse_args()
-    return asyncio.run(async_main(args))
+    try:
+        return asyncio.run(async_main(args))
+    except KeyboardInterrupt:
+        print("stopped by user")
+        return 130
 
 
 if __name__ == "__main__":

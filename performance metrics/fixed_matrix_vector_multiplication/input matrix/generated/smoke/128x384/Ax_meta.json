@@ -1,0 +1,29 @@
+{
+  "workload": {
+    "name": "smoke-128x384",
+    "preset": "smoke",
+    "rows": 128,
+    "cols": 384,
+    "flops_per_run": 98304,
+    "ideal_seconds": 0.02,
+    "zero_score_seconds": 0.75
+  },
+  "A": {
+    "file": "A_f32_128x384.bin",
+    "dtype": "float32",
+    "endianness": "little",
+    "order": "row-major",
+    "bytes": 196608,
+    "seed": "0x123456789ABCDEF0"
+  },
+  "x": {
+    "file": "x_f32_384.bin",
+    "dtype": "float32",
+    "endianness": "little",
+    "shape": [
+      384
+    ],
+    "bytes": 1536,
+    "seed": "0x0FEDCBA987654321"
+  }
+}

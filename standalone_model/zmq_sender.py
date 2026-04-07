@@ -14,10 +14,15 @@ from tcp_speed import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_DURATION,
     DEFAULT_PROGRESS_INTERVAL,
+    INTERRUPT_POLL_INTERVAL,
     ThroughputResult,
+    UserInterrupted,
     format_bytes,
+    install_interrupt_event,
     parse_byte_count,
+    sleep_interruptible,
     summarize_result,
+    wait_for_interruptible,
 )
 
 try:
@@ -95,7 +100,11 @@ def print_progress(total_sent: int, start_time: float, now: float) -> None:
     print(f"progress {summarize_result(result)}")
 
 
-async def run_send_loop(socket: zmq.asyncio.Socket, args: argparse.Namespace) -> ThroughputResult:
+async def run_send_loop(
+    socket: zmq.asyncio.Socket,
+    args: argparse.Namespace,
+    stop_event: asyncio.Event,
+) -> ThroughputResult:
     payload = b"\0" * args.chunk_size
     total_sent = 0
     start_time = time.perf_counter()
@@ -104,6 +113,8 @@ async def run_send_loop(socket: zmq.asyncio.Socket, args: argparse.Namespace) ->
     if args.total_bytes is not None:
         remaining = args.total_bytes
         while remaining > 0:
+            if stop_event.is_set():
+                raise UserInterrupted()
             block_size = min(args.chunk_size, remaining)
             block = payload if block_size == args.chunk_size else memoryview(payload)[:block_size]
             await socket.send(block, copy=False)
@@ -117,6 +128,8 @@ async def run_send_loop(socket: zmq.asyncio.Socket, args: argparse.Namespace) ->
     else:
         deadline = start_time + args.duration
         while True:
+            if stop_event.is_set():
+                raise UserInterrupted()
             await socket.send(payload, copy=False)
             total_sent += args.chunk_size
 
@@ -132,6 +145,7 @@ async def run_send_loop(socket: zmq.asyncio.Socket, args: argparse.Namespace) ->
 
 
 async def async_main(args: argparse.Namespace) -> int:
+    stop_event, restore_handlers = install_interrupt_event(asyncio.get_running_loop())
     context = zmq.asyncio.Context.instance()
     socket = context.socket(zmq.PAIR)
     socket.linger = 0
@@ -159,7 +173,7 @@ async def async_main(args: argparse.Namespace) -> int:
         }
         await socket.send(encode_json(header))
 
-        ready = decode_json(await socket.recv())
+        ready = decode_json(await wait_for_interruptible(lambda: socket.recv(), stop_event))
         if ready.get("status") != "ready":
             message = ready.get("message", "receiver did not acknowledge the test")
             raise RuntimeError(str(message))
@@ -167,10 +181,10 @@ async def async_main(args: argparse.Namespace) -> int:
         target = f"{args.duration:.3f}s" if args.total_bytes is None else format_bytes(args.total_bytes)
         print(f"starting test, target {target}, chunk {format_bytes(args.chunk_size)}")
 
-        sender_result = await run_send_loop(socket, args)
+        sender_result = await run_send_loop(socket, args, stop_event)
         await socket.send(b"")
 
-        summary = decode_json(await socket.recv())
+        summary = decode_json(await wait_for_interruptible(lambda: socket.recv(), stop_event))
         if summary.get("status") != "ok":
             message = summary.get("message", "receiver reported an error")
             raise RuntimeError(str(message))
@@ -189,8 +203,11 @@ async def async_main(args: argparse.Namespace) -> int:
                 f"({sender_result.total_bytes} sent vs {receiver_result.total_bytes} received)"
             )
         return 0
+    except UserInterrupted:
+        return 130
     finally:
         socket.close()
+        restore_handlers()
 
 
 def main() -> int:
@@ -203,7 +220,11 @@ def main() -> int:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", DeprecationWarning)
             asyncio.set_event_loop_policy(selector_policy())
-    return asyncio.run(async_main(args))
+    try:
+        return asyncio.run(async_main(args))
+    except KeyboardInterrupt:
+        print("stopped by user")
+        return 130
 
 
 if __name__ == "__main__":

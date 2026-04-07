@@ -13,13 +13,18 @@ from tcp_speed import (
     DEFAULT_IDLE_TIMEOUT,
     DEFAULT_PORT,
     DEFAULT_PROGRESS_INTERVAL,
+    INTERRUPT_POLL_INTERVAL,
     MAX_CONTROL_LINE,
     ThroughputResult,
+    UserInterrupted,
     async_recv_json_line,
     async_send_json_line,
     format_bytes,
+    install_interrupt_event,
     parse_byte_count,
+    sleep_interruptible,
     summarize_result,
+    wait_for_interruptible,
 )
 
 
@@ -225,6 +230,7 @@ async def handle_client(
     args: argparse.Namespace,
     registry: SessionRegistry,
     completed_session: asyncio.Event,
+    stop_event: asyncio.Event,
 ) -> None:
     session: SessionState | None = None
     sock = writer.get_extra_info("socket")
@@ -243,7 +249,11 @@ async def handle_client(
     print(f"socket receive buffer {format_bytes(actual_recv_buffer)}")
 
     try:
-        control = await asyncio.wait_for(async_recv_json_line(reader), timeout=args.idle_timeout)
+        control = await wait_for_interruptible(
+            lambda: async_recv_json_line(reader),
+            stop_event,
+            timeout=args.idle_timeout,
+        )
         mode, duration, total_bytes, chunk_size, session_id, stream_index, streams = validate_control_message(control)
         read_size = min(max(chunk_size, 64 * 1024), 1024 * 1024)
 
@@ -254,7 +264,10 @@ async def handle_client(
             mode=mode,
             duration=duration,
         )
-        await registry.wait_until_ready(session, args.idle_timeout)
+        await wait_for_interruptible(
+            lambda: registry.wait_until_ready(session, args.idle_timeout),
+            stop_event,
+        )
 
         await async_send_json_line(
             writer,
@@ -275,7 +288,10 @@ async def handle_client(
         next_progress = 0.0
 
         while True:
-            chunk = await read_payload(reader, read_size, args.idle_timeout)
+            chunk = await wait_for_interruptible(
+                lambda: read_payload(reader, read_size, args.idle_timeout),
+                stop_event,
+            )
             if not chunk:
                 break
 
@@ -303,9 +319,12 @@ async def handle_client(
             start_time=start_time,
             end_time=end_time,
         )
-        session_result = await registry.wait_for_session_result(
-            session,
-            session_wait_timeout(mode, duration, args.idle_timeout),
+        session_result = await wait_for_interruptible(
+            lambda: registry.wait_for_session_result(
+                session,
+                session_wait_timeout(mode, duration, args.idle_timeout),
+            ),
+            stop_event,
         )
 
         await async_send_json_line(
@@ -328,6 +347,9 @@ async def handle_client(
             print(f"session {session_id} aggregate {summarize_result(session_result)} across {streams} stream(s)")
             if args.once:
                 completed_session.set()
+    except UserInterrupted:
+        if session is not None:
+            registry.fail_session(session, "stopped by user")
     except (ConnectionError, OSError, RuntimeError, ValueError, asyncio.TimeoutError) as exc:
         print(f"client {peer_host}:{peer_port} failed: {exc}")
         if session is not None:
@@ -344,11 +366,12 @@ async def handle_client(
 
 
 async def async_main(args: argparse.Namespace) -> int:
+    stop_event, restore_handlers = install_interrupt_event(asyncio.get_running_loop())
     registry = SessionRegistry()
     completed_session = asyncio.Event()
 
     server = await asyncio.start_server(
-        lambda reader, writer: handle_client(reader, writer, args, registry, completed_session),
+        lambda reader, writer: handle_client(reader, writer, args, registry, completed_session, stop_event),
         host=args.bind,
         port=args.port,
         limit=MAX_CONTROL_LINE,
@@ -357,17 +380,28 @@ async def async_main(args: argparse.Namespace) -> int:
     actual_port = server.sockets[0].getsockname()[1]
     print(f"listening on {args.bind}:{actual_port}")
 
-    async with server:
-        if args.once:
-            await completed_session.wait()
-        else:
-            await server.serve_forever()
-    return 0
+    try:
+        async with server:
+            await server.start_serving()
+            while True:
+                if stop_event.is_set():
+                    return 130
+                if args.once and completed_session.is_set():
+                    return 0
+                await sleep_interruptible(INTERRUPT_POLL_INTERVAL, stop_event)
+    except UserInterrupted:
+        return 130
+    finally:
+        restore_handlers()
 
 
 def main() -> int:
     args = parse_args()
-    return asyncio.run(async_main(args))
+    try:
+        return asyncio.run(async_main(args))
+    except KeyboardInterrupt:
+        print("stopped by user")
+        return 130
 
 
 if __name__ == "__main__":

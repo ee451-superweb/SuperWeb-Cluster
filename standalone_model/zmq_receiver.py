@@ -14,9 +14,12 @@ from tcp_speed import (
     DEFAULT_IDLE_TIMEOUT,
     DEFAULT_PROGRESS_INTERVAL,
     ThroughputResult,
+    UserInterrupted,
     format_bytes,
+    install_interrupt_event,
     parse_byte_count,
     summarize_result,
+    wait_for_interruptible,
 )
 
 try:
@@ -82,11 +85,8 @@ def decode_json(raw: bytes) -> dict[str, object]:
     return payload
 
 
-async def recv_with_timeout(socket: zmq.asyncio.Socket, timeout: float) -> bytes | zmq.Frame:
-    return await asyncio.wait_for(socket.recv(copy=False), timeout=timeout)
-
-
 async def async_main(args: argparse.Namespace) -> int:
+    stop_event, restore_handlers = install_interrupt_event(asyncio.get_running_loop())
     context = zmq.asyncio.Context.instance()
     socket = context.socket(zmq.PAIR)
     socket.linger = 0
@@ -105,7 +105,15 @@ async def async_main(args: argparse.Namespace) -> int:
         print(f"ZeroMQ receive buffer {format_bytes(actual_rcvbuf)}")
         print(f"ZeroMQ receive HWM {actual_rcvhwm} message(s)")
 
-        header = decode_json(bytes(await recv_with_timeout(socket, args.idle_timeout)))
+        header = decode_json(
+            bytes(
+                await wait_for_interruptible(
+                    lambda: socket.recv(copy=False),
+                    stop_event,
+                    timeout=args.idle_timeout,
+                )
+            )
+        )
         mode = header.get("mode")
         if mode not in {"duration", "bytes"}:
             raise ValueError(f"unsupported mode: {mode!r}")
@@ -131,7 +139,11 @@ async def async_main(args: argparse.Namespace) -> int:
         next_progress = 0.0
 
         while True:
-            frame = await recv_with_timeout(socket, args.idle_timeout)
+            frame = await wait_for_interruptible(
+                lambda: socket.recv(copy=False),
+                stop_event,
+                timeout=args.idle_timeout,
+            )
             if len(frame) == 0:
                 break
 
@@ -163,8 +175,11 @@ async def async_main(args: argparse.Namespace) -> int:
         )
         print(f"completed {summarize_result(result)}")
         return 0
+    except UserInterrupted:
+        return 130
     finally:
         socket.close()
+        restore_handlers()
 
 
 def main() -> int:
@@ -177,7 +192,11 @@ def main() -> int:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", DeprecationWarning)
             asyncio.set_event_loop_policy(selector_policy())
-    return asyncio.run(async_main(args))
+    try:
+        return asyncio.run(async_main(args))
+    except KeyboardInterrupt:
+        print("stopped by user")
+        return 130
 
 
 if __name__ == "__main__":
