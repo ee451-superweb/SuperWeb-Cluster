@@ -210,9 +210,15 @@ __marimo__/
 /performance metrics/result.json
 /performance metrics/fixed_matrix_vector_multiplication/input matrix/generated/
 /performance metrics/**/build/
+/performance metrics/fixed_matrix_vector_multiplication/cpu/windows/build/*
+/performance metrics/fixed_matrix_vector_multiplication/cuda/build/*
 /performance metrics/**/*.exe
 /performance metrics/**/*.obj
 /performance metrics/**/*.ilk
 /performance metrics/**/*.pdb
 /performance metrics/**/*.lib
 /performance metrics/**/*.exp
+!/performance metrics/fixed_matrix_vector_multiplication/cpu/windows/build/
+!/performance metrics/fixed_matrix_vector_multiplication/cuda/build/
+!/performance metrics/fixed_matrix_vector_multiplication/cpu/windows/build/fmvm_cpu_windows.exe
+!/performance metrics/fixed_matrix_vector_multiplication/cuda/build/fmvm_cuda_runner.exe

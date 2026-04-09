@@ -1,57 +1,57 @@
-"""Preset workloads chosen to keep the full benchmark under five minutes."""
+"""Benchmark constants for the fixed matrix-vector workload.
+
+This module is intentionally small. Its whole job is to answer:
+
+- what shape should `A` and `x` have by default?
+- what score window should we use when mapping latency to a linear score?
+
+The default matrix shape below is exactly the one requested by the user:
+
+- `A`: 16384 x 32768 float32, which is 2 GiB on disk
+- `x`: 32768 float32
+"""
 
 from __future__ import annotations
 
-from models import WorkloadSpec
+from models import BenchmarkSpec
 
-PRESET_WORKLOADS: dict[str, tuple[int, int, float, float]] = {
-    # rows, cols, ideal_seconds, zero_score_seconds
-    "smoke": (128, 384, 0.02, 0.75),
-    "quick": (512, 1024, 0.05, 2.0),
-    "standard": (1024, 4096, 0.10, 6.0),
-    "extended": (2048, 4096, 0.20, 12.0),
-}
+DEFAULT_ROWS = 16_384
+DEFAULT_COLS = 32_768
+
+# These scoring constants keep the score linear while still leaving room for
+# slower CPUs and future accelerators to spread out meaningfully.
+DEFAULT_IDEAL_SECONDS = 0.50
+DEFAULT_ZERO_SCORE_SECONDS = 30.0
 
 
-def resolve_workload(
-    preset: str = "standard",
+def build_benchmark_spec(
     *,
     rows: int | None = None,
     cols: int | None = None,
-) -> WorkloadSpec:
-    """Return a benchmark workload from a preset or explicit shape."""
+    ideal_seconds: float = DEFAULT_IDEAL_SECONDS,
+    zero_score_seconds: float = DEFAULT_ZERO_SCORE_SECONDS,
+) -> BenchmarkSpec:
+    """Return the benchmark shape.
 
-    if rows is not None or cols is not None:
-        if rows is None or cols is None:
-            raise ValueError("rows and cols must be provided together")
-        if rows <= 0 or cols <= 0:
-            raise ValueError("rows and cols must be positive")
-        name = f"custom-{rows}x{cols}"
-        # For custom workloads, keep the same linear score window shape but
-        # scale it with operation size so large matrices are not unfairly
-        # penalized.
-        flops = 2 * rows * cols
-        ideal_seconds = max(0.05, flops / 1.0e9)
-        zero_score_seconds = max(3.0, flops / 5.0e7)
-        return WorkloadSpec(
-            name=name,
-            preset="custom",
-            rows=rows,
-            cols=cols,
-            ideal_seconds=ideal_seconds,
-            zero_score_seconds=zero_score_seconds,
-        )
+    The benchmark defaults to the fixed 2 GiB matrix. `rows` and `cols` stay as
+    optional overrides so tests can use a tiny dataset without allocating the
+    full production-sized matrix.
+    """
 
-    if preset not in PRESET_WORKLOADS:
-        known = ", ".join(sorted(PRESET_WORKLOADS))
-        raise ValueError(f"unknown preset {preset!r}; expected one of: {known}")
+    resolved_rows = DEFAULT_ROWS if rows is None else rows
+    resolved_cols = DEFAULT_COLS if cols is None else cols
 
-    preset_rows, preset_cols, ideal_seconds, zero_score_seconds = PRESET_WORKLOADS[preset]
-    return WorkloadSpec(
-        name=f"{preset}-{preset_rows}x{preset_cols}",
-        preset=preset,
-        rows=preset_rows,
-        cols=preset_cols,
+    if resolved_rows <= 0 or resolved_cols <= 0:
+        raise ValueError("rows and cols must be positive")
+    if ideal_seconds <= 0:
+        raise ValueError("ideal_seconds must be positive")
+    if zero_score_seconds <= ideal_seconds:
+        raise ValueError("zero_score_seconds must be greater than ideal_seconds")
+
+    return BenchmarkSpec(
+        name=f"fixed-fmvm-{resolved_rows}x{resolved_cols}",
+        rows=resolved_rows,
+        cols=resolved_cols,
         ideal_seconds=ideal_seconds,
         zero_score_seconds=zero_score_seconds,
     )

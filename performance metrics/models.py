@@ -1,4 +1,15 @@
-"""Shared dataclasses for the performance benchmark framework."""
+"""Shared data objects for the performance-metrics workspace.
+
+These dataclasses intentionally keep the rest of the code simple:
+
+- `BenchmarkSpec` answers "what exact matrix/vector shape are we benchmarking?"
+- `DatasetLayout` answers "where do A.bin and x.bin live on disk?"
+- `TrialRecord` stores the best metrics reported by one compute program
+- `BackendResult` stores the overall outcome for one hardware backend
+
+Keeping these structures in one file makes the other modules easier to read,
+because they can pass around named objects instead of ad-hoc dictionaries.
+"""
 
 from __future__ import annotations
 
@@ -8,65 +19,80 @@ from typing import Any
 
 
 @dataclass(slots=True)
-class WorkloadSpec:
-    """One benchmark workload for fixed matrix-vector multiplication."""
+class BenchmarkSpec:
+    """One fixed matrix-vector benchmark problem plus its scoring window.
+
+    The benchmark always measures the operation:
+
+        y = A x
+
+    where `A` is a dense float32 matrix and `x` is a dense float32 vector.
+    """
 
     name: str
-    preset: str
     rows: int
     cols: int
     ideal_seconds: float
     zero_score_seconds: float
-    verify_atol: float = 1e-3
-    verify_rtol: float = 1e-4
+
+    @property
+    def matrix_bytes(self) -> int:
+        """Return the on-disk byte size of `A.bin`."""
+
+        return self.rows * self.cols * 4
+
+    @property
+    def vector_bytes(self) -> int:
+        """Return the on-disk byte size of `x.bin`."""
+
+        return self.cols * 4
 
     @property
     def flops_per_run(self) -> int:
+        """Count one multiply and one add per matrix entry."""
+
         return 2 * self.rows * self.cols
 
 
 @dataclass(slots=True)
-class DatasetPaths:
-    """Files that define one deterministic benchmark dataset."""
+class DatasetLayout:
+    """File locations for the generated input dataset."""
 
     root_dir: Path
     matrix_path: Path
     vector_path: Path
     meta_path: Path
-    transposed_matrix_path: Path
 
 
 @dataclass(slots=True)
 class TrialRecord:
-    """One measured trial for a backend/configuration pair."""
+    """The best measured result returned by one backend executable."""
 
     backend: str
     config: dict[str, Any]
-    elapsed_seconds: float
-    throughput_gflops: float
+    wall_clock_latency_seconds: float
+    effective_gflops: float
+    checksum: str
     score: float
-    verified: bool
-    max_abs_error: float
-    max_rel_error: float
     notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize the result for JSON output."""
+
         return {
             "backend": self.backend,
-            "config": self.config,
-            "elapsed_seconds": self.elapsed_seconds,
-            "throughput_gflops": self.throughput_gflops,
+            "config": dict(self.config),
+            "wall_clock_latency_seconds": self.wall_clock_latency_seconds,
+            "effective_gflops": self.effective_gflops,
+            "checksum": self.checksum,
             "score": self.score,
-            "verified": self.verified,
-            "max_abs_error": self.max_abs_error,
-            "max_rel_error": self.max_rel_error,
             "notes": list(self.notes),
         }
 
 
 @dataclass(slots=True)
 class BackendResult:
-    """Aggregated benchmark outcome for one backend."""
+    """Aggregate outcome for one backend such as CPU or CUDA."""
 
     backend: str
     available: bool
@@ -76,10 +102,12 @@ class BackendResult:
     notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialize the backend summary for JSON output."""
+
         return {
             "backend": self.backend,
             "available": self.available,
-            "selected_config": self.selected_config,
+            "selected_config": None if self.selected_config is None else dict(self.selected_config),
             "best_trial": None if self.best_trial is None else self.best_trial.to_dict(),
             "trials": [trial.to_dict() for trial in self.trials],
             "notes": list(self.notes),

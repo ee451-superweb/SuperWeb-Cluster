@@ -1,4 +1,14 @@
-"""Optional auto-tuned CUDA backend for fixed matrix-vector multiplication."""
+"""CUDA backend for the fixed matrix-vector benchmark.
+
+This backend mirrors the CPU design:
+
+- Python handles orchestration, compilation, and result parsing
+- the CUDA executable handles loading the dataset once and sweeping multiple
+  kernel configurations in memory
+
+That split keeps the expensive dataset I/O out of the tuning loop and makes the
+top-level benchmark code stay hardware-agnostic.
+"""
 
 from __future__ import annotations
 
@@ -6,68 +16,137 @@ import json
 import os
 import shutil
 import subprocess
-import time
+import sys
 from pathlib import Path
 
-from fmvm_dataset import compare_vectors, ensure_transposed_matrix
-from models import BackendResult, DatasetPaths, TrialRecord, WorkloadSpec
+from models import BackendResult, BenchmarkSpec, DatasetLayout, TrialRecord
+from path_utils import sanitize_text, to_relative_cli_path, to_relative_string
 from scoring import linear_time_score
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-CUDA_SOURCE_PATH = (
-    ROOT_DIR / "fixed_matrix_vector_multiplication" / "cuda" / "fmvm_cuda_runner.cu"
-)
-CUDA_BUILD_DIR = ROOT_DIR / "fixed_matrix_vector_multiplication" / "cuda" / "build"
-CUDA_OUTPUT_PATH = CUDA_BUILD_DIR / "cuda_output.bin"
-CUDA_EXECUTABLE_PATH = CUDA_BUILD_DIR / (
-    "fmvm_cuda_runner.exe" if os.name == "nt" else "fmvm_cuda_runner"
-)
+CUDA_DIR = ROOT_DIR / "fixed_matrix_vector_multiplication" / "cuda"
+CUDA_SOURCE_PATH = CUDA_DIR / "fmvm_cuda_runner.cu"
+CUDA_BUILD_DIR = CUDA_DIR / "build"
+CUDA_EXECUTABLE_PATH = CUDA_BUILD_DIR / ("fmvm_cuda_runner.exe" if os.name == "nt" else "fmvm_cuda_runner")
 
 
-def _load_float32_vector(path: Path) -> list[float]:
-    raw = path.read_bytes()
-    return list(memoryview(raw).cast("f"))
+def _relative_project_path(path: Path) -> str:
+    """Show a project-local path without an absolute prefix."""
+
+    return to_relative_string(path, start=ROOT_DIR)
+
+
+def _sanitize_note(text: str) -> str:
+    """Remove project/home absolute prefixes from backend notes."""
+
+    return sanitize_text(text, start=ROOT_DIR)
+
+
+def _relative_cli_path(path: Path) -> str:
+    """Render a relative path for subprocess calls."""
+
+    return to_relative_cli_path(path, start=ROOT_DIR)
+
+
+def _windows_vsdevcmd_setup_lines() -> list[str]:
+    """Emit batch-script lines that locate VsDevCmd without project absolute paths."""
+
+    return [
+        "setlocal",
+        "set \"VSDEVCMD=\"",
+        "if exist \"%ProgramFiles(x86)%\\Microsoft Visual Studio\\Installer\\vswhere.exe\" (",
+        "  for /f \"usebackq delims=\" %%i in (`\"%ProgramFiles(x86)%\\Microsoft Visual Studio\\Installer\\vswhere.exe\" -latest -products * -find Common7\\Tools\\VsDevCmd.bat`) do set \"VSDEVCMD=%%i\"",
+        ")",
+        "if not defined VSDEVCMD set \"VSDEVCMD=%ProgramFiles(x86)%\\Microsoft Visual Studio\\18\\BuildTools\\Common7\\Tools\\VsDevCmd.bat\"",
+        "if not exist \"%VSDEVCMD%\" exit /b 1",
+        "call \"%VSDEVCMD%\" -arch=x64 -host_arch=x64 >nul",
+    ]
 
 
 def _candidate_block_sizes() -> list[int]:
+    """Return the CUDA block sizes to sweep."""
+
     return [64, 128, 256, 512]
 
 
 def _candidate_tile_sizes() -> list[int]:
+    """Return the template tile sizes supported by the CUDA kernels."""
+
     return [1, 2, 4, 8]
 
 
-def _default_repeats(workload: WorkloadSpec) -> int:
-    if workload.preset == "smoke":
-        return 16
-    if workload.preset == "quick":
-        return 12
-    if workload.preset == "standard":
-        return 8
-    return 4
+def _candidate_transpose_modes() -> list[int]:
+    """Try both the row-major input layout and a transposed GPU layout."""
+
+    return [0, 1]
+
+
+def _default_repeats(spec: BenchmarkSpec) -> int:
+    """Choose a repeat count that keeps large benchmarks short."""
+
+    gib = 1024**3
+    if spec.matrix_bytes >= 2 * gib:
+        return 2
+    if spec.matrix_bytes >= 256 * 1024**2:
+        return 4
+    return 8
+
+
+def _detect_compute_capability() -> str | None:
+    """Ask `nvidia-smi` for the first GPU's compute capability."""
+
+    if shutil.which("nvidia-smi") is None:
+        return None
+
+    completed = subprocess.run(
+        [
+            "nvidia-smi",
+            "--query-gpu=compute_cap",
+            "--format=csv,noheader",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        return None
+
+    for line in completed.stdout.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        digits = stripped.replace(".", "")
+        if digits.isdigit():
+            return digits
+    return None
 
 
 class CudaBackend:
-    """CUDA backend that compiles a small nvcc runner on demand."""
+    """Compile and invoke the CUDA autotuning runner."""
 
     name = "cuda"
 
     def probe(self) -> tuple[bool, str]:
-        nvcc_path = shutil.which("nvcc")
-        if nvcc_path is None:
-            return False, "nvcc was not found on PATH; CUDA backend skipped."
+        """Check whether the current machine looks CUDA-capable."""
+
+        if shutil.which("nvcc") is None:
+            return False, "nvcc was not found on PATH; CUDA backend is unavailable."
         if not CUDA_SOURCE_PATH.exists():
-            return False, f"missing CUDA runner source at {CUDA_SOURCE_PATH}"
-        return True, f"nvcc detected at {nvcc_path}."
+            return False, f"missing CUDA runner source at {_relative_project_path(CUDA_SOURCE_PATH)}"
+
+        capability = _detect_compute_capability()
+        if capability is None:
+            return True, "nvcc detected on PATH, but compute capability could not be queried."
+        return True, f"nvcc detected on PATH; first GPU compute capability is sm_{capability}."
 
     def run(
         self,
-        workload: WorkloadSpec,
-        dataset: DatasetPaths,
-        reference_output: list[float],
+        spec: BenchmarkSpec,
+        dataset: DatasetLayout,
         *,
         time_budget_seconds: float,
     ) -> BackendResult:
+        """Run the CUDA executable once and return the best configuration it found."""
+
         available, message = self.probe()
         notes = [message]
         if not available:
@@ -83,7 +162,10 @@ class CudaBackend:
         try:
             executable_path = self._compile_if_needed()
         except (OSError, subprocess.CalledProcessError) as exc:
-            notes.append(f"failed to compile CUDA runner: {exc}")
+            details = ""
+            if isinstance(exc, subprocess.CalledProcessError):
+                details = (exc.stderr or exc.stdout or "").strip()
+            notes.append(_sanitize_note(f"failed to compile CUDA runner: {details or exc}"))
             return BackendResult(
                 backend=self.name,
                 available=False,
@@ -93,196 +175,222 @@ class CudaBackend:
                 notes=notes,
             )
 
-        default_config = {
-            "transpose": False,
-            "block_size": 256,
-            "tile_size": 4,
-            "repeats": _default_repeats(workload),
-        }
-        current_config = dict(default_config)
-        trials: list[TrialRecord] = []
-        best_trial: TrialRecord | None = None
-        deadline = time.monotonic() + max(time_budget_seconds, 1.0)
-
-        search_axes: list[tuple[str, list[object]]] = [
-            ("transpose", [False, True]),
-            ("block_size", _candidate_block_sizes()),
-            ("tile_size", _candidate_tile_sizes()),
-        ]
-
-        for axis_name, axis_values in search_axes:
-            axis_best = best_trial
-            axis_best_config = dict(current_config)
-            for axis_value in axis_values:
-                if time.monotonic() >= deadline:
-                    notes.append(f"time budget reached while tuning {axis_name}")
-                    break
-
-                candidate_config = dict(current_config)
-                candidate_config[axis_name] = axis_value
-                trial = self._measure_trial(
-                    executable_path,
-                    workload,
-                    dataset,
-                    reference_output,
-                    candidate_config,
-                    timeout_seconds=max(10.0, deadline - time.monotonic()),
-                )
-                trials.append(trial)
-                if self._is_better(trial, axis_best):
-                    axis_best = trial
-                    axis_best_config = dict(candidate_config)
-
-            current_config = axis_best_config
-            if self._is_better(axis_best, best_trial):
-                best_trial = axis_best
-
-        selected_config = None if best_trial is None else dict(best_trial.config)
-        return BackendResult(
-            backend=self.name,
-            available=True,
-            selected_config=selected_config,
-            best_trial=best_trial,
-            trials=trials,
-            notes=notes,
-        )
-
-    def _compile_if_needed(self) -> Path:
-        CUDA_BUILD_DIR.mkdir(parents=True, exist_ok=True)
-        if CUDA_EXECUTABLE_PATH.exists() and CUDA_EXECUTABLE_PATH.stat().st_mtime >= CUDA_SOURCE_PATH.stat().st_mtime:
-            return CUDA_EXECUTABLE_PATH
-
-        nvcc_path = shutil.which("nvcc")
-        if nvcc_path is None:
-            raise FileNotFoundError("nvcc not found")
-
-        command = [
-            nvcc_path,
-            str(CUDA_SOURCE_PATH),
-            "-O3",
-            "--use_fast_math",
-            "-std=c++17",
-            "-o",
-            str(CUDA_EXECUTABLE_PATH),
-        ]
-        subprocess.run(command, check=True, capture_output=True, text=True)
-        return CUDA_EXECUTABLE_PATH
-
-    def _measure_trial(
-        self,
-        executable_path: Path,
-        workload: WorkloadSpec,
-        dataset: DatasetPaths,
-        reference_output: list[float],
-        config: dict[str, object],
-        *,
-        timeout_seconds: float,
-    ) -> TrialRecord:
-        matrix_path = dataset.matrix_path
-        if bool(config["transpose"]):
-            matrix_path = ensure_transposed_matrix(dataset, workload)
-
-        CUDA_BUILD_DIR.mkdir(parents=True, exist_ok=True)
+        block_sizes = _candidate_block_sizes()
+        tile_sizes = _candidate_tile_sizes()
+        transpose_modes = _candidate_transpose_modes()
+        repeats = _default_repeats(spec)
         command = [
             str(executable_path),
             "--matrix",
-            str(matrix_path),
+            _relative_cli_path(dataset.matrix_path),
             "--vector",
-            str(dataset.vector_path),
-            "--output",
-            str(CUDA_OUTPUT_PATH),
+            _relative_cli_path(dataset.vector_path),
             "--rows",
-            str(workload.rows),
+            str(spec.rows),
             "--cols",
-            str(workload.cols),
-            "--transpose",
-            "1" if bool(config["transpose"]) else "0",
-            "--block-size",
-            str(int(config["block_size"])),
-            "--tile-size",
-            str(int(config["tile_size"])),
+            str(spec.cols),
+            "--transpose-modes",
+            ",".join(str(value) for value in transpose_modes),
+            "--block-sizes",
+            ",".join(str(value) for value in block_sizes),
+            "--tile-sizes",
+            ",".join(str(value) for value in tile_sizes),
             "--repeats",
-            str(int(config["repeats"])),
+            str(repeats),
         ]
 
-        notes: list[str] = []
+        notes.append(f"transpose search order: {transpose_modes}")
+        notes.append(f"block size search order: {block_sizes}")
+        notes.append(f"tile size search order: {tile_sizes}")
+        notes.append(f"repeats_per_config: {repeats}")
+
         try:
             completed = subprocess.run(
                 command,
                 check=True,
                 capture_output=True,
                 text=True,
-                timeout=max(timeout_seconds, 1.0),
+                timeout=max(time_budget_seconds, 30.0),
+                cwd=ROOT_DIR,
             )
         except subprocess.TimeoutExpired:
-            return TrialRecord(
+            notes.append("CUDA benchmark timed out")
+            return BackendResult(
                 backend=self.name,
-                config=dict(config),
-                elapsed_seconds=float("inf"),
-                throughput_gflops=0.0,
-                score=0.0,
-                verified=False,
-                max_abs_error=float("inf"),
-                max_rel_error=float("inf"),
-                notes=["CUDA trial timed out"],
+                available=False,
+                selected_config=None,
+                best_trial=None,
+                trials=[],
+                notes=notes,
             )
         except subprocess.CalledProcessError as exc:
             stderr = (exc.stderr or "").strip()
-            note = stderr if stderr else str(exc)
-            return TrialRecord(
+            stdout = (exc.stdout or "").strip()
+            notes.append(_sanitize_note(stderr if stderr else (stdout if stdout else str(exc))))
+            return BackendResult(
                 backend=self.name,
-                config=dict(config),
-                elapsed_seconds=float("inf"),
-                throughput_gflops=0.0,
-                score=0.0,
-                verified=False,
-                max_abs_error=float("inf"),
-                max_rel_error=float("inf"),
-                notes=[f"CUDA runner failed: {note}"],
+                available=False,
+                selected_config=None,
+                best_trial=None,
+                trials=[],
+                notes=notes,
             )
 
         metrics = json.loads(completed.stdout)
-        elapsed_seconds = float(metrics["per_run_seconds"])
-        candidate_output = _load_float32_vector(CUDA_OUTPUT_PATH)
-        verified, max_abs_error, max_rel_error = compare_vectors(
-            reference_output,
-            candidate_output,
-            atol=workload.verify_atol,
-            rtol=workload.verify_rtol,
-        )
         score = linear_time_score(
-            elapsed_seconds,
-            ideal_seconds=workload.ideal_seconds,
-            zero_score_seconds=workload.zero_score_seconds,
+            float(metrics["wall_clock_latency_seconds"]),
+            ideal_seconds=spec.ideal_seconds,
+            zero_score_seconds=spec.zero_score_seconds,
         )
-        if not verified:
-            score = 0.0
-            notes.append("verification failed")
 
-        throughput_gflops = workload.flops_per_run / max(elapsed_seconds, 1e-12) / 1.0e9
+        config = {
+            "transpose": bool(metrics["transpose"]),
+            "block_size": int(metrics["block_size"]),
+            "tile_size": int(metrics["tile_size"]),
+            "repeats": int(metrics["repeats"]),
+            "trials_run": int(metrics["trials_run"]),
+        }
+        trial_notes: list[str] = []
         if "device_name" in metrics:
-            notes.append(f"device={metrics['device_name']}")
+            trial_notes.append(f"device={metrics['device_name']}")
+        if "compute_capability" in metrics:
+            trial_notes.append(f"sm={metrics['compute_capability']}")
 
-        return TrialRecord(
+        trial = TrialRecord(
             backend=self.name,
-            config=dict(config),
-            elapsed_seconds=elapsed_seconds,
-            throughput_gflops=throughput_gflops,
+            config=config,
+            wall_clock_latency_seconds=float(metrics["wall_clock_latency_seconds"]),
+            effective_gflops=float(metrics["effective_gflops"]),
+            checksum=str(metrics["checksum"]),
             score=score,
-            verified=verified,
-            max_abs_error=max_abs_error,
-            max_rel_error=max_rel_error,
+            notes=trial_notes,
+        )
+        return BackendResult(
+            backend=self.name,
+            available=True,
+            selected_config=dict(config),
+            best_trial=trial,
+            trials=[trial],
             notes=notes,
         )
 
+    def _compile_if_needed(self) -> Path:
+        """Build the CUDA runner when the source changed."""
+
+        CUDA_BUILD_DIR.mkdir(parents=True, exist_ok=True)
+        if CUDA_EXECUTABLE_PATH.exists() and CUDA_EXECUTABLE_PATH.stat().st_mtime >= CUDA_SOURCE_PATH.stat().st_mtime:
+            return CUDA_EXECUTABLE_PATH
+
+        if shutil.which("nvcc") is None:
+            raise FileNotFoundError("nvcc was not found")
+
+        capability = _detect_compute_capability()
+        if os.name == "nt":
+            vsdevcmd_path = self._find_vsdevcmd()
+            if vsdevcmd_path is None:
+                raise FileNotFoundError("VsDevCmd.bat was not found for CUDA compilation")
+
+            command_parts = [
+                "nvcc",
+                "..\\fmvm_cuda_runner.cu",
+                "-O3",
+                "--use_fast_math",
+                "-std=c++17",
+                "-o fmvm_cuda_runner.exe",
+            ]
+            if capability is not None:
+                command_parts.append(f"-gencode=arch=compute_{capability},code=sm_{capability}")
+
+            compile_script_path = CUDA_BUILD_DIR / "build_fmvm_cuda_runner.cmd"
+            compile_script_path.write_text(
+                "\n".join(
+                    [
+                        "@echo off",
+                        *_windows_vsdevcmd_setup_lines(),
+                        "pushd \"%~dp0\"",
+                        " ".join(command_parts),
+                        "set \"BUILD_EXIT=%ERRORLEVEL%\"",
+                        "popd",
+                        "exit /b %BUILD_EXIT%",
+                    ]
+                )
+                + "\n",
+                encoding="ascii",
+            )
+
+            completed = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    f"& '{compile_script_path}'",
+                ],
+                capture_output=True,
+                text=True,
+            )
+        else:
+            command = [
+                "nvcc",
+                "../fmvm_cuda_runner.cu",
+                "-O3",
+                "--use_fast_math",
+                "-std=c++17",
+                "-o",
+                CUDA_EXECUTABLE_PATH.name,
+            ]
+            if capability is not None:
+                command.append(f"-gencode=arch=compute_{capability},code=sm_{capability}")
+            completed = subprocess.run(command, capture_output=True, text=True, cwd=CUDA_BUILD_DIR)
+
+        if completed.returncode != 0:
+            raise subprocess.CalledProcessError(
+                completed.returncode,
+                completed.args,
+                output=completed.stdout,
+                stderr=completed.stderr,
+            )
+        return CUDA_EXECUTABLE_PATH
+
     @staticmethod
-    def _is_better(candidate: TrialRecord | None, incumbent: TrialRecord | None) -> bool:
-        if candidate is None:
-            return False
-        if incumbent is None:
-            return candidate.verified
-        if candidate.verified != incumbent.verified:
-            return candidate.verified
-        if candidate.score != incumbent.score:
-            return candidate.score > incumbent.score
-        return candidate.elapsed_seconds < incumbent.elapsed_seconds
+    def _find_vsdevcmd() -> Path | None:
+        """Resolve the Visual Studio developer-command batch file."""
+
+        program_files_x86 = os.environ.get("ProgramFiles(x86)")
+        if not program_files_x86:
+            return None
+
+        vswhere_path = Path(program_files_x86) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
+        if vswhere_path.exists():
+            completed = subprocess.run(
+                [
+                    str(vswhere_path),
+                    "-latest",
+                    "-products",
+                    "*",
+                    "-find",
+                    "Common7\\Tools\\VsDevCmd.bat",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if completed.returncode == 0:
+                resolved = completed.stdout.strip().splitlines()
+                if resolved:
+                    candidate = Path(resolved[0].strip())
+                    if candidate.exists():
+                        return candidate
+
+        fallback_path = (
+            Path(program_files_x86)
+            / "Microsoft Visual Studio"
+            / "18"
+            / "BuildTools"
+            / "Common7"
+            / "Tools"
+            / "VsDevCmd.bat"
+        )
+        if fallback_path.exists():
+            return fallback_path
+        return None

@@ -1,4 +1,16 @@
-"""Windows C++ CPU backend for fixed matrix-vector multiplication."""
+"""Windows CPU backend for the fixed matrix-vector benchmark.
+
+This file exists to bridge two worlds:
+
+- Python orchestration in `benchmark.py`
+- the hardware-specific C++ runner in
+  `fixed_matrix_vector_multiplication/cpu/windows/fmvm_cpu_windows.cpp`
+
+The important design choice is that the C++ program reads `A.bin` and `x.bin`
+only once, then searches multiple worker/tile configurations internally. That
+keeps the benchmark focused on compute performance instead of repeatedly paying
+the 2 GiB input-file I/O cost.
+"""
 
 from __future__ import annotations
 
@@ -6,11 +18,10 @@ import json
 import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 
-from fmvm_dataset import compare_vectors, load_float32_file
-from models import BackendResult, DatasetPaths, TrialRecord, WorkloadSpec
+from models import BackendResult, BenchmarkSpec, DatasetLayout, TrialRecord
+from path_utils import sanitize_text, to_relative_cli_path, to_relative_string
 from scoring import linear_time_score
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -18,11 +29,52 @@ CPU_WINDOWS_DIR = ROOT_DIR / "fixed_matrix_vector_multiplication" / "cpu" / "win
 CPU_SOURCE_PATH = CPU_WINDOWS_DIR / "fmvm_cpu_windows.cpp"
 CPU_BUILD_DIR = CPU_WINDOWS_DIR / "build"
 CPU_EXECUTABLE_PATH = CPU_BUILD_DIR / "fmvm_cpu_windows.exe"
-CPU_OUTPUT_PATH = CPU_BUILD_DIR / "fmvm_cpu_output.bin"
+
+
+def _relative_project_path(path: Path) -> str:
+    """Show a project-local path without an absolute prefix."""
+
+    return to_relative_string(path, start=ROOT_DIR)
+
+
+def _sanitize_note(text: str) -> str:
+    """Remove project/home absolute prefixes from backend notes."""
+
+    return sanitize_text(text, start=ROOT_DIR)
+
+
+def _relative_cli_path(path: Path) -> str:
+    """Render a relative path for subprocess calls."""
+
+    return to_relative_cli_path(path, start=ROOT_DIR)
+
+
+def _windows_vsdevcmd_setup_lines() -> list[str]:
+    """Emit batch-script lines that locate VsDevCmd without project absolute paths."""
+
+    return [
+        "setlocal",
+        "set \"VSDEVCMD=\"",
+        "if exist \"%ProgramFiles(x86)%\\Microsoft Visual Studio\\Installer\\vswhere.exe\" (",
+        "  for /f \"usebackq delims=\" %%i in (`\"%ProgramFiles(x86)%\\Microsoft Visual Studio\\Installer\\vswhere.exe\" -latest -products * -find Common7\\Tools\\VsDevCmd.bat`) do set \"VSDEVCMD=%%i\"",
+        ")",
+        "if not defined VSDEVCMD set \"VSDEVCMD=%ProgramFiles(x86)%\\Microsoft Visual Studio\\18\\BuildTools\\Common7\\Tools\\VsDevCmd.bat\"",
+        "if not exist \"%VSDEVCMD%\" exit /b 1",
+        "call \"%VSDEVCMD%\" -arch=x64 -host_arch=x64 >nul",
+    ]
 
 
 def _binary_tree_worker_candidates(hardware_workers: int) -> list[int]:
-    """Return the requested worker order rooted at the hardware worker count."""
+    """Return the worker counts requested by the user.
+
+    For example, on a 16-core machine this returns:
+
+    - 16
+    - 8
+    - 32
+    - 4
+    - 64
+    """
 
     root = max(1, hardware_workers)
     candidates = [
@@ -40,63 +92,71 @@ def _binary_tree_worker_candidates(hardware_workers: int) -> list[int]:
     return ordered
 
 
-def _candidate_tile_sizes(limit: int) -> list[int]:
-    """Return the tile sizes swept for every worker-count candidate."""
+def _candidate_tile_sizes(cols: int) -> list[int]:
+    """Return the tile sizes the CPU runner should sweep.
 
-    values = []
-    for value in (32, 64, 128, 256, 512, 1024):
-        if value <= limit:
-            values.append(value)
-    if not values:
-        values.append(limit)
-    if limit not in values:
-        values.append(limit)
-    return values
+    We keep the list short because the default benchmark already uses a 2 GiB
+    matrix, so each extra configuration has a noticeable runtime cost.
+    """
+
+    candidates: list[int] = []
+    for value in (256, 512, 1024, 2048, 4096, 8192):
+        if value <= cols:
+            candidates.append(value)
+    if not candidates:
+        candidates.append(cols)
+    if cols not in candidates:
+        candidates.append(cols)
+    return candidates
 
 
-def _default_repeats(workload: WorkloadSpec) -> int:
-    """Keep short workloads stable without making the overall benchmark drag."""
+def _default_repeats(spec: BenchmarkSpec) -> int:
+    """Choose how many timed repeats each configuration should run.
 
-    if workload.preset == "smoke":
-        return 16
-    if workload.preset == "quick":
-        return 12
-    if workload.preset == "standard":
-        return 8
-    return 4
+    Large datasets need fewer repeats or the full search would take too long.
+    Small test datasets can afford more repeats to smooth out timer noise.
+    """
+
+    gib = 1024**3
+    if spec.matrix_bytes >= 2 * gib:
+        return 1
+    if spec.matrix_bytes >= 256 * 1024**2:
+        return 2
+    return 6
 
 
 class CpuBackend:
-    """CPU backend that compiles and invokes the Windows C++ runner."""
+    """Compile and invoke the Windows C++ CPU runner."""
 
     name = "cpu"
 
     def probe(self) -> tuple[bool, str]:
+        """Check whether this machine can build and run the Windows CPU backend."""
+
         if sys.platform != "win32":
             return False, "Windows C++ CPU backend is only available on Windows."
         if not CPU_SOURCE_PATH.exists():
-            return False, f"missing CPU runner source at {CPU_SOURCE_PATH}"
+            return False, f"missing CPU runner source at {_relative_project_path(CPU_SOURCE_PATH)}"
 
         vsdevcmd_path = self._find_vsdevcmd()
         if vsdevcmd_path is None:
             return False, "VsDevCmd.bat was not found; MSVC build environment is unavailable."
 
-        hardware_workers = os.cpu_count() or 1
-        worker_candidates = _binary_tree_worker_candidates(hardware_workers)
+        worker_candidates = _binary_tree_worker_candidates(os.cpu_count() or 1)
         return (
             True,
-            "Windows C++ CPU backend available via "
-            f"{vsdevcmd_path}. worker search order: {worker_candidates}",
+            f"Windows CPU backend available. worker search order: {worker_candidates}",
         )
 
     def run(
         self,
-        workload: WorkloadSpec,
-        dataset: DatasetPaths,
-        reference_output: list[float],
+        spec: BenchmarkSpec,
+        dataset: DatasetLayout,
         *,
         time_budget_seconds: float,
     ) -> BackendResult:
+        """Run the C++ CPU executable once and return its best found configuration."""
+
         available, message = self.probe()
         notes = [message]
         if not available:
@@ -112,7 +172,7 @@ class CpuBackend:
         try:
             executable_path = self._compile_if_needed()
         except (OSError, subprocess.CalledProcessError) as exc:
-            notes.append(f"failed to compile CPU runner: {exc}")
+            notes.append(_sanitize_note(f"failed to compile CPU runner: {exc}"))
             return BackendResult(
                 backend=self.name,
                 available=False,
@@ -122,149 +182,90 @@ class CpuBackend:
                 notes=notes,
             )
 
-        hardware_workers = os.cpu_count() or 1
-        worker_candidates = _binary_tree_worker_candidates(hardware_workers)
-        tile_candidates = _candidate_tile_sizes(workload.cols)
-        trials: list[TrialRecord] = []
-        best_trial: TrialRecord | None = None
-        deadline = time.monotonic() + max(time_budget_seconds, 1.0)
-
-        for worker_count in worker_candidates:
-            if time.monotonic() >= deadline:
-                notes.append("time budget reached before finishing the worker sweep")
-                break
-
-            # Every worker candidate gets a full tile-size sweep, as requested.
-            for tile_size in tile_candidates:
-                if time.monotonic() >= deadline:
-                    notes.append(f"time budget reached while sweeping tile sizes for workers={worker_count}")
-                    break
-
-                trial = self._measure_trial(
-                    executable_path,
-                    workload,
-                    dataset,
-                    reference_output,
-                    requested_workers=worker_count,
-                    tile_size=tile_size,
-                    repeats=_default_repeats(workload),
-                )
-                trials.append(trial)
-                if self._is_better(trial, best_trial):
-                    best_trial = trial
-
-        selected_config = None if best_trial is None else dict(best_trial.config)
-        return BackendResult(
-            backend=self.name,
-            available=True,
-            selected_config=selected_config,
-            best_trial=best_trial,
-            trials=trials,
-            notes=notes,
-        )
-
-    def _measure_trial(
-        self,
-        executable_path: Path,
-        workload: WorkloadSpec,
-        dataset: DatasetPaths,
-        reference_output: list[float],
-        *,
-        requested_workers: int,
-        tile_size: int,
-        repeats: int,
-    ) -> TrialRecord:
+        worker_candidates = _binary_tree_worker_candidates(os.cpu_count() or 1)
+        tile_candidates = _candidate_tile_sizes(spec.cols)
+        repeats = _default_repeats(spec)
         command = [
             str(executable_path),
             "--matrix",
-            str(dataset.matrix_path),
+            _relative_cli_path(dataset.matrix_path),
             "--vector",
-            str(dataset.vector_path),
-            "--output",
-            str(CPU_OUTPUT_PATH),
+            _relative_cli_path(dataset.vector_path),
             "--rows",
-            str(workload.rows),
+            str(spec.rows),
             "--cols",
-            str(workload.cols),
+            str(spec.cols),
             "--workers",
-            str(requested_workers),
-            "--tile-size",
-            str(tile_size),
+            ",".join(str(value) for value in worker_candidates),
+            "--tile-sizes",
+            ",".join(str(value) for value in tile_candidates),
             "--repeats",
             str(repeats),
         ]
 
-        notes: list[str] = []
+        notes.append(f"tile search order: {tile_candidates}")
+        notes.append(f"repeats_per_config: {repeats}")
+
         try:
             completed = subprocess.run(
                 command,
                 check=True,
                 capture_output=True,
                 text=True,
-                timeout=120.0,
+                timeout=max(time_budget_seconds, 30.0),
+                cwd=ROOT_DIR,
             )
         except subprocess.TimeoutExpired:
-            return TrialRecord(
+            notes.append("CPU benchmark timed out")
+            return BackendResult(
                 backend=self.name,
-                config={"requested_workers": requested_workers, "tile_size": tile_size},
-                elapsed_seconds=float("inf"),
-                throughput_gflops=0.0,
-                score=0.0,
-                verified=False,
-                max_abs_error=float("inf"),
-                max_rel_error=float("inf"),
-                notes=["CPU trial timed out"],
+                available=False,
+                selected_config=None,
+                best_trial=None,
+                trials=[],
+                notes=notes,
             )
         except subprocess.CalledProcessError as exc:
             stderr = (exc.stderr or "").strip()
-            return TrialRecord(
+            notes.append(_sanitize_note(stderr if stderr else str(exc)))
+            return BackendResult(
                 backend=self.name,
-                config={"requested_workers": requested_workers, "tile_size": tile_size},
-                elapsed_seconds=float("inf"),
-                throughput_gflops=0.0,
-                score=0.0,
-                verified=False,
-                max_abs_error=float("inf"),
-                max_rel_error=float("inf"),
-                notes=[stderr if stderr else str(exc)],
+                available=False,
+                selected_config=None,
+                best_trial=None,
+                trials=[],
+                notes=notes,
             )
 
         metrics = json.loads(completed.stdout)
-        candidate_output = load_float32_file(CPU_OUTPUT_PATH)
-        verified, max_abs_error, max_rel_error = compare_vectors(
-            reference_output,
-            candidate_output,
-            atol=workload.verify_atol,
-            rtol=workload.verify_rtol,
-        )
-
-        elapsed_seconds = float(metrics["per_run_seconds"])
         score = linear_time_score(
-            elapsed_seconds,
-            ideal_seconds=workload.ideal_seconds,
-            zero_score_seconds=workload.zero_score_seconds,
+            float(metrics["wall_clock_latency_seconds"]),
+            ideal_seconds=spec.ideal_seconds,
+            zero_score_seconds=spec.zero_score_seconds,
         )
-        if not verified:
-            score = 0.0
-            notes.append("verification failed")
 
-        actual_workers = int(metrics["actual_workers"])
-        throughput_gflops = workload.flops_per_run / max(elapsed_seconds, 1e-12) / 1.0e9
         config = {
-            "workers": actual_workers,
+            "workers": int(metrics["actual_workers"]),
             "requested_workers": int(metrics["requested_workers"]),
             "tile_size": int(metrics["tile_size"]),
             "repeats": int(metrics["repeats"]),
+            "trials_run": int(metrics["trials_run"]),
         }
-        return TrialRecord(
+        trial = TrialRecord(
             backend=self.name,
             config=config,
-            elapsed_seconds=elapsed_seconds,
-            throughput_gflops=throughput_gflops,
+            wall_clock_latency_seconds=float(metrics["wall_clock_latency_seconds"]),
+            effective_gflops=float(metrics["effective_gflops"]),
+            checksum=str(metrics["checksum"]),
             score=score,
-            verified=verified,
-            max_abs_error=max_abs_error,
-            max_rel_error=max_rel_error,
+            notes=[],
+        )
+        return BackendResult(
+            backend=self.name,
+            available=True,
+            selected_config=dict(config),
+            best_trial=trial,
+            trials=[trial],
             notes=notes,
         )
 
@@ -284,11 +285,12 @@ class CpuBackend:
             "\n".join(
                 [
                     "@echo off",
-                    "call "
-                    f"\"{vsdevcmd_path}\" -arch=x64 -host_arch=x64 >nul",
-                    "cl /nologo /std:c++20 /O2 /EHsc "
-                    f"/Fe:\"{CPU_EXECUTABLE_PATH}\" "
-                    f"\"{CPU_SOURCE_PATH}\"",
+                    *_windows_vsdevcmd_setup_lines(),
+                    "pushd \"%~dp0\"",
+                    "cl /nologo /std:c++20 /O2 /EHsc /Fe:fmvm_cpu_windows.exe ..\\fmvm_cpu_windows.cpp",
+                    "set \"BUILD_EXIT=%ERRORLEVEL%\"",
+                    "popd",
+                    "exit /b %BUILD_EXIT%",
                 ]
             )
             + "\n",
@@ -297,8 +299,8 @@ class CpuBackend:
 
         # PowerShell's call operator handles a batch-file path with spaces more
         # reliably than invoking cmd.exe directly through subprocess argument
-        # quoting, which is important in this workspace because
-        # "performance metrics" is part of the path.
+        # quoting. This matters because "performance metrics" is part of the
+        # workspace path.
         completed = subprocess.run(
             [
                 "powershell",
@@ -361,15 +363,3 @@ class CpuBackend:
         if fallback_path.exists():
             return fallback_path
         return None
-
-    @staticmethod
-    def _is_better(candidate: TrialRecord | None, incumbent: TrialRecord | None) -> bool:
-        if candidate is None:
-            return False
-        if incumbent is None:
-            return candidate.verified
-        if candidate.verified != incumbent.verified:
-            return candidate.verified
-        if candidate.score != incumbent.score:
-            return candidate.score > incumbent.score
-        return candidate.elapsed_seconds < incumbent.elapsed_seconds

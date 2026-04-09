@@ -1,9 +1,12 @@
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -17,10 +20,20 @@ struct Options {
     std::string output_path;
     int rows = 0;
     int cols = 0;
+    std::vector<int> transpose_modes;
+    std::vector<int> block_sizes;
+    std::vector<int> tile_sizes;
+    int repeats = 2;
+};
+
+struct TrialMetrics {
     int transpose = 0;
-    int block_size = 256;
-    int tile_size = 4;
-    int repeats = 8;
+    int block_size = 0;
+    int tile_size = 0;
+    int repeats = 0;
+    double wall_clock_latency_seconds = std::numeric_limits<double>::infinity();
+    double effective_gflops = 0.0;
+    std::string checksum;
 };
 
 inline void cuda_check(cudaError_t status, const char* message) {
@@ -29,6 +42,22 @@ inline void cuda_check(cudaError_t status, const char* message) {
         builder << message << ": " << cudaGetErrorString(status);
         throw std::runtime_error(builder.str());
     }
+}
+
+std::vector<int> parse_int_list(const std::string& text) {
+    std::vector<int> values;
+    std::stringstream stream(text);
+    std::string item;
+    while (std::getline(stream, item, ',')) {
+        if (item.empty()) {
+            continue;
+        }
+        values.push_back(std::stoi(item));
+    }
+    if (values.empty()) {
+        throw std::runtime_error("expected a non-empty integer list");
+    }
+    return values;
 }
 
 Options parse_args(int argc, char** argv) {
@@ -49,12 +78,12 @@ Options parse_args(int argc, char** argv) {
             options.rows = std::stoi(value);
         } else if (key == "--cols") {
             options.cols = std::stoi(value);
-        } else if (key == "--transpose") {
-            options.transpose = std::stoi(value);
-        } else if (key == "--block-size") {
-            options.block_size = std::stoi(value);
-        } else if (key == "--tile-size") {
-            options.tile_size = std::stoi(value);
+        } else if (key == "--transpose-modes") {
+            options.transpose_modes = parse_int_list(value);
+        } else if (key == "--block-sizes") {
+            options.block_sizes = parse_int_list(value);
+        } else if (key == "--tile-sizes") {
+            options.tile_sizes = parse_int_list(value);
         } else if (key == "--repeats") {
             options.repeats = std::stoi(value);
         } else {
@@ -62,17 +91,14 @@ Options parse_args(int argc, char** argv) {
         }
     }
 
-    if (options.matrix_path.empty() || options.vector_path.empty() || options.output_path.empty()) {
-        throw std::runtime_error("matrix/vector/output paths are required");
+    if (options.matrix_path.empty() || options.vector_path.empty()) {
+        throw std::runtime_error("matrix and vector paths are required");
     }
     if (options.rows <= 0 || options.cols <= 0) {
         throw std::runtime_error("rows and cols must be positive");
     }
-    if (options.block_size <= 0 || options.block_size > 1024) {
-        throw std::runtime_error("block size must be between 1 and 1024");
-    }
-    if (options.tile_size <= 0) {
-        throw std::runtime_error("tile size must be positive");
+    if (options.transpose_modes.empty() || options.block_sizes.empty() || options.tile_sizes.empty()) {
+        throw std::runtime_error("transpose/block/tile candidate lists are required");
     }
     if (options.repeats <= 0) {
         throw std::runtime_error("repeats must be positive");
@@ -103,7 +129,10 @@ void write_float32_file(const std::string& path, const std::vector<float>& value
     if (!stream) {
         throw std::runtime_error("unable to open output file: " + path);
     }
-    stream.write(reinterpret_cast<const char*>(values.data()), static_cast<std::streamsize>(values.size() * sizeof(float)));
+    stream.write(
+        reinterpret_cast<const char*>(values.data()),
+        static_cast<std::streamsize>(values.size() * sizeof(float))
+    );
     if (!stream) {
         throw std::runtime_error("failed to write output file: " + path);
     }
@@ -123,6 +152,8 @@ __global__ void fmvm_row_major_kernel(
         return;
     }
 
+    // Keep the CUDA path in FP32 to match the benchmark's intended arithmetic
+    // model and to avoid paying the throughput cost of FP64 on consumer GPUs.
     extern __shared__ float partial[];
     float local_sum = 0.0f;
     const int row_base = row * cols;
@@ -167,6 +198,8 @@ __global__ void fmvm_transposed_kernel(
         return;
     }
 
+    // Keep the transposed path on the same FP32 arithmetic scheme as the
+    // row-major path.
     extern __shared__ float partial[];
     float local_sum = 0.0f;
     const int stride = blockDim.x * TileSize;
@@ -196,8 +229,30 @@ __global__ void fmvm_transposed_kernel(
     }
 }
 
-template <template <int> class Kernel>
-void launch_tiled_kernel(
+__global__ void transpose_matrix_kernel(
+    const float* input,
+    float* output,
+    int rows,
+    int cols
+) {
+    __shared__ float tile[32][33];
+
+    const int x = blockIdx.x * 32 + threadIdx.x;
+    const int y = blockIdx.y * 32 + threadIdx.y;
+
+    if (x < cols && y < rows) {
+        tile[threadIdx.y][threadIdx.x] = input[y * cols + x];
+    }
+    __syncthreads();
+
+    const int transposed_x = blockIdx.y * 32 + threadIdx.x;
+    const int transposed_y = blockIdx.x * 32 + threadIdx.y;
+    if (transposed_x < rows && transposed_y < cols) {
+        output[transposed_y * rows + transposed_x] = tile[threadIdx.x][threadIdx.y];
+    }
+}
+
+void launch_row_major_kernel(
     int tile_size,
     dim3 grid,
     dim3 block,
@@ -210,20 +265,63 @@ void launch_tiled_kernel(
 ) {
     switch (tile_size) {
         case 1:
-            Kernel<1><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols);
+            fmvm_row_major_kernel<1><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols);
             break;
         case 2:
-            Kernel<2><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols);
+            fmvm_row_major_kernel<2><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols);
             break;
         case 4:
-            Kernel<4><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols);
+            fmvm_row_major_kernel<4><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols);
             break;
         case 8:
-            Kernel<8><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols);
+            fmvm_row_major_kernel<8><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols);
             break;
         default:
             throw std::runtime_error("unsupported tile size");
     }
+}
+
+void launch_transposed_kernel(
+    int tile_size,
+    dim3 grid,
+    dim3 block,
+    size_t shared_bytes,
+    const float* matrix,
+    const float* vector,
+    float* output,
+    int rows,
+    int cols
+) {
+    switch (tile_size) {
+        case 1:
+            fmvm_transposed_kernel<1><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols);
+            break;
+        case 2:
+            fmvm_transposed_kernel<2><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols);
+            break;
+        case 4:
+            fmvm_transposed_kernel<4><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols);
+            break;
+        case 8:
+            fmvm_transposed_kernel<8><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols);
+            break;
+        default:
+            throw std::runtime_error("unsupported tile size");
+    }
+}
+
+std::string fnv1a64_checksum(const std::vector<float>& values) {
+    uint64_t hash = 14695981039346656037ull;
+    const unsigned char* bytes = reinterpret_cast<const unsigned char*>(values.data());
+    const size_t byte_count = values.size() * sizeof(float);
+    for (size_t index = 0; index < byte_count; ++index) {
+        hash ^= static_cast<uint64_t>(bytes[index]);
+        hash *= 1099511628211ull;
+    }
+
+    std::ostringstream stream;
+    stream << "fnv1a64:" << std::hex << std::setw(16) << std::setfill('0') << hash;
+    return stream.str();
 }
 
 std::string escape_json(const std::string& value) {
@@ -254,120 +352,183 @@ int main(int argc, char** argv) {
             throw std::runtime_error("vector size does not match cols");
         }
 
-        float* device_matrix = nullptr;
-        float* device_vector = nullptr;
-        float* device_output = nullptr;
-
-        cuda_check(cudaMalloc(&device_matrix, matrix_values.size() * sizeof(float)), "cudaMalloc matrix");
-        cuda_check(cudaMalloc(&device_vector, vector_values.size() * sizeof(float)), "cudaMalloc vector");
-        cuda_check(cudaMalloc(&device_output, static_cast<size_t>(options.rows) * sizeof(float)), "cudaMalloc output");
-
-        cuda_check(
-            cudaMemcpy(device_matrix, matrix_values.data(), matrix_values.size() * sizeof(float), cudaMemcpyHostToDevice),
-            "cudaMemcpy matrix");
-        cuda_check(
-            cudaMemcpy(device_vector, vector_values.data(), vector_values.size() * sizeof(float), cudaMemcpyHostToDevice),
-            "cudaMemcpy vector");
-
         int device_index = 0;
         cudaDeviceProp device_props{};
         cuda_check(cudaGetDevice(&device_index), "cudaGetDevice");
         cuda_check(cudaGetDeviceProperties(&device_props, device_index), "cudaGetDeviceProperties");
 
+        float* device_row_major = nullptr;
+        float* device_transposed = nullptr;
+        float* device_vector = nullptr;
+        float* device_output = nullptr;
+        cuda_check(cudaMalloc(&device_row_major, matrix_values.size() * sizeof(float)), "cudaMalloc row-major");
+        cuda_check(cudaMalloc(&device_vector, vector_values.size() * sizeof(float)), "cudaMalloc vector");
+        cuda_check(cudaMalloc(&device_output, static_cast<size_t>(options.rows) * sizeof(float)), "cudaMalloc output");
+
+        cuda_check(
+            cudaMemcpy(device_row_major, matrix_values.data(), matrix_values.size() * sizeof(float), cudaMemcpyHostToDevice),
+            "cudaMemcpy row-major");
+        cuda_check(
+            cudaMemcpy(device_vector, vector_values.data(), vector_values.size() * sizeof(float), cudaMemcpyHostToDevice),
+            "cudaMemcpy vector");
+
+        auto ensure_transposed_matrix = [&]() {
+            if (device_transposed != nullptr) {
+                return;
+            }
+            cuda_check(cudaMalloc(&device_transposed, matrix_values.size() * sizeof(float)), "cudaMalloc transposed");
+            const dim3 block(32, 32);
+            const dim3 grid(
+                static_cast<unsigned int>((options.cols + block.x - 1) / block.x),
+                static_cast<unsigned int>((options.rows + block.y - 1) / block.y));
+            transpose_matrix_kernel<<<grid, block>>>(device_row_major, device_transposed, options.rows, options.cols);
+            cuda_check(cudaGetLastError(), "transpose_matrix_kernel");
+            cuda_check(cudaDeviceSynchronize(), "cudaDeviceSynchronize transpose");
+        };
+
         const dim3 grid(options.rows);
-        const dim3 block(options.block_size);
-        const size_t shared_bytes = static_cast<size_t>(options.block_size) * sizeof(float);
+        TrialMetrics best_metrics;
+        std::vector<float> host_output(static_cast<size_t>(options.rows), 0.0f);
+        std::vector<float> best_output_values(static_cast<size_t>(options.rows), 0.0f);
+        int trials_run = 0;
 
-        // Warm-up launch.
-        if (options.transpose) {
-            launch_tiled_kernel<fmvm_transposed_kernel>(
-                options.tile_size,
-                grid,
-                block,
-                shared_bytes,
-                device_matrix,
-                device_vector,
-                device_output,
-                options.rows,
-                options.cols);
-        } else {
-            launch_tiled_kernel<fmvm_row_major_kernel>(
-                options.tile_size,
-                grid,
-                block,
-                shared_bytes,
-                device_matrix,
-                device_vector,
-                device_output,
-                options.rows,
-                options.cols);
-        }
-        cuda_check(cudaGetLastError(), "kernel launch");
-        cuda_check(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
+        for (const int transpose_mode : options.transpose_modes) {
+            const float* matrix_pointer = device_row_major;
+            if (transpose_mode != 0) {
+                ensure_transposed_matrix();
+                matrix_pointer = device_transposed;
+            }
 
-        cudaEvent_t start_event{};
-        cudaEvent_t stop_event{};
-        cuda_check(cudaEventCreate(&start_event), "cudaEventCreate start");
-        cuda_check(cudaEventCreate(&stop_event), "cudaEventCreate stop");
-        cuda_check(cudaEventRecord(start_event), "cudaEventRecord start");
+            for (const int block_size : options.block_sizes) {
+                if (block_size <= 0 || block_size > 1024) {
+                    continue;
+                }
+                const dim3 block(block_size);
+                const size_t shared_bytes = static_cast<size_t>(block_size) * sizeof(float);
 
-        for (int repeat = 0; repeat < options.repeats; ++repeat) {
-            if (options.transpose) {
-                launch_tiled_kernel<fmvm_transposed_kernel>(
-                    options.tile_size,
-                    grid,
-                    block,
-                    shared_bytes,
-                    device_matrix,
-                    device_vector,
-                    device_output,
-                    options.rows,
-                    options.cols);
-            } else {
-                launch_tiled_kernel<fmvm_row_major_kernel>(
-                    options.tile_size,
-                    grid,
-                    block,
-                    shared_bytes,
-                    device_matrix,
-                    device_vector,
-                    device_output,
-                    options.rows,
-                    options.cols);
+                for (const int tile_size : options.tile_sizes) {
+                    ++trials_run;
+
+                    if (transpose_mode != 0) {
+                        launch_transposed_kernel(
+                            tile_size,
+                            grid,
+                            block,
+                            shared_bytes,
+                            matrix_pointer,
+                            device_vector,
+                            device_output,
+                            options.rows,
+                            options.cols);
+                    } else {
+                        launch_row_major_kernel(
+                            tile_size,
+                            grid,
+                            block,
+                            shared_bytes,
+                            matrix_pointer,
+                            device_vector,
+                            device_output,
+                            options.rows,
+                            options.cols);
+                    }
+                    cuda_check(cudaGetLastError(), "warmup kernel launch");
+                    cuda_check(cudaDeviceSynchronize(), "cudaDeviceSynchronize warmup");
+
+                    cudaEvent_t start_event{};
+                    cudaEvent_t stop_event{};
+                    cuda_check(cudaEventCreate(&start_event), "cudaEventCreate start");
+                    cuda_check(cudaEventCreate(&stop_event), "cudaEventCreate stop");
+                    cuda_check(cudaEventRecord(start_event), "cudaEventRecord start");
+
+                    for (int repeat = 0; repeat < options.repeats; ++repeat) {
+                        if (transpose_mode != 0) {
+                            launch_transposed_kernel(
+                                tile_size,
+                                grid,
+                                block,
+                                shared_bytes,
+                                matrix_pointer,
+                                device_vector,
+                                device_output,
+                                options.rows,
+                                options.cols);
+                        } else {
+                            launch_row_major_kernel(
+                                tile_size,
+                                grid,
+                                block,
+                                shared_bytes,
+                                matrix_pointer,
+                                device_vector,
+                                device_output,
+                                options.rows,
+                                options.cols);
+                        }
+                    }
+
+                    cuda_check(cudaGetLastError(), "kernel launch");
+                    cuda_check(cudaEventRecord(stop_event), "cudaEventRecord stop");
+                    cuda_check(cudaEventSynchronize(stop_event), "cudaEventSynchronize stop");
+
+                    float elapsed_ms = 0.0f;
+                    cuda_check(cudaEventElapsedTime(&elapsed_ms, start_event, stop_event), "cudaEventElapsedTime");
+                    cuda_check(cudaEventDestroy(start_event), "cudaEventDestroy start");
+                    cuda_check(cudaEventDestroy(stop_event), "cudaEventDestroy stop");
+
+                    const double total_seconds = static_cast<double>(elapsed_ms) / 1000.0;
+                    const double latency_seconds = total_seconds / static_cast<double>(options.repeats);
+                    const double effective_gflops =
+                        (2.0 * static_cast<double>(options.rows) * static_cast<double>(options.cols))
+                        / std::max(latency_seconds, 1e-12) / 1.0e9;
+
+                    if (latency_seconds < best_metrics.wall_clock_latency_seconds) {
+                        cuda_check(
+                            cudaMemcpy(
+                                host_output.data(),
+                                device_output,
+                                host_output.size() * sizeof(float),
+                                cudaMemcpyDeviceToHost),
+                            "cudaMemcpy output");
+
+                        best_metrics.transpose = transpose_mode;
+                        best_metrics.block_size = block_size;
+                        best_metrics.tile_size = tile_size;
+                        best_metrics.repeats = options.repeats;
+                        best_metrics.wall_clock_latency_seconds = latency_seconds;
+                        best_metrics.effective_gflops = effective_gflops;
+                        best_metrics.checksum = fnv1a64_checksum(host_output);
+                        best_output_values = host_output;
+                    }
+                }
             }
         }
 
-        cuda_check(cudaGetLastError(), "kernel launch");
-        cuda_check(cudaEventRecord(stop_event), "cudaEventRecord stop");
-        cuda_check(cudaEventSynchronize(stop_event), "cudaEventSynchronize");
+        if (!options.output_path.empty()) {
+            write_float32_file(options.output_path, best_output_values);
+        }
 
-        float elapsed_ms = 0.0f;
-        cuda_check(cudaEventElapsedTime(&elapsed_ms, start_event, stop_event), "cudaEventElapsedTime");
-
-        std::vector<float> output_values(static_cast<size_t>(options.rows));
-        cuda_check(
-            cudaMemcpy(output_values.data(), device_output, output_values.size() * sizeof(float), cudaMemcpyDeviceToHost),
-            "cudaMemcpy output");
-        write_float32_file(options.output_path, output_values);
-
-        cudaEventDestroy(start_event);
-        cudaEventDestroy(stop_event);
-        cudaFree(device_matrix);
+        cudaFree(device_row_major);
+        if (device_transposed != nullptr) {
+            cudaFree(device_transposed);
+        }
         cudaFree(device_vector);
         cudaFree(device_output);
-
-        const double total_seconds = static_cast<double>(elapsed_ms) / 1000.0;
-        const double per_run_seconds = total_seconds / static_cast<double>(options.repeats);
 
         std::cout << "{"
                   << "\"backend\":\"cuda\","
                   << "\"device_name\":\"" << escape_json(device_props.name) << "\","
-                  << "\"total_seconds\":" << std::fixed << std::setprecision(9) << total_seconds << ","
-                  << "\"per_run_seconds\":" << std::fixed << std::setprecision(9) << per_run_seconds << ","
-                  << "\"repeats\":" << options.repeats << ","
-                  << "\"block_size\":" << options.block_size << ","
-                  << "\"tile_size\":" << options.tile_size << ","
-                  << "\"transpose\":" << options.transpose
+                  << "\"compute_capability\":\"" << device_props.major << device_props.minor << "\","
+                  << "\"transpose\":" << best_metrics.transpose << ","
+                  << "\"block_size\":" << best_metrics.block_size << ","
+                  << "\"tile_size\":" << best_metrics.tile_size << ","
+                  << "\"repeats\":" << best_metrics.repeats << ","
+                  << "\"trials_run\":" << trials_run << ","
+                  << "\"wall_clock_latency_seconds\":" << std::fixed << std::setprecision(9)
+                  << best_metrics.wall_clock_latency_seconds << ","
+                  << "\"effective_gflops\":" << std::fixed << std::setprecision(9)
+                  << best_metrics.effective_gflops << ","
+                  << "\"checksum\":\"" << best_metrics.checksum << "\""
                   << "}" << std::endl;
         return 0;
     } catch (const std::exception& exc) {

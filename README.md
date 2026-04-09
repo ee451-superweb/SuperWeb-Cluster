@@ -50,7 +50,7 @@ the implementation plan and can be extended incrementally.
 - `adapters/`: platform, network, and firewall adapters
 - `proto/`: protobuf schema documents for cross-language interoperability
 - `performance metrics/`: fixed matrix-vector multiplication benchmark suite
-  with Windows C++ CPU and optional CUDA backends
+  with a fixed 2 GiB dataset plus CPU and CUDA compute backends
 - `standalone_model/`: small self-contained network experiments for mDNS, TCP,
   and ZeroMQ throughput checks
 - `scripts/`: helper entry points for manual testing
@@ -119,16 +119,16 @@ Start a one-off multicast listener:
 python scripts/multicast_receiver.py --udp-port 5353
 ```
 
-List benchmark presets:
+Run the local benchmark suite:
 
 ```bash
-python "performance metrics/benchmark.py" --list-presets
+python "performance metrics/benchmark.py"
 ```
 
-Run the local CPU benchmark:
+Generate the fixed benchmark dataset only:
 
 ```bash
-python "performance metrics/benchmark.py" --backend cpu --preset standard
+python "performance metrics/fixed_matrix_vector_multiplication/input matrix/generate.py"
 ```
 
 ## Notes
@@ -152,9 +152,13 @@ python "performance metrics/benchmark.py" --backend cpu --preset standard
   report "not implemented" in this kickoff version.
 - Cleanup is best-effort. Windows firewall cleanup can also be called manually
   with `python scripts/cleanup_firewall.py`.
-- The benchmark workspace writes a summary-only report to
-  `performance metrics/result.json` and auto-builds local backend binaries under
-  backend-specific `build/` directories.
+- The benchmark workspace writes `performance metrics/result.json` with one
+  best entry per backend plus a backend `ranking`, and auto-builds local
+  backend binaries under backend-specific `build/` directories. The Windows
+  CPU/CUDA benchmark `.exe` files are checked in intentionally; other generated
+  benchmark artifacts remain local-only.
+- The benchmark uses a fixed input dataset:
+  `A[16384,32768]` float32 and `x[32768]`.
 - Benchmark datasets under `performance metrics/.../input matrix/generated/`
-  and benchmark reports are treated as local generated artifacts and are not
-  meant to stay tracked in git.
+  and benchmark reports are local generated artifacts and are not meant to stay
+  tracked in git.

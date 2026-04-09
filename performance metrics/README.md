@@ -1,126 +1,218 @@
 # Performance Metrics
 
-This folder benchmarks one method for now:
+This workspace benchmarks one method for now:
 
 - `fixed_matrix_vector_multiplication`
 
-The workspace directory is `performance metrics`.
+The current simplified flow is:
 
-## Goals
+1. make sure `A.bin` and `x.bin` exist
+2. if they do not exist, call `generate.py`
+3. detect which backend compute programs should run
+4. run those programs and keep the best result for each backend
+5. write `result.json`
 
-- deterministic benchmark input generation
-- linear scoring where shorter runtime means higher score
-- default runtime under 5 minutes on mainstream machines
-- automatic search for a better configuration instead of one hard-coded setup
-- Windows C++ CPU first, CUDA optional when `nvcc` is available
+## Fixed Dataset
 
-## Current Layout
+By default the benchmark uses one fixed problem:
 
-- `benchmark.py`: top-level entry point that picks backends, enforces a global
-  time budget, and writes the summary report
-- `workloads.py`: preset dimensions and scoring windows
-- `fmvm_dataset.py`: deterministic dataset generation plus reference output
-  validation
-- `backends/cpu_backend.py`: Windows CPU benchmark orchestration
-- `backends/cuda_backend.py`: optional CUDA orchestration
-- `fixed_matrix_vector_multiplication/cpu/windows/fmvm_cpu_windows.cpp`:
-  MSVC-built CPU runner
-- `fixed_matrix_vector_multiplication/cuda/fmvm_cuda_runner.cu`: CUDA runner
-  source
+- `A`: `16384 x 32768` float32, exactly `2 GiB`
+- `x`: `32768` float32
+- operation: `y = A x`
+
+The production benchmark uses this fixed shape so different machines are
+comparing the same work.
+
+## What Each File Does
+
+- `benchmark.py`
+  - top-level orchestrator
+  - checks whether generated inputs exist
+  - calls `generate.py` when needed
+  - runs the backend adapters, ranks their best results, and writes `result.json`
+- `fmvm_dataset.py`
+  - dataset manager only
+  - knows where `A.bin`, `x.bin`, and `dataset_meta.json` live
+  - knows how to generate them deterministically
+  - does not run any compute benchmark itself
+- `backends/`
+  - one Python adapter per hardware family
+  - each backend knows how to build and launch its matching compute program
+  - `benchmark.py` stays hardware-agnostic by delegating to this folder
+- `backends/cpu_backend.py`
+  - Windows CPU adapter
+  - compiles and runs `fixed_matrix_vector_multiplication/cpu/windows/fmvm_cpu_windows.cpp`
+- `backends/cuda_backend.py`
+  - CUDA adapter
+  - compiles and runs `fixed_matrix_vector_multiplication/cuda/fmvm_cuda_runner.cu`
+- `fixed_matrix_vector_multiplication/cpu/windows/fmvm_cpu_windows.cpp`
+  - the actual CPU compute program
+  - reads `A.bin` and `x.bin`
+  - tries multiple worker counts and tile sizes
+  - outputs best latency, effective GFLOPS, checksum, and best config
+- `fixed_matrix_vector_multiplication/cuda/fmvm_cuda_runner.cu`
+  - the actual CUDA compute program
+  - reads `A.bin` and `x.bin` once
+  - tries multiple `transpose`, `block_size`, and `tile_size` combinations
+  - outputs the fastest configuration plus latency, effective GFLOPS, and checksum
+
+## Backends
+
+- `cpu`
+  - implemented today
+  - searches worker counts in the requested binary-tree order, such as
+    `16 -> 8 -> 32 -> 4 -> 64`
+  - sweeps multiple tile sizes for each worker candidate
+  - reads the dataset once, then benchmarks all candidate configurations in memory
+- `cuda`
+  - implemented when `nvcc` and a CUDA-capable GPU are available
+  - searches `transpose`, `block_size`, and `tile_size`
+  - compiles for the detected GPU compute capability, such as `sm_89`
+  - keeps the matrix-vector arithmetic in FP32
+  - is checked against the CPU path with FP32-friendly error tolerances
 
 ## Scoring
 
-For each workload:
+The benchmark still maps latency to a linear score:
 
 ```text
 score = clamp(
-    max_score * (zero_score_seconds - elapsed_seconds)
+    max_score * (zero_score_seconds - wall_clock_latency_seconds)
     / (zero_score_seconds - ideal_seconds),
     0,
     max_score
 )
 ```
 
-- `elapsed_seconds` is the measured time for one matrix-vector multiply
-- `ideal_seconds` gives the full score
-- `zero_score_seconds` gives score 0
-- the score changes linearly between those two points
-
-Default `max_score` is `1000`.
-
-## Presets
-
-- `smoke`: tiny dataset for tests and quick validation
-- `quick`: faster local sanity benchmark
-- `standard`: default benchmark preset
-- `extended`: larger workload when you want more separation
-
-`standard` is tuned to stay comfortably below 5 minutes even when the CPU
-backend explores multiple configurations.
-
-## Backends
-
-- `cpu`: implemented with a Windows C++ runner
-  - auto-compiles `fixed_matrix_vector_multiplication/cpu/windows/fmvm_cpu_windows.cpp`
-    with MSVC through `VsDevCmd.bat`
-  - benchmark orchestration starts from the detected hardware worker count
-  - worker search follows a binary-tree style order such as `16 -> 8/32 -> 4/64`
-  - every worker candidate gets a full tile-size sweep
-- `cuda`: optional
-  - compiles `fixed_matrix_vector_multiplication/cuda/fmvm_cuda_runner.cu`
-    with `nvcc` when CUDA is available
-  - autotunes `transpose`, `block_size`, and `tile_size`
-  - skips cleanly if `nvcc` is not present
+Shorter runtime means higher score.
 
 ## Usage
 
-List presets:
-
-```bash
-python "performance metrics/benchmark.py" --list-presets
-```
-
-Run the default CPU + CUDA benchmark:
+Run the benchmark with the default fixed dataset:
 
 ```bash
 python "performance metrics/benchmark.py"
 ```
 
-Run only CPU with a smaller smoke preset:
+By default this tries every backend that the workspace currently knows about,
+which is CPU first and CUDA when the local machine/toolchain supports it.
+
+Run only the CPU backend:
 
 ```bash
-python "performance metrics/benchmark.py" --backend cpu --preset smoke
+python "performance metrics/benchmark.py" --backend cpu
 ```
 
-Run CPU and write the summary report to a custom path:
+Run only the CUDA backend:
 
 ```bash
-python "performance metrics/benchmark.py" --backend cpu --preset standard --output my_result.json
+python "performance metrics/benchmark.py" --backend cuda
 ```
 
-Generate only the input dataset:
+Generate the dataset without running the benchmark:
 
 ```bash
-python "performance metrics/fixed_matrix_vector_multiplication/input matrix/generate.py" --preset standard
+python "performance metrics/fixed_matrix_vector_multiplication/input matrix/generate.py"
 ```
 
-Benchmark results are written to:
+When `tqdm` is installed, dataset generation shows a live progress bar for
+`A.bin` and `x.bin`.
 
-- `performance metrics/result.json`
+Write the benchmark report somewhere other than the default `result.json`:
 
-Build artifacts are written under backend-local `build/` directories, for
-example:
+```bash
+python "performance metrics/benchmark.py" --output my_result.json
+```
 
-- `performance metrics/fixed_matrix_vector_multiplication/cpu/windows/build/`
+`--rows` and `--cols` still exist for tests and tiny local experiments, but the
+normal benchmark path is the fixed 2 GiB matrix above.
+
+## Outputs
+
+- Generated input files:
+  - `performance metrics/fixed_matrix_vector_multiplication/input matrix/generated/A.bin`
+  - `performance metrics/fixed_matrix_vector_multiplication/input matrix/generated/x.bin`
+  - `performance metrics/fixed_matrix_vector_multiplication/input matrix/generated/dataset_meta.json`
+- Benchmark summary:
+  - `performance metrics/result.json`
+- CPU build artifacts:
+  - `performance metrics/fixed_matrix_vector_multiplication/cpu/windows/build/`
 
 ## Notes
 
-- The CPU backend compiles and runs
-  `fixed_matrix_vector_multiplication/cpu/windows/fmvm_cpu_windows.cpp`.
-- The CUDA backend is designed so the current environment can skip it cleanly
-  while CUDA-equipped machines can compile and run it later.
-- `result.json` is intentionally summary-only and stores just the global best
-  configuration and its measured result.
-- Generated datasets under `input matrix/generated/`, backend build outputs,
-  and `result.json` are git-ignored because they are local benchmark artifacts.
-- If you need a second local report, pass a custom `--output` path.
+- Generated datasets, backend build outputs, and `result.json` are git-ignored
+  because they are machine-local artifacts.
+- The checked-in exception is the Windows CPU/CUDA benchmark executables, so a
+  fresh Windows checkout can run those backends without rebuilding first.
+- The CPU compute program reports:
+  - wall-clock latency
+  - effective GFLOPS
+  - checksum
+- The CUDA compute program reports the same metrics and also returns the best
+  CUDA launch/layout configuration it found.
+- Cross-implementation checks use FP32 error tolerances instead of exact
+  checksum matches, because different reduction orders can still be correct
+  while producing slightly different FP32 results.
+- `result.json` now keeps one best entry per backend plus a `ranking` list, so
+  other programs can select the top one or top two backends directly.
+
+## Result Schema
+
+`result.json` is organized around two ideas:
+
+- `backend_results`
+  - one entry per backend such as `cpu` or `cuda`
+  - stores whether that backend was available
+  - stores its rank among successful backends
+  - stores the best configuration and best measured result for that backend
+  - keeps backend-level notes plus best-trial notes such as CUDA device and `sm`
+- `ranking`
+  - ordered list of backend names from fastest to slowest among successful
+    backends
+  - downstream code can read `ranking[0]` for the single best backend or
+    `ranking[:2]` for the top two choices
+- `dataset`
+  - stores dataset file locations as paths relative to `performance metrics/`
+    instead of machine-specific absolute paths
+
+Example shape:
+
+```json
+{
+  "best_backend": "cuda",
+  "ranking": ["cuda", "cpu"],
+  "backend_results": {
+    "cuda": {
+      "available": true,
+      "rank": 1,
+      "best_config": {
+        "transpose": false,
+        "block_size": 256,
+        "tile_size": 8
+      },
+      "best_result": {
+        "wall_clock_latency_seconds": 0.0085,
+        "effective_gflops": 125.2,
+        "checksum": "fnv1a64:...",
+        "score": 1000.0
+      },
+      "trial_notes": ["device=RTX-class GPU", "sm=89"]
+    },
+    "cpu": {
+      "available": true,
+      "rank": 2,
+      "best_config": {
+        "workers": 64,
+        "tile_size": 4096
+      },
+      "best_result": {
+        "wall_clock_latency_seconds": 0.044,
+        "effective_gflops": 24.1,
+        "checksum": "fnv1a64:...",
+        "score": 1000.0
+      },
+      "trial_notes": []
+    }
+  }
+}
+```
