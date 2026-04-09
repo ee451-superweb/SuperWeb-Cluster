@@ -19,6 +19,8 @@ The current version implements:
 - scheduler heartbeat plus `HEARTBEAT_OK` acknowledgement handling
 - separate home scheduler connection pools for workers and clients
 - minimal client join and request/response handling on the scheduler
+- a local `performance metrics/` workspace for repeatable CPU/CUDA compute
+  benchmarking
 - automatic promotion into the home scheduler runtime in `main_node/runtime.py`
   when no home scheduler is found
 - manual address fallback when discovery fails
@@ -47,6 +49,10 @@ the implementation plan and can be extended incrementally.
 - `discovery/`: multicast pairing and manual fallback
 - `adapters/`: platform, network, and firewall adapters
 - `proto/`: protobuf schema documents for cross-language interoperability
+- `performance metrics/`: fixed matrix-vector multiplication benchmark suite
+  with a fixed 2 GiB dataset plus CPU and CUDA compute backends
+- `standalone_model/`: small self-contained network experiments for mDNS, TCP,
+  and ZeroMQ throughput checks
 - `scripts/`: helper entry points for manual testing
 - `tests/`: automated checks for discovery and runtime behavior
 
@@ -113,6 +119,18 @@ Start a one-off multicast listener:
 python scripts/multicast_receiver.py --udp-port 5353
 ```
 
+Run the local benchmark suite:
+
+```bash
+python "performance metrics/benchmark.py"
+```
+
+Generate the fixed benchmark dataset only:
+
+```bash
+python "performance metrics/fixed_matrix_vector_multiplication/input matrix/generate.py"
+```
+
 ## Notes
 
 - The project is implemented with the Python standard library only.
@@ -134,3 +152,13 @@ python scripts/multicast_receiver.py --udp-port 5353
   report "not implemented" in this kickoff version.
 - Cleanup is best-effort. Windows firewall cleanup can also be called manually
   with `python scripts/cleanup_firewall.py`.
+- The benchmark workspace writes `performance metrics/result.json` with one
+  best entry per backend plus a backend `ranking`, and auto-builds local
+  backend binaries under backend-specific `build/` directories. The Windows
+  CPU/CUDA benchmark `.exe` files are checked in intentionally; other generated
+  benchmark artifacts remain local-only.
+- The benchmark uses a fixed input dataset:
+  `A[16384,32768]` float32 and `x[32768]`.
+- Benchmark datasets under `performance metrics/.../input matrix/generated/`
+  and benchmark reports are local generated artifacts and are not meant to stay
+  tracked in git.
