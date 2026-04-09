@@ -95,11 +95,15 @@ The fixed FMVM workload now runs in two stages:
   - sweeps worker counts in binary-tree order such as `16 -> 8 -> 32 -> 4 -> 64`
   - sweeps multiple tile sizes
   - reads the dataset once and benchmarks candidate configs in memory
+  - on Windows, the checked-in runner is built with the static MSVC runtime (`/MT`)
+  - the checked-in Windows CPU runner can run on a clean machine without Visual Studio
   - uses the current OS CPU binary when present, otherwise compiles the current OS source
 - `cuda`
-  - enabled when `nvcc` and a CUDA-capable GPU are available
+  - on Windows, prefers the checked-in self-contained runner before trying to rebuild
   - sweeps `transpose`, `block_size`, and `tile_size`
-  - compiles for the detected compute capability such as `sm_89`
+  - the checked-in Windows CUDA runner statically links `cudart` and the MSVC runtime
+  - the checked-in Windows CUDA runner is built as a fat binary for `sm_75`, `sm_80`, `sm_86`, `sm_89`, and `sm_90`
+  - runtime needs only a compatible NVIDIA driver; `nvcc` and Visual Studio are only needed for rebuilding
   - keeps the matrix-vector arithmetic in FP32
 - `metal`
   - enabled on macOS when a prebuilt self-contained runner is present, or when
@@ -200,6 +204,13 @@ Write the report to a different path:
 python "compute_node/performance_metrics/benchmark.py" --output my_result.json
 ```
 
+Force all selected backends to rebuild their executables instead of reusing
+checked-in or cached binaries:
+
+```bash
+python "compute_node/performance_metrics/benchmark.py" --rebuild
+```
+
 `--rows` and `--cols` remain available for tiny tests. When you use those
 overrides without changing `--dataset-dir`, the generated files are written to
 `compute_node/input matrix/generated/overrides/<rows>x<cols>/` so the main
@@ -211,9 +222,12 @@ production dataset does not get overwritten.
 - The benchmark picks the binary that matches the current OS. If that binary
   is missing or older than the current OS source, it falls back to compiling
   the current OS source.
-- The checked-in exception is still the pair of Windows benchmark executables
-  so a fresh Windows checkout can run CPU/CUDA backends without rebuilding
-  first.
+- `--rebuild` disables that reuse path for the selected backends and requires
+  a usable local toolchain.
+- The checked-in Windows CPU/CUDA executables are intended to be directly runnable
+  on another Windows machine without a local compiler or CUDA toolkit install.
+- The Windows CUDA runner still requires the NVIDIA driver at runtime because
+  the driver provides `nvcuda.dll`.
 - The self-contained Metal runner embeds its compiled `metallib`. Once built,
   it can run on another compatible macOS machine without Xcode or the Metal
   toolchain installed.

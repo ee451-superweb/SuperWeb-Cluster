@@ -28,6 +28,7 @@ from backends.cuda_backend import (
     _candidate_block_sizes as cuda_candidate_block_sizes,
     _candidate_tile_sizes as cuda_candidate_tile_sizes,
     _candidate_transpose_modes as cuda_candidate_transpose_modes,
+    _windows_gencode_args,
 )
 from backends.metal_backend import (
     MetalBackend,
@@ -55,6 +56,10 @@ class PerformanceMatricsTests(unittest.TestCase):
 
     def test_worker_binary_tree_sequence(self) -> None:
         self.assertEqual(_binary_tree_worker_candidates(16), [16, 8, 32, 4, 64])
+
+    def test_benchmark_parser_accepts_rebuild_flag(self) -> None:
+        args = benchmark.build_parser().parse_args(["--rebuild"])
+        self.assertTrue(args.rebuild)
 
     def test_cpu_artifacts_follow_platform(self) -> None:
         windows_artifacts = _cpu_artifacts_for_platform("win32")
@@ -89,6 +94,31 @@ class PerformanceMatricsTests(unittest.TestCase):
 
         self.assertEqual(executable_path, artifacts.executable_path)
         self.assertIn("using prebuilt", note)
+
+    def test_cpu_backend_force_rebuild_compiles_even_with_existing_binary(self) -> None:
+        backend = CpuBackend()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            artifacts = CpuArtifacts(
+                platform_key="macos",
+                platform_label="macOS",
+                source_path=temp_root / "fmvm_cpu_macos.cpp",
+                build_dir=temp_root / "build",
+                executable_path=temp_root / "build" / "fmvm_cpu_macos",
+            )
+            artifacts.build_dir.mkdir(parents=True, exist_ok=True)
+            artifacts.source_path.write_text("// source placeholder\n", encoding="utf-8")
+            artifacts.executable_path.write_text("binary placeholder\n", encoding="utf-8")
+
+            with (
+                mock.patch.object(backend, "_can_build_for_artifacts", return_value=(True, "")),
+                mock.patch.object(backend, "_compile_macos_runner") as compile_mock,
+            ):
+                executable_path, note = backend._resolve_executable_path(artifacts, force_rebuild=True)
+
+        self.assertEqual(executable_path, artifacts.executable_path)
+        compile_mock.assert_called_once_with(artifacts)
+        self.assertIn("rebuild was explicitly requested", note)
 
     def test_default_spec_matches_requested_2gib_shape(self) -> None:
         spec = build_benchmark_spec()
@@ -203,6 +233,52 @@ class PerformanceMatricsTests(unittest.TestCase):
         available, message = backend.probe()
         self.assertIsInstance(available, bool)
         self.assertTrue(message)
+
+    def test_windows_cuda_fat_binary_targets_common_sms(self) -> None:
+        args = _windows_gencode_args("89")
+        self.assertIn("-gencode=arch=compute_75,code=sm_75", args)
+        self.assertIn("-gencode=arch=compute_80,code=sm_80", args)
+        self.assertIn("-gencode=arch=compute_86,code=sm_86", args)
+        self.assertIn("-gencode=arch=compute_89,code=sm_89", args)
+        self.assertIn("-gencode=arch=compute_90,code=sm_90", args)
+
+    def test_cuda_backend_probe_accepts_prebuilt_windows_runner_without_nvcc(self) -> None:
+        backend = CudaBackend()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            binary_path = temp_root / "fmvm_cuda_runner.exe"
+            source_path = temp_root / "fmvm_cuda_runner.cu"
+            binary_path.write_text("binary placeholder\n", encoding="utf-8")
+            source_path.write_text("// source placeholder\n", encoding="utf-8")
+
+            with (
+                mock.patch("backends.cuda_backend.os.name", "nt"),
+                mock.patch("backends.cuda_backend.CUDA_EXECUTABLE_PATH", binary_path),
+                mock.patch("backends.cuda_backend.CUDA_SOURCE_PATH", source_path),
+                mock.patch("backends.cuda_backend._detect_compute_capability", return_value="89"),
+                mock.patch.object(backend, "_toolchain_status", return_value=(False, "nvcc missing")),
+            ):
+                available, message = backend.probe()
+
+        self.assertTrue(available)
+        self.assertIn("self-contained Windows runner", message)
+
+    def test_cuda_backend_force_rebuild_requires_toolchain(self) -> None:
+        backend = CudaBackend()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            binary_path = temp_root / "fmvm_cuda_runner.exe"
+            source_path = temp_root / "fmvm_cuda_runner.cu"
+            binary_path.write_text("binary placeholder\n", encoding="utf-8")
+            source_path.write_text("// source placeholder\n", encoding="utf-8")
+
+            with (
+                mock.patch("backends.cuda_backend.CUDA_EXECUTABLE_PATH", binary_path),
+                mock.patch("backends.cuda_backend.CUDA_SOURCE_PATH", source_path),
+                mock.patch.object(backend, "_toolchain_status", return_value=(False, "nvcc missing")),
+            ):
+                with self.assertRaises(FileNotFoundError):
+                    backend._resolve_executable_path(force_rebuild=True)
 
     def test_metal_backend_probe_returns_status(self) -> None:
         backend = MetalBackend()

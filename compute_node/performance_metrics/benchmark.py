@@ -66,6 +66,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=240.0,
         help="Total benchmark time budget in seconds. Defaults to 240 (< 5 minutes).",
     )
+    parser.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="Force backend executables to rebuild instead of reusing checked-in or cached binaries.",
+    )
     parser.add_argument("--rows", type=int, help="Optional test-only override for the matrix row count.")
     parser.add_argument("--cols", type=int, help="Optional test-only override for the matrix column count.")
     return parser
@@ -185,6 +190,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
     """Run the benchmark and return the JSON-serializable report."""
 
     backends = build_backends(args.backend)
+    force_rebuild = bool(getattr(args, "rebuild", False))
     hardware_inventory = _probe_backends(backends)
     detected_backends = [
         backend.name
@@ -210,6 +216,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
                     spec,
                     dataset,
                     time_budget_seconds=1.0,
+                    force_rebuild=force_rebuild,
                 )
             )
             continue
@@ -222,6 +229,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
                 spec,
                 dataset,
                 time_budget_seconds=per_backend_budget,
+                force_rebuild=force_rebuild,
             )
         )
         runnable_index += 1
@@ -254,6 +262,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
             "measurement_repeats": DEFAULT_MEASUREMENT_REPEATS,
             "selection_metric": "autotune_average_latency",
             "reported_metric": "measurement_average_latency",
+            "force_rebuild": force_rebuild,
         },
         "host": {
             "platform": sys.platform,

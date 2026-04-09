@@ -35,6 +35,10 @@ from scoring import linear_time_score
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 CPU_ROOT_DIR = ROOT_DIR / "fixed_matrix_vector_multiplication" / "cpu"
+WINDOWS_SELF_CONTAINED_NOTE = (
+    "Windows CPU runner is built as a self-contained executable with the static MSVC runtime "
+    "(`/MT`), so runtime does not require Visual Studio or the VC++ redistributable."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,15 +212,16 @@ class CpuBackend:
             if not source_is_newer_than_binary:
                 return (
                     True,
-                    f"{artifacts.platform_label} CPU backend available via binary at "
-                    f"{_relative_project_path(artifacts.executable_path)}. worker search order: {worker_candidates}",
+                    f"{artifacts.platform_label} CPU backend available via self-contained binary at "
+                    f"{_relative_project_path(artifacts.executable_path)}. No local compiler toolchain is required at "
+                    f"runtime. worker search order: {worker_candidates}",
                 )
 
             can_build, build_message = self._can_build_for_artifacts(artifacts)
             if not can_build:
                 return (
                     True,
-                    f"{artifacts.platform_label} CPU backend available via binary at "
+                    f"{artifacts.platform_label} CPU backend available via self-contained binary at "
                     f"{_relative_project_path(artifacts.executable_path)}. Source is newer, but the build toolchain "
                     f"is unavailable ({build_message}), so the existing binary will be used. "
                     f"worker search order: {worker_candidates}",
@@ -247,6 +252,7 @@ class CpuBackend:
         dataset: DatasetLayout,
         *,
         time_budget_seconds: float,
+        force_rebuild: bool = False,
     ) -> BackendResult:
         """Run the C++ CPU executable once and return its best found configuration."""
 
@@ -264,8 +270,10 @@ class CpuBackend:
             )
 
         try:
-            executable_path, executable_note = self._resolve_executable_path()
+            executable_path, executable_note = self._resolve_executable_path(force_rebuild=force_rebuild)
             notes.append(executable_note)
+            if sys.platform == "win32":
+                notes.append(WINDOWS_SELF_CONTAINED_NOTE)
             if sys.platform == "darwin":
                 notes.append(self._macos_linkage_note(executable_path))
         except (OSError, subprocess.CalledProcessError) as exc:
@@ -392,13 +400,18 @@ class CpuBackend:
             notes=notes,
         )
 
-    def _compile_if_needed(self) -> Path:
+    def _compile_if_needed(self, *, force_rebuild: bool = False) -> Path:
         """Return the current platform CPU executable, compiling only when needed."""
 
-        executable_path, _note = self._resolve_executable_path()
+        executable_path, _note = self._resolve_executable_path(force_rebuild=force_rebuild)
         return executable_path
 
-    def _resolve_executable_path(self, artifacts: CpuArtifacts | None = None) -> tuple[Path, str]:
+    def _resolve_executable_path(
+        self,
+        artifacts: CpuArtifacts | None = None,
+        *,
+        force_rebuild: bool = False,
+    ) -> tuple[Path, str]:
         """Prefer the current OS binary and fall back to compiling the current OS source."""
 
         resolved_artifacts = _current_cpu_artifacts() if artifacts is None else artifacts
@@ -408,7 +421,15 @@ class CpuBackend:
         resolved_artifacts.build_dir.mkdir(parents=True, exist_ok=True)
         compile_reason = "binary is missing"
         build_inputs = [resolved_artifacts.source_path, Path(__file__)]
-        if resolved_artifacts.executable_path.exists():
+        if force_rebuild:
+            compile_reason = "rebuild was explicitly requested"
+            can_build, build_message = self._can_build_for_artifacts(resolved_artifacts)
+            if not can_build:
+                raise FileNotFoundError(
+                    f"force rebuild requested for the {resolved_artifacts.platform_label} CPU runner, but the build "
+                    f"toolchain is unavailable ({build_message})"
+                )
+        elif resolved_artifacts.executable_path.exists():
             if _binary_is_stale(resolved_artifacts.executable_path, build_inputs):
                 can_build, build_message = self._can_build_for_artifacts(resolved_artifacts)
                 if can_build:
@@ -416,7 +437,7 @@ class CpuBackend:
                 else:
                     return (
                         resolved_artifacts.executable_path,
-                        f"using prebuilt {resolved_artifacts.platform_label} CPU binary at "
+                        f"using prebuilt self-contained {resolved_artifacts.platform_label} CPU binary at "
                         f"{_relative_project_path(resolved_artifacts.executable_path)} because the source or build "
                         f"recipe is newer but "
                         f"the build toolchain is unavailable ({build_message})",
@@ -424,7 +445,7 @@ class CpuBackend:
             else:
                 return (
                     resolved_artifacts.executable_path,
-                    f"using prebuilt {resolved_artifacts.platform_label} CPU binary at "
+                    f"using prebuilt self-contained {resolved_artifacts.platform_label} CPU binary at "
                     f"{_relative_project_path(resolved_artifacts.executable_path)}",
                 )
 
@@ -446,7 +467,7 @@ class CpuBackend:
             )
         return (
             resolved_artifacts.executable_path,
-            f"compiled {resolved_artifacts.platform_label} CPU runner from "
+            f"compiled self-contained {resolved_artifacts.platform_label} CPU runner from "
             f"{_relative_project_path(resolved_artifacts.source_path)} because {compile_reason}",
         )
 
@@ -467,7 +488,11 @@ class CpuBackend:
                     # FP32 reduction, which is appropriate for this performance
                     # benchmark because correctness is already checked with
                     # tolerance-based validation rather than exact bit matches.
-                    f"cl /nologo /std:c++20 /O2 /fp:fast /EHsc /Fe:{artifacts.executable_path.name} "
+                    # `/MT` statically links the MSVC runtime so the checked-in
+                    # benchmark executable can run on a clean Windows machine
+                    # without requiring the Visual Studio toolchain or a VC++
+                    # redistributable install.
+                    f"cl /nologo /std:c++20 /O2 /fp:fast /MT /EHsc /Fe:{artifacts.executable_path.name} "
                     f"..\\{artifacts.source_path.name}",
                     "set \"BUILD_EXIT=%ERRORLEVEL%\"",
                     "popd",

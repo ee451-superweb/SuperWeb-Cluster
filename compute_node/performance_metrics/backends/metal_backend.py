@@ -173,6 +173,7 @@ class MetalBackend:
         dataset: DatasetLayout,
         *,
         time_budget_seconds: float,
+        force_rebuild: bool = False,
     ) -> BackendResult:
         """Run the Metal executable once and return the best configuration it found."""
 
@@ -190,7 +191,7 @@ class MetalBackend:
             )
 
         try:
-            executable_path, build_note = self._compile_if_needed()
+            executable_path, build_note = self._compile_if_needed(force_rebuild=force_rebuild)
             notes.append(build_note)
             notes.append(self._runtime_note(executable_path))
         except (OSError, subprocess.CalledProcessError) as exc:
@@ -326,12 +327,12 @@ class MetalBackend:
             notes=notes,
         )
 
-    def _compile_if_needed(self) -> tuple[Path, str]:
+    def _compile_if_needed(self, *, force_rebuild: bool = False) -> tuple[Path, str]:
         """Build the self-contained Metal runner when sources changed."""
 
         METAL_BUILD_DIR.mkdir(parents=True, exist_ok=True)
         build_inputs = [METAL_HOST_SOURCE_PATH, METAL_KERNEL_SOURCE_PATH, Path(__file__)]
-        if METAL_EXECUTABLE_PATH.exists() and not _binary_is_stale(METAL_EXECUTABLE_PATH, build_inputs):
+        if not force_rebuild and METAL_EXECUTABLE_PATH.exists() and not _binary_is_stale(METAL_EXECUTABLE_PATH, build_inputs):
             return (
                 METAL_EXECUTABLE_PATH,
                 f"using prebuilt self-contained Metal runner at {_relative_project_path(METAL_EXECUTABLE_PATH)}",
@@ -339,7 +340,7 @@ class MetalBackend:
 
         toolchain_available, toolchain_message = self._toolchain_status()
         if not toolchain_available:
-            if METAL_EXECUTABLE_PATH.exists():
+            if not force_rebuild and METAL_EXECUTABLE_PATH.exists():
                 return (
                     METAL_EXECUTABLE_PATH,
                     f"using prebuilt self-contained Metal runner at {_relative_project_path(METAL_EXECUTABLE_PATH)} "
@@ -405,7 +406,8 @@ class MetalBackend:
         return (
             METAL_EXECUTABLE_PATH,
             f"compiled self-contained Metal runner from {_relative_project_path(METAL_HOST_SOURCE_PATH)} and "
-            f"{_relative_project_path(METAL_KERNEL_SOURCE_PATH)} with an embedded metallib",
+            f"{_relative_project_path(METAL_KERNEL_SOURCE_PATH)} with an embedded metallib"
+            + (" because rebuild was explicitly requested" if force_rebuild else ""),
         )
 
     def _toolchain_status(self) -> tuple[bool, str]:
