@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 import tempfile
@@ -10,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-PERF_DIR = Path(__file__).resolve().parents[1] / "performance metrics"
+PERF_DIR = Path(__file__).resolve().parents[1] / "compute_node" / "performance metrics"
 if str(PERF_DIR) not in sys.path:
     sys.path.insert(0, str(PERF_DIR))
 
@@ -66,6 +67,35 @@ class PerformanceMatricsTests(unittest.TestCase):
             self.assertEqual(layout.vector_path.name, "x.bin")
             self.assertEqual(layout.matrix_path.stat().st_size, spec.matrix_bytes)
             self.assertEqual(layout.vector_path.stat().st_size, spec.vector_bytes)
+
+    def test_dataset_is_generated_rejects_mismatched_metadata(self) -> None:
+        spec = build_benchmark_spec(rows=8, cols=16)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            layout = build_dataset_layout(Path(temp_dir))
+            generate_dataset(layout, spec)
+            metadata = json.loads(layout.meta_path.read_text(encoding="utf-8"))
+            metadata["benchmark"]["rows"] = 9
+            layout.meta_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+            self.assertFalse(dataset_is_generated(layout, spec))
+
+    def test_small_override_uses_override_dataset_directory_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            default_dataset_dir = temp_root / "generated"
+            args = argparse.Namespace(
+                backend=["cpu"],
+                dataset_dir=default_dataset_dir,
+                output=temp_root / "result.json",
+                time_budget=30.0,
+                rows=8,
+                cols=16,
+            )
+            with mock.patch.object(benchmark, "DEFAULT_DATASET_DIR", default_dataset_dir):
+                report = benchmark.run_benchmark(args)
+
+        dataset_root = Path(report["dataset"]["root_dir"])
+        self.assertEqual(dataset_root.parts[-3:], ("generated", "overrides", "8x16"))
 
     def test_benchmark_auto_generates_and_runs_cpu(self) -> None:
         backend = CpuBackend()

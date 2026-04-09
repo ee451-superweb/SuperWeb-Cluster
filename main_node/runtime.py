@@ -1,4 +1,4 @@
-"""Home scheduler runtime loop for the kickoff version."""
+"""Main-node runtime loop for superweb-cluster Sprint 1."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from adapters import network
 from common.types import DiscoveryResult
 from config import AppConfig
 from constants import (
-    HOME_SCHEDULER_NAME,
+    MAIN_NODE_NAME,
     RUNTIME_MSG_CLIENT_JOIN,
     RUNTIME_MSG_CLIENT_REQUEST,
     RUNTIME_MSG_CLIENT_RESPONSE,
@@ -21,7 +21,7 @@ from constants import (
     RUNTIME_MSG_REGISTER_WORKER,
 )
 from discovery import multicast
-from main_node.registry import HomeClusterRegistry, RuntimePeerConnection
+from main_node.registry import ClusterRegistry, RuntimePeerConnection
 from runtime_protocol import (
     MessageKind,
     build_client_response,
@@ -35,7 +35,7 @@ from trace_utils import trace_function
 
 
 class MainNodeRuntime:
-    """Home scheduler loop that listens for multicast and responds to discovery."""
+    """Main-node loop that listens for multicast and responds to discovery."""
 
     @trace_function
     def __init__(
@@ -47,26 +47,26 @@ class MainNodeRuntime:
         self.config = config
         self.logger = logger
         self.should_stop = should_stop or (lambda: False)
-        self.registry = HomeClusterRegistry()
+        self.registry = ClusterRegistry()
         self._stop_event = threading.Event()
 
     @trace_function
     def _print_startup_banner(self, local_ip: str, local_mac: str) -> None:
-        """Print the information that identifies this process as the home scheduler."""
+        """Print the information that identifies this process as the main node."""
 
         if self.config.role == "announce":
-            print("Starting home scheduler runtime.", flush=True)
+            print("Starting main-node runtime.", flush=True)
         else:
-            print("No home scheduler discovered after retry limit. Promoting self to home scheduler.", flush=True)
-        print(f"home_scheduler_ip={local_ip}", flush=True)
-        print(f"home_scheduler_mac={local_mac}", flush=True)
-        print(f"home_scheduler_tcp_port={self.config.tcp_port}", flush=True)
+            print("No main node discovered after retry limit. Promoting self to main node.", flush=True)
+        print(f"main_node_ip={local_ip}", flush=True)
+        print(f"main_node_mac={local_mac}", flush=True)
+        print(f"main_node_tcp_port={self.config.tcp_port}", flush=True)
         print(
-            f"Listening for home cluster mDNS discovery on {self.config.multicast_group}:{self.config.udp_port}",
+            f"Listening for superweb-cluster mDNS discovery on {self.config.multicast_group}:{self.config.udp_port}",
             flush=True,
         )
         print(
-            f"Listening for home cluster worker/client TCP runtime connections on 0.0.0.0:{self.config.tcp_port}",
+            f"Listening for superweb-cluster runtime connections on 0.0.0.0:{self.config.tcp_port}",
             flush=True,
         )
 
@@ -87,12 +87,29 @@ class MainNodeRuntime:
     def _cluster_counts(self) -> tuple[int, int]:
         return self.registry.count_workers(), self.registry.count_clients()
 
+    def _format_reported_hardware(self, connection: RuntimePeerConnection) -> str:
+        if connection.performance is None or not connection.performance.ranked_hardware:
+            return "[]"
+        return "[" + ", ".join(
+            f"{item.hardware_type}:{item.effective_gflops:.3f}"
+            for item in connection.performance.ranked_hardware
+        ) + "]"
+
+    def _print_cluster_compute_capacity(self) -> None:
+        print(
+            "Current cluster compute capacity "
+            f"total_effective_gflops={self.registry.total_registered_gflops():.3f} "
+            f"worker_count={self.registry.count_workers()} "
+            f"hardware_count={self.registry.count_registered_hardware()}",
+            flush=True,
+        )
+
     @trace_function
     def _register_worker_connection(
         self,
         client_sock: socket.socket,
         addr: tuple[str, int],
-        scheduler_ip: str,
+        main_node_ip: str,
         register_worker,
     ) -> RuntimePeerConnection:
         payload = register_worker
@@ -101,21 +118,25 @@ class MainNodeRuntime:
             peer_address=addr[0],
             peer_port=addr[1],
             hardware=payload.hardware,
+            performance=payload.performance,
             sock=client_sock,
         )
         send_message(
             client_sock,
             build_register_ok(
-                scheduler_ip=scheduler_ip,
-                scheduler_port=self.config.tcp_port,
-                scheduler_name=HOME_SCHEDULER_NAME,
+                main_node_ip=main_node_ip,
+                main_node_port=self.config.tcp_port,
+                main_node_name=MAIN_NODE_NAME,
             ),
         )
         print(
-            f"Registered home computer {connection.node_name} from {connection.peer_address}:{connection.peer_port} "
-            f"cpu={connection.hardware.logical_cpu_count} memory_bytes={connection.hardware.memory_bytes}",
+            f"Registered compute node {connection.node_name} from {connection.peer_address}:{connection.peer_port} "
+            f"cpu={connection.hardware.logical_cpu_count} memory_bytes={connection.hardware.memory_bytes} "
+            f"reported_hardware={connection.performance.hardware_count if connection.performance else 0} "
+            f"ranking={self._format_reported_hardware(connection)}",
             flush=True,
         )
+        self._print_cluster_compute_capacity()
         return connection
 
     @trace_function
@@ -137,20 +158,20 @@ class MainNodeRuntime:
             build_client_response(
                 request_id="join",
                 ok=True,
-                message=f"Client {connection.node_name} joined home scheduler.",
+                message=f"Client {connection.node_name} joined the main node.",
                 payload="joined",
                 worker_count=worker_count,
                 client_count=client_count,
             ),
         )
         print(
-            f"Registered home client {connection.node_name} from {connection.peer_address}:{connection.peer_port}",
+            f"Registered client {connection.node_name} from {connection.peer_address}:{connection.peer_port}",
             flush=True,
         )
         client_thread = threading.Thread(
             target=self._serve_client_connection,
             args=(connection,),
-            name=f"home-client-{connection.node_name}",
+            name=f"superweb-client-{connection.node_name}",
             daemon=True,
         )
         client_thread.start()
@@ -161,7 +182,7 @@ class MainNodeRuntime:
         self,
         client_sock: socket.socket,
         addr: tuple[str, int],
-        scheduler_ip: str,
+        main_node_ip: str,
     ) -> RuntimePeerConnection:
         """Receive and accept one worker or client registration."""
 
@@ -171,7 +192,7 @@ class MainNodeRuntime:
             raise ConnectionError("peer closed the TCP session before registration")
 
         if message.kind == MessageKind.REGISTER_WORKER and message.register_worker is not None:
-            return self._register_worker_connection(client_sock, addr, scheduler_ip, message.register_worker)
+            return self._register_worker_connection(client_sock, addr, main_node_ip, message.register_worker)
         if message.kind == MessageKind.CLIENT_JOIN and message.client_join is not None:
             return self._register_client_connection(client_sock, addr, message.client_join)
 
@@ -180,7 +201,7 @@ class MainNodeRuntime:
         )
 
     @trace_function
-    def _accept_runtime_connections(self, server_sock: socket.socket, scheduler_ip: str) -> None:
+    def _accept_runtime_connections(self, server_sock: socket.socket, main_node_ip: str) -> None:
         """Accept worker and client TCP sessions in the background."""
 
         while not self._runtime_should_stop():
@@ -194,9 +215,9 @@ class MainNodeRuntime:
                 raise
 
             try:
-                self._register_runtime_connection(client_sock, addr, scheduler_ip)
+                self._register_runtime_connection(client_sock, addr, main_node_ip)
             except (OSError, ValueError, ConnectionError) as exc:
-                print(f"Rejected home cluster runtime connection from {addr[0]}:{addr[1]}: {exc}", flush=True)
+                print(f"Rejected superweb-cluster runtime connection from {addr[0]}:{addr[1]}: {exc}", flush=True)
                 network.safe_close(client_sock)
 
     @trace_function
@@ -216,7 +237,7 @@ class MainNodeRuntime:
         if removed is not None:
             network.safe_close(removed.sock)
         print(
-            f"Removed home client {connection.node_name} at {connection.peer_address}:{connection.peer_port}: {reason}",
+            f"Removed client {connection.node_name} at {connection.peer_address}:{connection.peer_port}: {reason}",
             flush=True,
         )
 
@@ -292,7 +313,7 @@ class MainNodeRuntime:
         last_error: Exception | None = None
 
         for attempt in range(1, total_attempts + 1):
-            heartbeat = build_heartbeat(HOME_SCHEDULER_NAME)
+            heartbeat = build_heartbeat(MAIN_NODE_NAME)
             assert heartbeat.heartbeat is not None
             heartbeat_unix_time_ms = heartbeat.heartbeat.unix_time_ms
 
@@ -318,14 +339,15 @@ class MainNodeRuntime:
         if removed is not None:
             network.safe_close(removed.sock)
         print(
-            f"Removed home computer {connection.node_name} at {connection.peer_address}:{connection.peer_port} "
+            f"Removed compute node {connection.node_name} at {connection.peer_address}:{connection.peer_port} "
             f"after heartbeat timeout: {last_error}",
             flush=True,
         )
+        self._print_cluster_compute_capacity()
 
     @trace_function
     def _send_heartbeat_once(self) -> None:
-        """Send one scheduler heartbeat cycle to all registered workers."""
+        """Send one main-node heartbeat cycle to all registered workers."""
 
         for connection in self.registry.list_workers():
             self._send_heartbeat_with_retry(connection)
@@ -356,25 +378,25 @@ class MainNodeRuntime:
 
     @trace_function
     def _handle_packet(self, endpoint: multicast.MulticastSocket, addr: tuple[str, int], message: bytes) -> None:
-        """Reply to home scheduler browse queries."""
+        """Reply to main-node browse queries."""
 
         if not multicast.parse_discover_message(message):
             return
 
         description = multicast.describe_packet(message)
         print(f"mDNS packet from {addr[0]}:{addr[1]} -> {description}", flush=True)
-        announce_host = multicast.send_announce(endpoint, addr, self.config, HOME_SCHEDULER_NAME)
-        print(f"Sent home scheduler mDNS response using {announce_host}:{self.config.tcp_port}", flush=True)
+        announce_host = multicast.send_announce(endpoint, addr, self.config, MAIN_NODE_NAME)
+        print(f"Sent main-node mDNS response using {announce_host}:{self.config.tcp_port}", flush=True)
 
     @trace_function
     def run(self) -> DiscoveryResult:
-        """Run the home scheduler multicast loop until shutdown is requested."""
+        """Run the main-node multicast loop until shutdown is requested."""
 
         runtime_sock = None
         try:
             endpoint = multicast.create_receiver(self.config)
         except OSError as exc:
-            message = f"Unable to start home scheduler listener socket on UDP port {self.config.udp_port}: {exc}."
+            message = f"Unable to start main-node listener socket on UDP port {self.config.udp_port}: {exc}."
             if getattr(exc, "winerror", None) in {10013, 10048}:
                 message += " The UDP port may already be in use on this machine; try a different --udp-port value."
             return DiscoveryResult(success=False, message=message)
@@ -383,7 +405,7 @@ class MainNodeRuntime:
             runtime_sock = self._create_tcp_listener()
         except OSError as exc:
             multicast.close(endpoint)
-            message = f"Unable to start home scheduler TCP listener on port {self.config.tcp_port}: {exc}."
+            message = f"Unable to start main-node TCP listener on port {self.config.tcp_port}: {exc}."
             if getattr(exc, "winerror", None) in {10013, 10048}:
                 message += " The TCP port may already be in use on this machine; try a different --tcp-port value."
             return DiscoveryResult(success=False, message=message)
@@ -398,12 +420,12 @@ class MainNodeRuntime:
             accept_thread = threading.Thread(
                 target=self._accept_runtime_connections,
                 args=(runtime_sock, local_ip),
-                name="home-scheduler-accept",
+                name="main-node-accept",
                 daemon=True,
             )
             heartbeat_thread = threading.Thread(
                 target=self._heartbeat_loop,
-                name="home-scheduler-heartbeat",
+                name="main-node-heartbeat",
                 daemon=True,
             )
             accept_thread.start()
@@ -421,8 +443,8 @@ class MainNodeRuntime:
                 success=True,
                 peer_address=local_ip,
                 peer_port=self.config.tcp_port,
-                source="home_scheduler",
-                message="Home scheduler runtime stopped.",
+                source="main_node",
+                message="Main-node runtime stopped.",
             )
         finally:
             self._stop_event.set()

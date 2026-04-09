@@ -1,4 +1,4 @@
-"""Minimal mDNS/DNS-SD helpers for scheduler discovery."""
+"""Minimal mDNS/DNS-SD helpers for superweb-cluster main-node discovery."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import struct
 from dataclasses import dataclass
 
 from constants import (
-    HOME_SCHEDULER_NAME,
+    MAIN_NODE_NAME,
     MDNS_QUERY_UNICAST_RESPONSE,
     MDNS_RECORD_TTL,
     MDNS_SERVICE_ROLE,
@@ -34,7 +34,7 @@ DNS_TYPE_SRV = 0x0021
 
 @dataclass(slots=True)
 class AnnouncePayload:
-    """Parsed home scheduler announcement contents."""
+    """Parsed main-node announcement contents."""
 
     host: str
     port: int
@@ -103,7 +103,7 @@ def _sanitize_label(text: str) -> str:
             cleaned.append("-")
     label = "".join(cleaned).strip("-")
     if not label:
-        label = HOME_SCHEDULER_NAME.replace(" ", "-")
+        label = MAIN_NODE_NAME.replace(" ", "-")
     return label[:63]
 
 
@@ -313,7 +313,7 @@ def _instance_to_node_name(instance_name: str) -> str:
 
 
 def build_discover_message(node_name: str) -> bytes:
-    """Build an mDNS home scheduler browse query."""
+    """Build an mDNS main-node browse query."""
 
     del node_name
 
@@ -334,7 +334,7 @@ def build_discover_message(node_name: str) -> bytes:
 
 
 def build_announce_message(host: str, port: int, node_name: str) -> bytes:
-    """Build an mDNS home scheduler service announcement."""
+    """Build an mDNS main-node service announcement."""
 
     instance_name = _scheduler_instance_name(node_name)
     host_name = _scheduler_host_name(node_name)
@@ -387,7 +387,7 @@ def build_announce_message(host: str, port: int, node_name: str) -> bytes:
 
 
 def parse_discover_message(message: bytes) -> bool:
-    """Return True when the packet is a home scheduler service browse query."""
+    """Return True when the packet is a main-node service browse query."""
 
     parsed = _parse_message(message)
     if parsed is None or parsed.header.is_response:
@@ -405,7 +405,7 @@ def parse_discover_message(message: bytes) -> bool:
 
 
 def parse_announce_message(message: bytes) -> AnnouncePayload | None:
-    """Parse a home scheduler service announcement into a structured payload."""
+    """Parse a main-node service announcement into a structured payload."""
 
     parsed = _parse_message(message)
     if parsed is None or not parsed.header.is_response:
@@ -456,7 +456,7 @@ def parse_announce_message(message: bytes) -> AnnouncePayload | None:
 
 
 def describe_discovery_message(message: bytes) -> str:
-    """Return a human-readable summary of a home cluster discovery packet."""
+    """Return a human-readable summary of a superweb-cluster discovery packet."""
 
     if parse_discover_message(message):
         return f"mDNS PTR query for {MDNS_SERVICE_TYPE}"
@@ -464,7 +464,7 @@ def describe_discovery_message(message: bytes) -> str:
     payload = parse_announce_message(message)
     if payload is not None:
         return (
-            f"mDNS home scheduler announcement from {payload.node_name} "
+            f"mDNS main-node announcement from {payload.node_name} "
             f"at {payload.host}:{payload.port}"
         )
 

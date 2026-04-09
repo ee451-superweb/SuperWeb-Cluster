@@ -287,7 +287,11 @@ class CpuBackend:
                     "@echo off",
                     *_windows_vsdevcmd_setup_lines(),
                     "pushd \"%~dp0\"",
-                    "cl /nologo /std:c++20 /O2 /EHsc /Fe:fmvm_cpu_windows.exe ..\\fmvm_cpu_windows.cpp",
+                    # `/fp:fast` gives the compiler freedom to reassociate the
+                    # FP32 reduction, which is appropriate for this performance
+                    # benchmark because correctness is already checked with
+                    # tolerance-based validation rather than exact bit matches.
+                    "cl /nologo /std:c++20 /O2 /fp:fast /EHsc /Fe:fmvm_cpu_windows.exe ..\\fmvm_cpu_windows.cpp",
                     "set \"BUILD_EXIT=%ERRORLEVEL%\"",
                     "popd",
                     "exit /b %BUILD_EXIT%",

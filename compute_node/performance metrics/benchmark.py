@@ -31,9 +31,9 @@ from path_utils import to_relative_cli_path, to_relative_string
 from workloads import build_benchmark_spec
 
 ROOT_DIR = Path(__file__).resolve().parent
-DEFAULT_DATASET_DIR = ROOT_DIR / "fixed_matrix_vector_multiplication" / "input matrix" / "generated"
+DEFAULT_DATASET_DIR = ROOT_DIR.parent / "input matrix" / "generated"
 DEFAULT_OUTPUT_PATH = ROOT_DIR / "result.json"
-GENERATE_SCRIPT_PATH = ROOT_DIR / "fixed_matrix_vector_multiplication" / "input matrix" / "generate.py"
+GENERATE_SCRIPT_PATH = ROOT_DIR.parent / "input matrix" / "generate.py"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -67,6 +67,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rows", type=int, help="Optional test-only override for the matrix row count.")
     parser.add_argument("--cols", type=int, help="Optional test-only override for the matrix column count.")
     return parser
+
+
+def _resolve_dataset_dir(args: argparse.Namespace, spec) -> Path:
+    """Choose where this benchmark run should read or create `A.bin` and `x.bin`.
+
+    The default production dataset lives at `compute_node/input matrix/generated`.
+    For tiny test-only shape overrides, reusing that directory is risky because
+    it would overwrite the production-sized dataset with a miniature one.
+
+    To keep the normal dataset stable, any `--rows/--cols` override that still
+    points at the default directory is transparently redirected into a cached
+    override-specific subdirectory.
+    """
+
+    requested_dir = Path(args.dataset_dir)
+    if (args.rows is None and args.cols is None) or requested_dir != DEFAULT_DATASET_DIR:
+        return requested_dir
+
+    return requested_dir / "overrides" / f"{spec.rows}x{spec.cols}"
 
 
 def _generate_dataset_if_missing(dataset_dir: Path, rows: int, cols: int) -> bool:
@@ -141,8 +160,9 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
     """Run the benchmark and return the JSON-serializable report."""
 
     spec = build_benchmark_spec(rows=args.rows, cols=args.cols)
-    dataset_was_generated = _generate_dataset_if_missing(args.dataset_dir, spec.rows, spec.cols)
-    dataset = build_dataset_layout(args.dataset_dir)
+    dataset_dir = _resolve_dataset_dir(args, spec)
+    dataset_was_generated = _generate_dataset_if_missing(dataset_dir, spec.rows, spec.cols)
+    dataset = build_dataset_layout(dataset_dir)
     backends = build_backends(args.backend)
 
     total_started = time.perf_counter()

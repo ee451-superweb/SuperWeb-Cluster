@@ -1,4 +1,4 @@
-"""Kickoff discovery flow."""
+"""Sprint 1 discovery flow."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ def discover_peer(config: AppConfig) -> DiscoveryResult:
 
 @trace_function
 def announce_peer(config: AppConfig) -> DiscoveryResult:
-    """Wait for one home scheduler query and reply with home scheduler details."""
+    """Wait for one main-node query and reply with main-node details."""
 
     try:
         # The receiver joins the multicast group and waits for a discover probe.
@@ -45,7 +45,7 @@ def announce_peer(config: AppConfig) -> DiscoveryResult:
     try:
         discovered = multicast.recv_discover(endpoint, config.buffer_size)
         if discovered is None:
-            return DiscoveryResult(success=False, message="No home scheduler query packet received.")
+            return DiscoveryResult(success=False, message="No main-node query packet received.")
 
         target, _message = discovered
         local_host = multicast.send_announce(endpoint, target, config, config.node_name)
@@ -54,7 +54,7 @@ def announce_peer(config: AppConfig) -> DiscoveryResult:
             peer_address=target[0],
             peer_port=target[1],
             source="mdns",
-            message=f"Reported home scheduler availability from {local_host}:{config.tcp_port}.",
+            message=f"Reported main-node availability from {local_host}:{config.tcp_port}.",
         )
     finally:
         multicast.close(endpoint)

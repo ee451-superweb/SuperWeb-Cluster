@@ -1,15 +1,19 @@
-"""Program entry point for the kickoff version."""
+"""Top-level bootstrap entry point for superweb-cluster."""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
+import subprocess
 import sys
+from pathlib import Path
 
 from adapters.firewall import ensure_rules
 from adapters.platform import detect_os, relaunch_as_admin
 from config import AppConfig
 from constants import (
     APP_NAME,
+    COMPUTE_NODE_NAME,
     DEFAULT_NODE_NAME,
     DEFAULT_DISCOVERY_ATTEMPTS,
     DEFAULT_DISCOVERY_PORT,
@@ -17,19 +21,58 @@ from constants import (
     DEFAULT_DISCOVERY_TIMEOUT,
     DEFAULT_MULTICAST_GROUP,
     DEFAULT_TCP_PORT,
-    HOME_COMPUTER_NAME,
-    HOME_SCHEDULER_NAME,
+    MAIN_NODE_NAME,
 )
 from logging_setup import configure_logging
 from supervisor import Supervisor
 from trace_utils import trace_function
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+VENV_DIR = PROJECT_ROOT / ".venv"
+REQUIREMENTS_PATH = PROJECT_ROOT / "requirements.txt"
+REQUIREMENTS_STAMP_PATH = VENV_DIR / ".requirements.sha256"
+COMPUTE_NODE_DIR = PROJECT_ROOT / "compute_node"
+BENCHMARK_DIR = COMPUTE_NODE_DIR / "performance metrics"
+BENCHMARK_SCRIPT_PATH = BENCHMARK_DIR / "benchmark.py"
+BENCHMARK_RESULT_PATH = BENCHMARK_DIR / "result.json"
+
+
+def _project_python_path() -> Path:
+    """Return the Python executable inside the project's virtual environment."""
+
+    if sys.platform == "win32":
+        return VENV_DIR / "Scripts" / "python.exe"
+    return VENV_DIR / "bin" / "python"
+
+
+def _active_python_path() -> Path:
+    """Prefer the project venv interpreter when it already exists."""
+
+    project_python = _project_python_path()
+    if project_python.exists():
+        return project_python
+    return Path(sys.executable)
+
+
+def _benchmark_command() -> list[str]:
+    """Build the local benchmark command using the current Python executable."""
+
+    return [str(_active_python_path()), str(BENCHMARK_SCRIPT_PATH)]
+
+
+def _requirements_hash() -> str:
+    """Fingerprint `requirements.txt` so installs only rerun when it changes."""
+
+    if not REQUIREMENTS_PATH.exists():
+        return ""
+    return hashlib.sha256(REQUIREMENTS_PATH.read_bytes()).hexdigest()
 
 
 @trace_function
 def build_parser() -> argparse.ArgumentParser:
     """Build the kickoff CLI."""
 
-    parser = argparse.ArgumentParser(description=f"{APP_NAME} kickoff bootstrap.")
+    parser = argparse.ArgumentParser(description=f"{APP_NAME} bootstrap.")
     parser.add_argument("--role", choices=("discover", "announce"), default="discover")
     parser.add_argument("--node-name", default=DEFAULT_NODE_NAME)
     parser.add_argument("--multicast-group", default=DEFAULT_MULTICAST_GROUP)
@@ -40,7 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--discover-attempts",
         type=int,
         default=DEFAULT_DISCOVERY_ATTEMPTS,
-        help="How many discovery attempts to make before promoting self to the home scheduler.",
+        help="How many discovery attempts to make before promoting self to the main node.",
     )
     parser.add_argument(
         "--retry-delay",
@@ -70,9 +113,9 @@ def build_config(args: argparse.Namespace) -> AppConfig:
     return AppConfig(
         role=args.role,
         node_name=(
-            HOME_SCHEDULER_NAME
+            MAIN_NODE_NAME
             if args.node_name == DEFAULT_NODE_NAME and args.role == "announce"
-            else HOME_COMPUTER_NAME
+            else COMPUTE_NODE_NAME
             if args.node_name == DEFAULT_NODE_NAME
             else args.node_name
         ),
@@ -86,6 +129,84 @@ def build_config(args: argparse.Namespace) -> AppConfig:
     )
 
 
+def _display_project_path(path: Path) -> str:
+    """Render a project-local path for user-facing log messages."""
+
+    return path.relative_to(PROJECT_ROOT).as_posix()
+
+
+@trace_function
+def ensure_project_python_environment(logger) -> bool:
+    """Create `.venv` and install `requirements.txt` when needed."""
+
+    try:
+        project_python = _project_python_path()
+        if not project_python.exists():
+            logger.info("Creating project virtual environment at %s.", _display_project_path(VENV_DIR))
+            subprocess.run(
+                [sys.executable, "-m", "venv", str(VENV_DIR)],
+                check=True,
+                cwd=PROJECT_ROOT,
+            )
+
+        requirements_hash = _requirements_hash()
+        installed_hash = REQUIREMENTS_STAMP_PATH.read_text(encoding="utf-8").strip() if REQUIREMENTS_STAMP_PATH.exists() else ""
+        if requirements_hash and requirements_hash != installed_hash:
+            logger.info(
+                "Installing project requirements from %s using %s.",
+                _display_project_path(REQUIREMENTS_PATH),
+                _display_project_path(project_python),
+            )
+            subprocess.run(
+                [str(project_python), "-m", "pip", "install", "-r", str(REQUIREMENTS_PATH)],
+                check=True,
+                cwd=PROJECT_ROOT,
+            )
+            REQUIREMENTS_STAMP_PATH.parent.mkdir(parents=True, exist_ok=True)
+            REQUIREMENTS_STAMP_PATH.write_text(requirements_hash, encoding="utf-8")
+        return True
+    except (OSError, subprocess.CalledProcessError) as exc:
+        logger.error("Failed to prepare project virtual environment: %s", exc)
+        return False
+
+
+@trace_function
+def ensure_compute_node_benchmark_ready(logger) -> bool:
+    """Make sure a local compute benchmark result exists before bootstrap continues."""
+
+    if BENCHMARK_RESULT_PATH.exists():
+        return True
+
+    logger.warning(
+        "Missing compute benchmark result at %s. Running the local benchmark now.",
+        _display_project_path(BENCHMARK_RESULT_PATH),
+    )
+    logger.info("Benchmark command: %s", " ".join(_benchmark_command()))
+
+    try:
+        subprocess.run(
+            _benchmark_command(),
+            check=True,
+            cwd=PROJECT_ROOT,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        logger.error("Failed to run compute benchmark automatically: %s", exc)
+        return False
+
+    if not BENCHMARK_RESULT_PATH.exists():
+        logger.error(
+            "Benchmark finished but %s was still not created.",
+            _display_project_path(BENCHMARK_RESULT_PATH),
+        )
+        return False
+
+    logger.info(
+        "Benchmark completed and wrote %s.",
+        _display_project_path(BENCHMARK_RESULT_PATH),
+    )
+    return True
+
+
 @trace_function
 def main(argv: list[str] | None = None) -> int:
     """Run bootstrap and return a process exit code."""
@@ -95,6 +216,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     logger = configure_logging(verbose=args.verbose)
+
+    if not ensure_project_python_environment(logger):
+        return 1
+
+    if not ensure_compute_node_benchmark_ready(logger):
+        return 1
 
     # Platform detection happens before firewall setup so we can route into the
     # correct adapter and decide whether elevation is even meaningful.

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 MDNS_GROUP = "224.0.0.251"
 MDNS_PORT = 5353
-DEFAULT_SERVICE_NAME = "_homecluster-hs._tcp.local."
+DEFAULT_SERVICE_NAME = "_superweb-cluster._tcp.local."
 
 DNS_HEADER = struct.Struct("!HHHHHH")
 DNS_QUESTION = struct.Struct("!HH")

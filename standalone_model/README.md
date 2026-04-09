@@ -1,12 +1,15 @@
 # standalone_model
 
-这个目录现在放了两套最小、自包含的网络测试工具：
+`superweb-cluster` 的总入口仍然是项目根目录下的 `bootstrap.py`。  
+这个目录不是主运行时入口，而是 Sprint 1 阶段保留下来的独立网络实验区。
+
+目前项目已经完成 Sprint 1，准备进入 Sprint 2。`standalone_model/` 继续承担：
 
 1. mDNS 收发端，用来验证局域网或校园 Wi-Fi 上的 `224.0.0.251:5353` 是否能通。
 2. TCP 吞吐测试端，用来粗测两台机器之间应用层 TCP 发送/接收速度。
 
 如果你要跑固定矩阵向量乘法的 CPU/CUDA benchmark，现在请看
-`../performance metrics/README.md`。`standalone_model/` 只保留网络连通性和
+`../compute_node/performance metrics/README.md`。`standalone_model/` 只保留网络连通性和
 吞吐实验，不负责计算性能评分。
 
 ## 文件
@@ -20,7 +23,7 @@
 - `zmq_receiver.py`: ZeroMQ 吞吐测试接收端，依赖 `pyzmq`。
 - `zmq_sender.py`: ZeroMQ 吞吐测试发送端，依赖 `pyzmq`。
 
-默认 mDNS 服务名是 `_homecluster-hs._tcp.local.`，和主项目 discovery 的服务类型一致。
+默认 mDNS 服务名是 `_superweb-cluster._tcp.local.`，和主项目 discovery 的服务类型一致。
 
 ## mDNS 用法
 
@@ -93,7 +96,9 @@ python3 standalone_model/tcp_sender.py 192.168.1.23 --port 52021 --bytes 1GiB
 
 ## ZeroMQ 对比测试
 
-先创建并使用项目里的虚拟环境：
+优先复用项目根目录下的 `.venv`。如果你已经跑过 `bootstrap.py`，这个环境通常已经准备好了。
+
+如果你只是单独运行这里的 ZeroMQ 对比测试，也可以手动准备：
 
 ```powershell
 python -m venv .venv

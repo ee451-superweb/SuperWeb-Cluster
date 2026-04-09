@@ -129,7 +129,7 @@ def recv_packet(endpoint: MulticastSocket, buffer_size: int) -> tuple[tuple[str,
 
 @trace_function
 def recv_discover(endpoint: MulticastSocket, buffer_size: int) -> tuple[tuple[str, int], bytes] | None:
-    """Wait for a home scheduler query packet and return the sender address."""
+    """Wait for a main-node query packet and return the sender address."""
 
     original_timeout = endpoint.sock.gettimeout()
     deadline = None if original_timeout is None else time.monotonic() + original_timeout

@@ -61,6 +61,16 @@ def dataset_is_generated(layout: DatasetLayout, spec: BenchmarkSpec) -> bool:
         return False
     if layout.vector_path.stat().st_size != spec.vector_bytes:
         return False
+    try:
+        metadata = json.loads(layout.meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+
+    benchmark_metadata = metadata.get("benchmark", {})
+    if benchmark_metadata.get("rows") != spec.rows:
+        return False
+    if benchmark_metadata.get("cols") != spec.cols:
+        return False
     return True
 
 

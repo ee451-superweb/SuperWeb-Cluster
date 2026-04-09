@@ -1,4 +1,4 @@
-"""Minimal supervisor for the kickoff version."""
+"""Minimal supervisor for superweb-cluster Sprint 1."""
 
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ class Supervisor:
 
     @trace_function
     def _discover_with_retries(self) -> DiscoveryResult:
-        """Try discovery several times before promoting self to home scheduler."""
+        """Try discovery several times before promoting self to the main node."""
 
         last_result = DiscoveryResult(success=False, message="Discovery did not run.")
 
@@ -85,7 +85,7 @@ class Supervisor:
 
     @trace_function
     def _promote_to_main_node(self) -> DiscoveryResult:
-        """Become the home scheduler and continue listening for multicast traffic."""
+        """Become the main node and continue listening for multicast traffic."""
 
         self._set_state(RuntimeState.MAIN_NODE)
         runtime = MainNodeRuntime(
@@ -96,20 +96,20 @@ class Supervisor:
         return runtime.run()
 
     @trace_function
-    def _join_home_scheduler(self, result: DiscoveryResult) -> DiscoveryResult:
-        """Use a discovered scheduler address to enter compute-node runtime."""
+    def _join_main_node(self, result: DiscoveryResult) -> DiscoveryResult:
+        """Use a discovered main-node address to enter compute-node runtime."""
 
         if not result.peer_address or not result.peer_port:
             return DiscoveryResult(
                 success=False,
-                message="Discovery succeeded but did not include a scheduler TCP endpoint.",
+                message="Discovery succeeded but did not include a main-node TCP endpoint.",
             )
 
         self._set_state(RuntimeState.COMPUTE_NODE)
         runtime = ComputeNodeRuntime(
             config=self.config,
-            scheduler_host=result.peer_address,
-            scheduler_port=result.peer_port,
+            main_node_host=result.peer_address,
+            main_node_port=result.peer_port,
             logger=self.logger,
             should_stop=lambda: self._shutdown_requested,
         )
@@ -121,14 +121,14 @@ class Supervisor:
 
         self.register_signal_handlers()
         try:
-            # Discover-mode home computers try several times to find an existing
-            # home scheduler. If no peer responds, the process promotes itself and
-            # starts listening for future home computers on the multicast group.
+            # Discover-mode compute nodes try several times to find an existing
+            # main node. If no peer responds, the process promotes itself and
+            # starts listening for future compute nodes on the multicast group.
             if self.config.role == "discover":
                 self._set_state(RuntimeState.DISCOVERY)
                 result = self._discover_with_retries()
                 if result.success and not self._shutdown_requested:
-                    return self._join_home_scheduler(result)
+                    return self._join_main_node(result)
                 if self._shutdown_requested:
                     return result
 
@@ -137,13 +137,13 @@ class Supervisor:
                 promoted_result = self._promote_to_main_node()
                 if promoted_result.success or self._shutdown_requested:
                     return promoted_result
-                self.logger.warning("Home scheduler promotion failed: %s", promoted_result.message)
+                self.logger.warning("Main-node promotion failed: %s", promoted_result.message)
 
                 if self.config.enable_manual_fallback:
                     self._set_state(RuntimeState.MANUAL_INPUT)
                     manual_result = prompt_manual_address(self.config.tcp_port)
                     if manual_result.success and not self._shutdown_requested:
-                        return self._join_home_scheduler(manual_result)
+                        return self._join_main_node(manual_result)
                     return manual_result
 
                 return promoted_result

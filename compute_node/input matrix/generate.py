@@ -20,9 +20,9 @@ import argparse
 import sys
 from pathlib import Path
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
+PERF_DIR = Path(__file__).resolve().parents[1] / "performance metrics"
+if str(PERF_DIR) not in sys.path:
+    sys.path.insert(0, str(PERF_DIR))
 
 from fmvm_dataset import build_dataset_layout, dataset_is_generated, generate_dataset
 from path_utils import to_relative_string
@@ -77,7 +77,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     spec = build_benchmark_spec(rows=args.rows, cols=args.cols)
     layout = build_dataset_layout(args.output_dir)
-    display_root = to_relative_string(layout.root_dir, start=ROOT_DIR)
+    display_root = to_relative_string(layout.root_dir, start=PERF_DIR)
 
     if not args.force and dataset_is_generated(layout, spec):
         print(f"dataset already present at {display_root}", flush=True)

@@ -1,4 +1,4 @@
-"""Minimal protobuf wire-format helpers for the home cluster TCP runtime."""
+"""Minimal protobuf wire-format helpers for the superweb-cluster TCP runtime."""
 
 from __future__ import annotations
 
@@ -8,10 +8,9 @@ import struct
 import time
 from dataclasses import dataclass
 
-from common.types import HardwareProfile
+from common.types import ComputeHardwarePerformance, ComputePerformanceSummary, HardwareProfile
 from constants import (
-    HOME_CLIENT_NAME,
-    HOME_SCHEDULER_NAME,
+    MAIN_NODE_NAME,
     RUNTIME_MSG_CLIENT_JOIN,
     RUNTIME_MSG_CLIENT_REQUEST,
     RUNTIME_MSG_CLIENT_RESPONSE,
@@ -19,10 +18,13 @@ from constants import (
     RUNTIME_MSG_HEARTBEAT_OK,
     RUNTIME_MSG_REGISTER_OK,
     RUNTIME_MSG_REGISTER_WORKER,
+    SUPERWEB_CLIENT_NAME,
 )
 from trace_utils import trace_function
 
 FRAME_HEADER = struct.Struct("!I")
+DOUBLE_LE = struct.Struct("<d")
+WIRE_64BIT = 1
 WIRE_VARINT = 0
 WIRE_LENGTH_DELIMITED = 2
 
@@ -46,22 +48,23 @@ class RegisterWorker:
 
     node_name: str
     hardware: HardwareProfile
+    performance: ComputePerformanceSummary
 
 
 @dataclass(slots=True)
 class RegisterOk:
-    """Scheduler acceptance payload."""
+    """Main-node acceptance payload."""
 
-    scheduler_name: str
-    scheduler_ip: str
-    scheduler_port: int
+    main_node_name: str
+    main_node_ip: str
+    main_node_port: int
 
 
 @dataclass(slots=True)
 class Heartbeat:
-    """One-way scheduler heartbeat payload."""
+    """One-way main-node heartbeat payload."""
 
-    scheduler_name: str
+    main_node_name: str
     unix_time_ms: int
 
 
@@ -83,7 +86,7 @@ class ClientJoin:
 
 @dataclass(slots=True)
 class ClientRequest:
-    """Client request sent to the scheduler."""
+    """Client request sent to the main node."""
 
     client_name: str
     request_id: str
@@ -93,7 +96,7 @@ class ClientRequest:
 
 @dataclass(slots=True)
 class ClientResponse:
-    """Scheduler response sent back to a client."""
+    """Main-node response sent back to a client."""
 
     request_id: str
     ok: bool
@@ -162,6 +165,10 @@ def _encode_bool_field(field_number: int, value: bool) -> bytes:
     return _encode_uint_field(field_number, 1 if value else 0)
 
 
+def _encode_double_field(field_number: int, value: float) -> bytes:
+    return _encode_key(field_number, WIRE_64BIT) + DOUBLE_LE.pack(value)
+
+
 def _encode_string_field(field_number: int, value: str) -> bytes:
     raw = value.encode("utf-8")
     return _encode_key(field_number, WIRE_LENGTH_DELIMITED) + _encode_varint(len(raw)) + raw
@@ -171,8 +178,8 @@ def _encode_message_field(field_number: int, payload: bytes) -> bytes:
     return _encode_key(field_number, WIRE_LENGTH_DELIMITED) + _encode_varint(len(payload)) + payload
 
 
-def _parse_fields(payload: bytes) -> list[tuple[int, int, int | bytes]]:
-    fields: list[tuple[int, int, int | bytes]] = []
+def _parse_fields(payload: bytes) -> list[tuple[int, int, int | float | bytes]]:
+    fields: list[tuple[int, int, int | float | bytes]] = []
     offset = 0
 
     while offset < len(payload):
@@ -182,6 +189,12 @@ def _parse_fields(payload: bytes) -> list[tuple[int, int, int | bytes]]:
 
         if wire_type == WIRE_VARINT:
             value, offset = _decode_varint(payload, offset)
+        elif wire_type == WIRE_64BIT:
+            value = payload[offset : offset + DOUBLE_LE.size]
+            if len(value) != DOUBLE_LE.size:
+                raise ValueError("truncated protobuf 64-bit field payload")
+            value = DOUBLE_LE.unpack(value)[0]
+            offset += DOUBLE_LE.size
         elif wire_type == WIRE_LENGTH_DELIMITED:
             length, offset = _decode_varint(payload, offset)
             value = payload[offset : offset + length]
@@ -196,17 +209,23 @@ def _parse_fields(payload: bytes) -> list[tuple[int, int, int | bytes]]:
     return fields
 
 
-def _require_varint(wire_type: int, value: int | bytes) -> int:
+def _require_varint(wire_type: int, value: int | float | bytes) -> int:
     if wire_type != WIRE_VARINT or not isinstance(value, int):
         raise ValueError("expected protobuf varint field")
     return value
 
 
-def _require_bool(wire_type: int, value: int | bytes) -> bool:
+def _require_bool(wire_type: int, value: int | float | bytes) -> bool:
     return bool(_require_varint(wire_type, value))
 
 
-def _require_bytes(wire_type: int, value: int | bytes) -> bytes:
+def _require_double(wire_type: int, value: int | float | bytes) -> float:
+    if wire_type != WIRE_64BIT or not isinstance(value, float):
+        raise ValueError("expected protobuf 64-bit floating-point field")
+    return value
+
+
+def _require_bytes(wire_type: int, value: int | float | bytes) -> bytes:
     if wire_type != WIRE_LENGTH_DELIMITED or not isinstance(value, bytes):
         raise ValueError("expected protobuf length-delimited field")
     return value
@@ -249,75 +268,131 @@ def _encode_hardware_profile(hardware: HardwareProfile) -> bytes:
     )
 
 
+def _parse_compute_hardware_performance(payload: bytes) -> ComputeHardwarePerformance:
+    hardware_type = ""
+    effective_gflops = 0.0
+    rank = 0
+
+    for field_number, wire_type, value in _parse_fields(payload):
+        if field_number == 1:
+            hardware_type = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
+        elif field_number == 2:
+            effective_gflops = _require_double(wire_type, value)
+        elif field_number == 3:
+            rank = _require_varint(wire_type, value)
+
+    return ComputeHardwarePerformance(
+        hardware_type=hardware_type,
+        effective_gflops=effective_gflops,
+        rank=rank,
+    )
+
+
+def _encode_compute_hardware_performance(payload: ComputeHardwarePerformance) -> bytes:
+    return b"".join(
+        [
+            _encode_string_field(1, payload.hardware_type),
+            _encode_double_field(2, payload.effective_gflops),
+            _encode_uint_field(3, payload.rank),
+        ]
+    )
+
+
+def _parse_compute_performance_summary(payload: bytes) -> ComputePerformanceSummary:
+    hardware_count = 0
+    ranked_hardware: list[ComputeHardwarePerformance] = []
+
+    for field_number, wire_type, value in _parse_fields(payload):
+        if field_number == 1:
+            hardware_count = _require_varint(wire_type, value)
+        elif field_number == 2:
+            ranked_hardware.append(_parse_compute_hardware_performance(_require_bytes(wire_type, value)))
+
+    return ComputePerformanceSummary(hardware_count=hardware_count, ranked_hardware=ranked_hardware)
+
+
+def _encode_compute_performance_summary(payload: ComputePerformanceSummary) -> bytes:
+    parts = [_encode_uint_field(1, payload.hardware_count)]
+    parts.extend(
+        _encode_message_field(2, _encode_compute_hardware_performance(hardware))
+        for hardware in payload.ranked_hardware
+    )
+    return b"".join(parts)
+
+
 def _parse_register_worker(payload: bytes) -> RegisterWorker:
     node_name = ""
     hardware = HardwareProfile("", "", "", "", "", "", "", 0, 0)
+    performance = ComputePerformanceSummary()
 
     for field_number, wire_type, value in _parse_fields(payload):
         if field_number == 1:
             node_name = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
         elif field_number == 2:
             hardware = _parse_hardware_profile(_require_bytes(wire_type, value))
+        elif field_number == 3:
+            performance = _parse_compute_performance_summary(_require_bytes(wire_type, value))
 
-    return RegisterWorker(node_name=node_name, hardware=hardware)
+    return RegisterWorker(node_name=node_name, hardware=hardware, performance=performance)
 
 
 def _encode_register_worker(payload: RegisterWorker) -> bytes:
-    return b"".join(
-        [
-            _encode_string_field(1, payload.node_name),
-            _encode_message_field(2, _encode_hardware_profile(payload.hardware)),
-        ]
-    )
+    parts = [
+        _encode_string_field(1, payload.node_name),
+        _encode_message_field(2, _encode_hardware_profile(payload.hardware)),
+    ]
+    if payload.performance.hardware_count > 0 or payload.performance.ranked_hardware:
+        parts.append(_encode_message_field(3, _encode_compute_performance_summary(payload.performance)))
+    return b"".join(parts)
 
 
 def _parse_register_ok(payload: bytes) -> RegisterOk:
-    scheduler_name = ""
-    scheduler_ip = ""
-    scheduler_port = 0
+    main_node_name = ""
+    main_node_ip = ""
+    main_node_port = 0
 
     for field_number, wire_type, value in _parse_fields(payload):
         if field_number == 1:
-            scheduler_name = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
+            main_node_name = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
         elif field_number == 2:
-            scheduler_ip = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
+            main_node_ip = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
         elif field_number == 3:
-            scheduler_port = _require_varint(wire_type, value)
+            main_node_port = _require_varint(wire_type, value)
 
     return RegisterOk(
-        scheduler_name=scheduler_name,
-        scheduler_ip=scheduler_ip,
-        scheduler_port=scheduler_port,
+        main_node_name=main_node_name,
+        main_node_ip=main_node_ip,
+        main_node_port=main_node_port,
     )
 
 
 def _encode_register_ok(payload: RegisterOk) -> bytes:
     return b"".join(
         [
-            _encode_string_field(1, payload.scheduler_name),
-            _encode_string_field(2, payload.scheduler_ip),
-            _encode_uint_field(3, payload.scheduler_port),
+            _encode_string_field(1, payload.main_node_name),
+            _encode_string_field(2, payload.main_node_ip),
+            _encode_uint_field(3, payload.main_node_port),
         ]
     )
 
 
 def _parse_heartbeat(payload: bytes) -> Heartbeat:
-    scheduler_name = ""
+    main_node_name = ""
     unix_time_ms = 0
 
     for field_number, wire_type, value in _parse_fields(payload):
         if field_number == 1:
-            scheduler_name = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
+            main_node_name = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
         elif field_number == 2:
             unix_time_ms = _require_varint(wire_type, value)
 
-    return Heartbeat(scheduler_name=scheduler_name, unix_time_ms=unix_time_ms)
+    return Heartbeat(main_node_name=main_node_name, unix_time_ms=unix_time_ms)
 
 
 def _encode_heartbeat(payload: Heartbeat) -> bytes:
     return b"".join(
         [
-            _encode_string_field(1, payload.scheduler_name),
+            _encode_string_field(1, payload.main_node_name),
             _encode_uint_field(2, payload.unix_time_ms),
         ]
     )
@@ -564,30 +639,47 @@ def recv_message(sock: socket.socket, *, max_size: int) -> RuntimeEnvelope | Non
 
 
 @trace_function
-def build_register_worker(node_name: str, hardware: HardwareProfile) -> RuntimeEnvelope:
+def build_register_worker(
+    node_name: str,
+    hardware: HardwareProfile,
+    performance: ComputePerformanceSummary | None = None,
+) -> RuntimeEnvelope:
     """Create a compute-node registration message."""
 
-    return RuntimeEnvelope(kind=MessageKind.REGISTER_WORKER, register_worker=RegisterWorker(node_name=node_name, hardware=hardware))
-
-
-@trace_function
-def build_register_ok(scheduler_ip: str, scheduler_port: int, scheduler_name: str = HOME_SCHEDULER_NAME) -> RuntimeEnvelope:
-    """Create a scheduler registration-ack message."""
+    if performance is None:
+        performance = ComputePerformanceSummary()
 
     return RuntimeEnvelope(
-        kind=MessageKind.REGISTER_OK,
-        register_ok=RegisterOk(scheduler_name=scheduler_name, scheduler_ip=scheduler_ip, scheduler_port=scheduler_port),
+        kind=MessageKind.REGISTER_WORKER,
+        register_worker=RegisterWorker(node_name=node_name, hardware=hardware, performance=performance),
     )
 
 
 @trace_function
-def build_heartbeat(scheduler_name: str = HOME_SCHEDULER_NAME, unix_time_ms: int | None = None) -> RuntimeEnvelope:
-    """Create a scheduler heartbeat message."""
+def build_register_ok(main_node_ip: str, main_node_port: int, main_node_name: str = MAIN_NODE_NAME) -> RuntimeEnvelope:
+    """Create a main-node registration-ack message."""
+
+    return RuntimeEnvelope(
+        kind=MessageKind.REGISTER_OK,
+        register_ok=RegisterOk(
+            main_node_name=main_node_name,
+            main_node_ip=main_node_ip,
+            main_node_port=main_node_port,
+        ),
+    )
+
+
+@trace_function
+def build_heartbeat(main_node_name: str = MAIN_NODE_NAME, unix_time_ms: int | None = None) -> RuntimeEnvelope:
+    """Create a main-node heartbeat message."""
 
     if unix_time_ms is None:
         unix_time_ms = int(time.time() * 1000)
 
-    return RuntimeEnvelope(kind=MessageKind.HEARTBEAT, heartbeat=Heartbeat(scheduler_name=scheduler_name, unix_time_ms=unix_time_ms))
+    return RuntimeEnvelope(
+        kind=MessageKind.HEARTBEAT,
+        heartbeat=Heartbeat(main_node_name=main_node_name, unix_time_ms=unix_time_ms),
+    )
 
 
 @trace_function
@@ -608,7 +700,7 @@ def build_heartbeat_ok(node_name: str, heartbeat_unix_time_ms: int, received_uni
 
 
 @trace_function
-def build_client_join(client_name: str = HOME_CLIENT_NAME) -> RuntimeEnvelope:
+def build_client_join(client_name: str = SUPERWEB_CLIENT_NAME) -> RuntimeEnvelope:
     """Create a client join message."""
 
     return RuntimeEnvelope(kind=MessageKind.CLIENT_JOIN, client_join=ClientJoin(client_name=client_name))
@@ -633,7 +725,7 @@ def build_client_response(
     worker_count: int = 0,
     client_count: int = 0,
 ) -> RuntimeEnvelope:
-    """Create a scheduler response to a client join or request."""
+    """Create a main-node response to a client join or request."""
 
     return RuntimeEnvelope(
         kind=MessageKind.CLIENT_RESPONSE,

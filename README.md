@@ -1,164 +1,165 @@
-# Home Cluster (Kickoff Version)
+# superweb-cluster
 
-## Overview
+## Status
 
-This repository contains the current kickoff version of Home Cluster. The
-implementation now covers discovery, runtime registration, worker heartbeat
-tracking, and a minimal client request/response channel so we can validate the
-core LAN control plane before building scheduling and execution logic.
+`superweb-cluster` has completed Sprint 1 and is about to enter Sprint 2.
 
-The current version implements:
+Sprint 1 delivered the LAN control plane and local benchmarking foundation:
 
-- OS detection for Windows, Linux, macOS, and WSL
-- privilege detection and a Windows elevation hook
-- firewall adapter entry points, with a real Windows implementation
-- mDNS-based home scheduler discovery
-- TCP runtime sessions between the home scheduler and home computers
-- protobuf wire-format runtime messages for workers and clients
-- worker registration with hardware profile upload
-- scheduler heartbeat plus `HEARTBEAT_OK` acknowledgement handling
-- separate home scheduler connection pools for workers and clients
-- minimal client join and request/response handling on the scheduler
-- a local `performance metrics/` workspace for repeatable CPU/CUDA compute
-  benchmarking
-- automatic promotion into the home scheduler runtime in `main_node/runtime.py`
-  when no home scheduler is found
-- manual address fallback when discovery fails
-- bootstrap, supervisor, and status-printing scripts
+- bootstrap-driven startup
+- Windows/Linux/macOS/WSL platform detection
+- mDNS discovery for the main node
+- TCP runtime registration between main node and compute node
+- protobuf runtime messaging
+- worker heartbeat and removal on timeout
+- client join/request/response flow
+- local CPU/CUDA benchmark generation and ranking
+- compute-node performance summary upload during worker registration
+- main-node tracking of total reported cluster GFLOPS
 
-The current version does not implement:
+Sprint 2 is expected to build on top of this:
 
-- task dispatch and result aggregation
-- job scheduling and execution orchestration
-- home computer execution backends
-- a dedicated end-user client CLI built on top of `CLIENT_JOIN` /
-  `CLIENT_REQUEST` / `CLIENT_RESPONSE`
+- load distribution
+- worker hardware-aware scheduling
+- execution backends
+- result aggregation
+- broader scheduling policy beyond the current registration/runtime skeleton
 
-Out-of-scope modules are present as skeletons so the project structure matches
-the implementation plan and can be extended incrementally.
+## Project Entry
+
+The main entrypoint for the whole project is:
+
+```bash
+python bootstrap.py --role discover
+```
+
+or:
+
+```bash
+python bootstrap.py --role announce
+```
+
+Everything else is supporting infrastructure:
+
+- `bootstrap.py`
+  - top-level entrypoint
+  - prepares `.venv`
+  - installs `requirements.txt` when needed
+  - ensures compute benchmark results exist
+  - then hands control to the runtime supervisor
+- `supervisor.py`
+  - decides whether this process becomes a compute node or the main node
+- `compute_node/`
+  - worker-side runtime logic and benchmark summary loading
+- `main_node/`
+  - main-node runtime, registry, and cluster capability tracking
+- `compute_node/performance metrics/`
+  - fixed benchmark workspace used to characterize local compute hardware
+- `standalone_model/`
+  - isolated network experiments, not the main runtime entry
+
+## Bootstrap Behavior Tree
+
+The current Sprint 1 startup flow is:
+
+1. `bootstrap.py` starts.
+2. It prepares the project-local `.venv`.
+3. It installs or refreshes `requirements.txt` if the dependency hash changed.
+4. It checks for `compute_node/performance metrics/result.json`.
+5. If benchmark results are missing, it runs `compute_node/performance metrics/benchmark.py`.
+6. It detects platform capabilities and configures firewall rules where supported.
+7. It enters `Supervisor.run()`.
+8. If `--role announce`, it becomes the main node immediately.
+9. If `--role discover`, it tries mDNS discovery several times.
+10. If discovery succeeds, it joins the discovered main node as a compute node.
+11. If discovery fails, it promotes itself into the main node runtime.
+12. Once connected as a compute node, it sends `REGISTER_WORKER` with:
+    - host hardware profile
+    - hardware backend count
+    - ranked backend GFLOPS summary from the benchmark
+13. The main node assigns per-hardware ids, updates total cluster GFLOPS, then replies with `REGISTER_OK`.
+14. The runtime stays alive with worker heartbeats and client/runtime traffic until shutdown.
+
+## Current Runtime Model
+
+Sprint 1 currently uses two bootstrap roles:
+
+- `discover`
+  - behaves like a compute node first
+  - searches for an existing main node with mDNS
+  - connects over TCP if found
+  - otherwise promotes itself into the main node
+- `announce`
+  - starts directly as the main node
+  - answers mDNS
+  - accepts worker and client TCP runtime connections
+
+The main runtime protobuf messages are:
+
+- `REGISTER_WORKER`
+- `REGISTER_OK`
+- `HEARTBEAT`
+- `HEARTBEAT_OK`
+- `CLIENT_JOIN`
+- `CLIENT_REQUEST`
+- `CLIENT_RESPONSE`
+
+`REGISTER_WORKER` now includes a compact performance summary rather than only
+raw host information. The main node records each reported backend as its own
+worker-hardware capability object and keeps a running cluster-wide GFLOPS total.
 
 ## Directory Layout
 
-- `bootstrap.py`: main entry point
-- `supervisor.py`: minimal lifecycle controller
-- `config.py`: kickoff configuration defaults
-- `protocol.py`: minimal mDNS/DNS-SD packet helpers
-- `runtime_protocol.py`: length-prefixed protobuf wire-format helpers for the
-  TCP runtime
-- `common/`: shared types and runtime state
-- `discovery/`: multicast pairing and manual fallback
-- `adapters/`: platform, network, and firewall adapters
-- `proto/`: protobuf schema documents for cross-language interoperability
-- `performance metrics/`: fixed matrix-vector multiplication benchmark suite
-  with a fixed 2 GiB dataset plus CPU and CUDA compute backends
-- `standalone_model/`: small self-contained network experiments for mDNS, TCP,
-  and ZeroMQ throughput checks
-- `scripts/`: helper entry points for manual testing
-- `tests/`: automated checks for discovery and runtime behavior
-
-## Discovery Model
-
-The kickoff version supports two bootstrap roles:
-
-- `discover`: acts as a `home computer`, sends an mDNS PTR query for
-  `_homecluster-hs._tcp.local.`, waits for a home scheduler response, and then
-  enters the compute-node TCP runtime by sending `REGISTER_WORKER`
-- `announce`: acts as a `home scheduler`, listens for the home scheduler mDNS
-  query, replies with the scheduler address, accepts runtime TCP registrations,
-  separates workers and clients into different pools, and sends worker
-  `HEARTBEAT` messages every 10 seconds
-
-The discover role can fall back to manual text input if the mDNS browse query
-times out.
-
-## Runtime Protocol
-
-The current runtime protobuf schema supports these message kinds:
-
-- `REGISTER_WORKER`: sent by a home computer when joining the scheduler runtime
-- `REGISTER_OK`: sent by the home scheduler after worker registration succeeds
-- `HEARTBEAT`: sent by the home scheduler to connected workers
-- `HEARTBEAT_OK`: sent by a worker to acknowledge a heartbeat
-- `CLIENT_JOIN`: sent by a client when opening a TCP control session
-- `CLIENT_REQUEST`: sent by a client after joining the scheduler runtime
-- `CLIENT_RESPONSE`: sent by the scheduler in reply to client join/request
-
-The home scheduler currently retries a heartbeat up to 3 extra times before the
-next normal heartbeat interval. If no matching `HEARTBEAT_OK` arrives, that
-worker is removed from the worker pool.
+- `bootstrap.py`: total project entrypoint
+- `supervisor.py`: behavior-tree style startup coordinator
+- `config.py`: runtime defaults
+- `protocol.py`: mDNS/DNS-SD packet helpers
+- `runtime_protocol.py`: framed protobuf wire-format helpers
+- `common/`: shared dataclasses and common helpers
+- `discovery/`: mDNS discovery and manual fallback
+- `adapters/`: platform, firewall, and socket adapters
+- `proto/`: protocol documentation, including `proto/superweb_cluster_runtime.proto`
+- `main_node/`: main-node runtime logic
+- `compute_node/`: worker-side runtime logic
+- `compute_node/input matrix/`: fixed benchmark dataset generator and local dataset cache
+- `compute_node/performance metrics/`: CPU/CUDA benchmark workspace and result summary
+- `standalone_model/`: separate network experiments
+- `tests/`: automated tests
 
 ## Quick Start
 
-Run bootstrap in discover mode:
+Start in discover mode:
 
 ```bash
 python bootstrap.py --role discover --udp-port 5353 --tcp-port 52020
 ```
 
-Run bootstrap in announce mode:
+Start in announce mode:
 
 ```bash
 python bootstrap.py --role announce --udp-port 5353 --tcp-port 52020
 ```
 
-Show current platform and kickoff status:
+Run only the benchmark workspace:
 
 ```bash
-python scripts/print_status.py
+python "compute_node/performance metrics/benchmark.py"
 ```
 
-Trigger a one-off multicast send:
+Generate only the fixed benchmark dataset:
 
 ```bash
-python scripts/multicast_sender.py --udp-port 5353
-```
-
-Start a one-off multicast listener:
-
-```bash
-python scripts/multicast_receiver.py --udp-port 5353
-```
-
-Run the local benchmark suite:
-
-```bash
-python "performance metrics/benchmark.py"
-```
-
-Generate the fixed benchmark dataset only:
-
-```bash
-python "performance metrics/fixed_matrix_vector_multiplication/input matrix/generate.py"
+python "compute_node/input matrix/generate.py"
 ```
 
 ## Notes
 
-- The project is implemented with the Python standard library only.
-- Discovery uses standard mDNS IPv4 multicast `224.0.0.251:5353`.
-- Home scheduler discovery is modeled as a DNS-SD browse query for
-  `_homecluster-hs._tcp.local.`.
-- Runtime TCP traffic uses protobuf wire format documented in
-  `proto/home_cluster_runtime.proto`.
-- The `_homecluster-hs._tcp.local.` service type is intentionally short,
-  project-specific, and visually distinct so it stands out from generic mDNS
-  traffic on shared port `5353`.
-- Port `5353` is shared with other mDNS software on the machine, so the
-  implementation filters packets by this project-specific service type instead
-  of assuming exclusive ownership of the port.
-- TCP port `52020` is used by the home scheduler runtime in `main_node/`.
-- On Windows, the kickoff firewall helper now creates both inbound and outbound
-  UDP rules for the discovery port across all firewall profiles.
-- On non-Windows systems, firewall functions are present but intentionally
-  report "not implemented" in this kickoff version.
-- Cleanup is best-effort. Windows firewall cleanup can also be called manually
-  with `python scripts/cleanup_firewall.py`.
-- The benchmark workspace writes `performance metrics/result.json` with one
-  best entry per backend plus a backend `ranking`, and auto-builds local
-  backend binaries under backend-specific `build/` directories. The Windows
-  CPU/CUDA benchmark `.exe` files are checked in intentionally; other generated
-  benchmark artifacts remain local-only.
-- The benchmark uses a fixed input dataset:
-  `A[16384,32768]` float32 and `x[32768]`.
-- Benchmark datasets under `performance metrics/.../input matrix/generated/`
-  and benchmark reports are local generated artifacts and are not meant to stay
-  tracked in git.
+- The public project/app name is now `superweb-cluster`.
+- The runtime protocol and mDNS service naming now use `superweb-cluster`,
+  `main node`, and `compute node` terminology consistently.
+- `bootstrap.py` is the intended top-level entry. Running lower-level modules
+  directly is mainly for development and debugging.
+- Benchmark datasets and `result.json` are local machine artifacts and stay
+  git-ignored.
+- The checked-in exceptions are the Windows benchmark executables so a fresh
+  Windows checkout can run the benchmark backends without rebuilding first.

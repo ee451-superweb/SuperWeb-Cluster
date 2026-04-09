@@ -136,6 +136,19 @@ void write_float32_file(const std::string& path, const std::vector<float>& value
     }
 }
 
+// Compute one row of y = A x in FP32. The optional tile size keeps the same
+// tuning surface as the benchmark harness, but the math itself stays simple.
+float dot_product_tiled(const float* matrix_row, const std::vector<float>& vector_values, int cols, int tile_size) {
+    float accumulator = 0.0f;
+    for (int tile_start = 0; tile_start < cols; tile_start += tile_size) {
+        const int tile_end = std::min(cols, tile_start + tile_size);
+        for (int col = tile_start; col < tile_end; ++col) {
+            accumulator += matrix_row[col] * vector_values[static_cast<size_t>(col)];
+        }
+    }
+    return accumulator;
+}
+
 void compute_row_range(
     const std::vector<float>& matrix_values,
     const std::vector<float>& vector_values,
@@ -147,21 +160,11 @@ void compute_row_range(
 ) {
     for (int row = row_start; row < row_end; ++row) {
         const size_t row_base = static_cast<size_t>(row) * static_cast<size_t>(cols);
+        const float* matrix_row = matrix_values.data() + row_base;
+
         // Keep the CPU path in FP32 so it matches the benchmark's intended
         // arithmetic model rather than silently upgrading to FP64.
-        float accumulator = 0.0f;
-
-        // The tile loop is the knob we are benchmarking here. Different CPUs
-        // may prefer different chunk sizes for cache behavior.
-        for (int tile_start = 0; tile_start < cols; tile_start += tile_size) {
-            const int tile_end = std::min(cols, tile_start + tile_size);
-            for (int col = tile_start; col < tile_end; ++col) {
-                accumulator += matrix_values[row_base + static_cast<size_t>(col)]
-                    * vector_values[static_cast<size_t>(col)];
-            }
-        }
-
-        output_values[static_cast<size_t>(row)] = accumulator;
+        output_values[static_cast<size_t>(row)] = dot_product_tiled(matrix_row, vector_values, cols, tile_size);
     }
 }
 
@@ -174,21 +177,17 @@ int run_once(
     int requested_workers,
     int tile_size
 ) {
-    const int actual_workers = std::max(1, std::min(requested_workers, rows));
-    const int rows_per_worker = (rows + actual_workers - 1) / actual_workers;
+    const int actual_workers = std::max(1, std::min({requested_workers, rows}));
+    if (actual_workers == 1) {
+        compute_row_range(matrix_values, vector_values, output_values, cols, 0, rows, tile_size);
+        return actual_workers;
+    }
 
     std::vector<std::thread> workers;
     workers.reserve(static_cast<size_t>(actual_workers));
-
-    // Each worker owns its own row range, so writes into the output vector do
-    // not need locks.
     for (int worker_index = 0; worker_index < actual_workers; ++worker_index) {
-        const int row_start = worker_index * rows_per_worker;
-        const int row_end = std::min(rows, row_start + rows_per_worker);
-        if (row_start >= row_end) {
-            break;
-        }
-
+        const int row_start = (rows * worker_index) / actual_workers;
+        const int row_end = (rows * (worker_index + 1)) / actual_workers;
         workers.emplace_back(
             compute_row_range,
             std::cref(matrix_values),
@@ -204,7 +203,7 @@ int run_once(
     for (std::thread& worker : workers) {
         worker.join();
     }
-    return static_cast<int>(workers.size());
+    return actual_workers;
 }
 
 std::string fnv1a64_checksum(const std::vector<float>& values) {
