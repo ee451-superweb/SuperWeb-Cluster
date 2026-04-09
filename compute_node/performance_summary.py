@@ -7,7 +7,7 @@ from pathlib import Path
 
 from common.types import ComputeHardwarePerformance, ComputePerformanceSummary
 
-DEFAULT_RESULT_PATH = Path(__file__).resolve().parent / "performance metrics" / "result.json"
+DEFAULT_RESULT_PATH = Path(__file__).resolve().parent / "performance_metrics" / "result.json"
 
 
 def load_compute_performance_summary(result_path: Path | None = None) -> ComputePerformanceSummary:

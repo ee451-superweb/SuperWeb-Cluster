@@ -53,7 +53,7 @@ Everything else is supporting infrastructure:
   - worker-side runtime logic and benchmark summary loading
 - `main_node/`
   - main-node runtime, registry, and cluster capability tracking
-- `compute_node/performance metrics/`
+- `compute_node/performance_metrics/`
   - fixed benchmark workspace used to characterize local compute hardware
 - `standalone_model/`
   - isolated network experiments, not the main runtime entry
@@ -65,8 +65,8 @@ The current Sprint 1 startup flow is:
 1. `bootstrap.py` starts.
 2. It prepares the project-local `.venv`.
 3. It installs or refreshes `requirements.txt` if the dependency hash changed.
-4. It checks for `compute_node/performance metrics/result.json`.
-5. If benchmark results are missing, it runs `compute_node/performance metrics/benchmark.py`.
+4. It checks for `compute_node/performance_metrics/result.json`.
+5. If benchmark results are missing, it runs `compute_node/performance_metrics/benchmark.py`.
 6. It detects platform capabilities and configures firewall rules where supported.
 7. It enters `Supervisor.run()`.
 8. If `--role announce`, it becomes the main node immediately.
@@ -122,7 +122,9 @@ worker-hardware capability object and keeps a running cluster-wide GFLOPS total.
 - `main_node/`: main-node runtime logic
 - `compute_node/`: worker-side runtime logic
 - `compute_node/input matrix/`: fixed benchmark dataset generator and local dataset cache
-- `compute_node/performance metrics/`: CPU/CUDA benchmark workspace and result summary
+- `compute_node/performance_metrics/`: CPU/CUDA/Metal benchmark workspace and result summary
+  - writes a schema-versioned `result.json` with host metadata, hardware probes,
+    backend rankings, a two-phase workload definition, and best measured GFLOPS
 - `standalone_model/`: separate network experiments
 - `tests/`: automated tests
 
@@ -143,7 +145,7 @@ python bootstrap.py --role announce --udp-port 5353 --tcp-port 52020
 Run only the benchmark workspace:
 
 ```bash
-python "compute_node/performance metrics/benchmark.py"
+python "compute_node/performance_metrics/benchmark.py"
 ```
 
 Generate only the fixed benchmark dataset:
@@ -161,5 +163,15 @@ python "compute_node/input matrix/generate.py"
   directly is mainly for development and debugging.
 - Benchmark datasets and `result.json` are local machine artifacts and stay
   git-ignored.
+- The fixed FMVM benchmark now uses a two-phase workload:
+  autotune each candidate config with `3` repeats, then measure the winning
+  config with `20` repeats for the reported result.
+- The benchmark prefers the executable that matches the current OS and falls
+  back to compiling that OS's source when the matching binary is missing or
+  older than the source.
+- On macOS, the Metal benchmark runner now embeds its compiled `metallib`, so a
+  prebuilt runner can be copied to another compatible Mac and run without
+  Xcode or the Metal toolchain.
 - The checked-in exceptions are the Windows benchmark executables so a fresh
   Windows checkout can run the benchmark backends without rebuilding first.
+- Metal artifacts are compiled locally on macOS and remain git-ignored.

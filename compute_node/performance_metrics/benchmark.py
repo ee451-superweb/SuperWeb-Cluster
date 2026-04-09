@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import platform
 import subprocess
 import sys
 import time
@@ -27,6 +28,7 @@ from pathlib import Path
 
 from backends import build_backends
 from fmvm_dataset import build_dataset_layout, dataset_is_generated
+from models import DEFAULT_AUTOTUNE_REPEATS, DEFAULT_MEASUREMENT_REPEATS
 from path_utils import to_relative_cli_path, to_relative_string
 from workloads import build_benchmark_spec
 
@@ -132,10 +134,19 @@ def _trial_sort_key(result) -> tuple[float, float]:
 def _serialize_backend_result(result, rank_lookup: dict[str, int]) -> dict[str, object]:
     """Convert one backend summary into the JSON layout consumed by result.json."""
 
+    autotune_trial = result.autotune_trial
     best_trial = result.best_trial
     best_config = None
+    autotune_result = None
     best_result = None
     trial_notes: list[str] = []
+    if autotune_trial is not None:
+        autotune_result = {
+            "wall_clock_latency_seconds": autotune_trial.wall_clock_latency_seconds,
+            "effective_gflops": autotune_trial.effective_gflops,
+            "checksum": autotune_trial.checksum,
+            "score": autotune_trial.score,
+        }
     if best_trial is not None:
         best_config = dict(result.selected_config or best_trial.config)
         best_result = {
@@ -150,27 +161,62 @@ def _serialize_backend_result(result, rank_lookup: dict[str, int]) -> dict[str, 
         "available": result.available,
         "rank": rank_lookup.get(result.backend),
         "best_config": best_config,
+        "autotune_result": autotune_result,
         "best_result": best_result,
         "notes": list(result.notes),
         "trial_notes": trial_notes,
     }
 
 
+def _probe_backends(backends: list[object]) -> dict[str, dict[str, object]]:
+    """Ask each backend whether it looks usable on this machine before running it."""
+
+    inventory: dict[str, dict[str, object]] = {}
+    for backend in backends:
+        probe_available, probe_message = backend.probe()
+        inventory[str(backend.name)] = {
+            "probe_available": bool(probe_available),
+            "probe_message": str(probe_message),
+        }
+    return inventory
+
+
 def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
     """Run the benchmark and return the JSON-serializable report."""
 
+    backends = build_backends(args.backend)
+    hardware_inventory = _probe_backends(backends)
+    detected_backends = [
+        backend.name
+        for backend in backends
+        if bool((hardware_inventory.get(backend.name) or {}).get("probe_available"))
+    ]
+
     spec = build_benchmark_spec(rows=args.rows, cols=args.cols)
     dataset_dir = _resolve_dataset_dir(args, spec)
-    dataset_was_generated = _generate_dataset_if_missing(dataset_dir, spec.rows, spec.cols)
     dataset = build_dataset_layout(dataset_dir)
-    backends = build_backends(args.backend)
+    dataset_was_generated = False
+    if detected_backends:
+        dataset_was_generated = _generate_dataset_if_missing(dataset_dir, spec.rows, spec.cols)
 
     total_started = time.perf_counter()
     backend_results = []
+    runnable_backends = [backend for backend in backends if backend.name in detected_backends]
+    runnable_index = 0
     for index, backend in enumerate(backends):
+        if backend.name not in detected_backends:
+            backend_results.append(
+                backend.run(
+                    spec,
+                    dataset,
+                    time_budget_seconds=1.0,
+                )
+            )
+            continue
+
         elapsed = time.perf_counter() - total_started
         remaining = max(args.time_budget - elapsed, 1.0)
-        per_backend_budget = remaining / max(len(backends) - index, 1)
+        per_backend_budget = remaining / max(len(runnable_backends) - runnable_index, 1)
         backend_results.append(
             backend.run(
                 spec,
@@ -178,6 +224,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
                 time_budget_seconds=per_backend_budget,
             )
         )
+        runnable_index += 1
 
     total_elapsed = time.perf_counter() - total_started
 
@@ -198,9 +245,23 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
     best_backend = ranking[0] if ranking else None
 
     summary: dict[str, object] = {
+        "schema_version": 2,
         "method": "fixed_matrix_vector_multiplication",
         "generated_at_unix": time.time(),
         "benchmark_elapsed_seconds": total_elapsed,
+        "workload": {
+            "autotune_repeats": DEFAULT_AUTOTUNE_REPEATS,
+            "measurement_repeats": DEFAULT_MEASUREMENT_REPEATS,
+            "selection_metric": "autotune_average_latency",
+            "reported_metric": "measurement_average_latency",
+        },
+        "host": {
+            "platform": sys.platform,
+            "system": platform.system(),
+            "release": platform.release(),
+            "machine": platform.machine(),
+            "python_version": platform.python_version(),
+        },
         "dataset": {
             "root_dir": to_relative_string(dataset.root_dir, start=ROOT_DIR),
             "matrix_path": to_relative_string(dataset.matrix_path, start=ROOT_DIR),
@@ -211,6 +272,9 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
             "vector_bytes": spec.vector_bytes,
             "dataset_was_generated": dataset_was_generated,
         },
+        "hardware_inventory": hardware_inventory,
+        "detected_backends": detected_backends,
+        "usable_backends": [result.backend for result in backend_results if result.available],
         "backends_considered": [backend.name for backend in backends],
         "best_backend": best_backend,
         "ranking": ranking,

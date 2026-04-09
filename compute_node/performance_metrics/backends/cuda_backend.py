@@ -19,7 +19,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-from models import BackendResult, BenchmarkSpec, DatasetLayout, TrialRecord
+from models import (
+    DEFAULT_AUTOTUNE_REPEATS,
+    DEFAULT_MEASUREMENT_REPEATS,
+    BackendResult,
+    BenchmarkSpec,
+    DatasetLayout,
+    TrialRecord,
+)
 from path_utils import sanitize_text, to_relative_cli_path, to_relative_string
 from scoring import linear_time_score
 
@@ -81,15 +88,16 @@ def _candidate_transpose_modes() -> list[int]:
     return [0, 1]
 
 
-def _default_repeats(spec: BenchmarkSpec) -> int:
-    """Choose a repeat count that keeps large benchmarks short."""
+def _autotune_repeats(_spec: BenchmarkSpec | None = None) -> int:
+    """Return the fixed autotune repeat count for every CUDA benchmark."""
 
-    gib = 1024**3
-    if spec.matrix_bytes >= 2 * gib:
-        return 2
-    if spec.matrix_bytes >= 256 * 1024**2:
-        return 4
-    return 8
+    return DEFAULT_AUTOTUNE_REPEATS
+
+
+def _measurement_repeats(_spec: BenchmarkSpec | None = None) -> int:
+    """Return the fixed sustained-measurement repeat count for every CUDA benchmark."""
+
+    return DEFAULT_MEASUREMENT_REPEATS
 
 
 def _detect_compute_capability() -> str | None:
@@ -154,6 +162,7 @@ class CudaBackend:
                 backend=self.name,
                 available=False,
                 selected_config=None,
+                autotune_trial=None,
                 best_trial=None,
                 trials=[],
                 notes=notes,
@@ -170,6 +179,7 @@ class CudaBackend:
                 backend=self.name,
                 available=False,
                 selected_config=None,
+                autotune_trial=None,
                 best_trial=None,
                 trials=[],
                 notes=notes,
@@ -178,7 +188,8 @@ class CudaBackend:
         block_sizes = _candidate_block_sizes()
         tile_sizes = _candidate_tile_sizes()
         transpose_modes = _candidate_transpose_modes()
-        repeats = _default_repeats(spec)
+        autotune_repeats = _autotune_repeats(spec)
+        measurement_repeats = _measurement_repeats(spec)
         command = [
             str(executable_path),
             "--matrix",
@@ -195,14 +206,17 @@ class CudaBackend:
             ",".join(str(value) for value in block_sizes),
             "--tile-sizes",
             ",".join(str(value) for value in tile_sizes),
-            "--repeats",
-            str(repeats),
+            "--autotune-repeats",
+            str(autotune_repeats),
+            "--measurement-repeats",
+            str(measurement_repeats),
         ]
 
         notes.append(f"transpose search order: {transpose_modes}")
         notes.append(f"block size search order: {block_sizes}")
         notes.append(f"tile size search order: {tile_sizes}")
-        notes.append(f"repeats_per_config: {repeats}")
+        notes.append(f"autotune_repeats_per_config: {autotune_repeats}")
+        notes.append(f"measurement_repeats_for_best_config: {measurement_repeats}")
 
         try:
             completed = subprocess.run(
@@ -219,6 +233,7 @@ class CudaBackend:
                 backend=self.name,
                 available=False,
                 selected_config=None,
+                autotune_trial=None,
                 best_trial=None,
                 trials=[],
                 notes=notes,
@@ -231,14 +246,20 @@ class CudaBackend:
                 backend=self.name,
                 available=False,
                 selected_config=None,
+                autotune_trial=None,
                 best_trial=None,
                 trials=[],
                 notes=notes,
             )
 
         metrics = json.loads(completed.stdout)
-        score = linear_time_score(
-            float(metrics["wall_clock_latency_seconds"]),
+        autotune_score = linear_time_score(
+            float(metrics["autotune_wall_clock_latency_seconds"]),
+            ideal_seconds=spec.ideal_seconds,
+            zero_score_seconds=spec.zero_score_seconds,
+        )
+        measurement_score = linear_time_score(
+            float(metrics["measurement_wall_clock_latency_seconds"]),
             ideal_seconds=spec.ideal_seconds,
             zero_score_seconds=spec.zero_score_seconds,
         )
@@ -247,7 +268,8 @@ class CudaBackend:
             "transpose": bool(metrics["transpose"]),
             "block_size": int(metrics["block_size"]),
             "tile_size": int(metrics["tile_size"]),
-            "repeats": int(metrics["repeats"]),
+            "autotune_repeats": int(metrics["autotune_repeats"]),
+            "measurement_repeats": int(metrics["measurement_repeats"]),
             "trials_run": int(metrics["trials_run"]),
         }
         trial_notes: list[str] = []
@@ -256,21 +278,31 @@ class CudaBackend:
         if "compute_capability" in metrics:
             trial_notes.append(f"sm={metrics['compute_capability']}")
 
+        autotune_trial = TrialRecord(
+            backend=self.name,
+            config=config,
+            wall_clock_latency_seconds=float(metrics["autotune_wall_clock_latency_seconds"]),
+            effective_gflops=float(metrics["autotune_effective_gflops"]),
+            checksum=str(metrics["autotune_checksum"]),
+            score=autotune_score,
+            notes=trial_notes,
+        )
         trial = TrialRecord(
             backend=self.name,
             config=config,
-            wall_clock_latency_seconds=float(metrics["wall_clock_latency_seconds"]),
-            effective_gflops=float(metrics["effective_gflops"]),
-            checksum=str(metrics["checksum"]),
-            score=score,
+            wall_clock_latency_seconds=float(metrics["measurement_wall_clock_latency_seconds"]),
+            effective_gflops=float(metrics["measurement_effective_gflops"]),
+            checksum=str(metrics["measurement_checksum"]),
+            score=measurement_score,
             notes=trial_notes,
         )
         return BackendResult(
             backend=self.name,
             available=True,
             selected_config=dict(config),
+            autotune_trial=autotune_trial,
             best_trial=trial,
-            trials=[trial],
+            trials=[autotune_trial, trial],
             notes=notes,
         )
 

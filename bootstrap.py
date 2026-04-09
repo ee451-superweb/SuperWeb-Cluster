@@ -32,7 +32,7 @@ VENV_DIR = PROJECT_ROOT / ".venv"
 REQUIREMENTS_PATH = PROJECT_ROOT / "requirements.txt"
 REQUIREMENTS_STAMP_PATH = VENV_DIR / ".requirements.sha256"
 COMPUTE_NODE_DIR = PROJECT_ROOT / "compute_node"
-BENCHMARK_DIR = COMPUTE_NODE_DIR / "performance metrics"
+BENCHMARK_DIR = COMPUTE_NODE_DIR / "performance_metrics"
 BENCHMARK_SCRIPT_PATH = BENCHMARK_DIR / "benchmark.py"
 BENCHMARK_RESULT_PATH = BENCHMARK_DIR / "result.json"
 

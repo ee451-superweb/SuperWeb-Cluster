@@ -20,7 +20,7 @@ import argparse
 import sys
 from pathlib import Path
 
-PERF_DIR = Path(__file__).resolve().parents[1] / "performance metrics"
+PERF_DIR = Path(__file__).resolve().parents[1] / "performance_metrics"
 if str(PERF_DIR) not in sys.path:
     sys.path.insert(0, str(PERF_DIR))
 

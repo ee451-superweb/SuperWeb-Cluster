@@ -79,8 +79,8 @@ class BootstrapTests(unittest.TestCase):
     def test_ensure_compute_node_benchmark_ready_runs_benchmark_when_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
-            result_path = temp_root / "compute_node" / "performance metrics" / "result.json"
-            script_path = temp_root / "compute_node" / "performance metrics" / "benchmark.py"
+            result_path = temp_root / "compute_node" / "performance_metrics" / "result.json"
+            script_path = temp_root / "compute_node" / "performance_metrics" / "benchmark.py"
             script_path.parent.mkdir(parents=True, exist_ok=True)
             script_path.write_text("# placeholder\n", encoding="utf-8")
             logger = mock.Mock()

@@ -2,6 +2,7 @@
 __pycache__/
 *.py[codz]
 *$py.class
+.DS_Store
 
 # C extensions
 *.so
@@ -9,6 +10,12 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+!compute_node/performance_metrics/fixed_matrix_vector_multiplication/cpu/macos/build/
+compute_node/performance_metrics/fixed_matrix_vector_multiplication/cpu/macos/build/*
+!compute_node/performance_metrics/fixed_matrix_vector_multiplication/cpu/macos/build/fmvm_cpu_macos
+!compute_node/performance_metrics/fixed_matrix_vector_multiplication/metal/build/
+compute_node/performance_metrics/fixed_matrix_vector_multiplication/metal/build/*
+!compute_node/performance_metrics/fixed_matrix_vector_multiplication/metal/build/fmvm_metal_runner
 develop-eggs/
 dist/
 downloads/
