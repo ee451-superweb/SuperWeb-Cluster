@@ -7,7 +7,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-from common.types import HardwareProfile
+from common.types import ComputePerformanceSummary, HardwareProfile
 from constants import RUNTIME_ROLE_CLIENT, RUNTIME_ROLE_WORKER
 from trace_utils import trace_function
 
@@ -23,18 +23,35 @@ class RuntimePeerConnection:
     peer_port: int
     sock: socket.socket = field(repr=False, compare=False)
     hardware: HardwareProfile | None = None
+    performance: ComputePerformanceSummary | None = None
+    hardware_ids: list[str] = field(default_factory=list)
     registered_at: float = field(default_factory=time.time)
     last_heartbeat_at: float = 0.0
     last_request_at: float = 0.0
 
 
-class HomeClusterRegistry:
+@dataclass(slots=True)
+class WorkerHardwareCapability:
+    """One benchmarked hardware backend attached to a registered worker."""
+
+    hardware_id: str
+    worker_peer_id: str
+    worker_node_name: str
+    hardware_type: str
+    effective_gflops: float
+    rank: int
+
+
+class ClusterRegistry:
     """Thread-safe pools of connected workers and clients."""
 
     @trace_function
     def __init__(self) -> None:
         self._workers: dict[str, RuntimePeerConnection] = {}
         self._clients: dict[str, RuntimePeerConnection] = {}
+        self._worker_hardware: dict[str, WorkerHardwareCapability] = {}
+        self._next_hardware_id = 1
+        self._total_effective_gflops = 0.0
         self._lock = threading.Lock()
 
     @trace_function
@@ -44,6 +61,7 @@ class HomeClusterRegistry:
         peer_address: str,
         peer_port: int,
         hardware: HardwareProfile,
+        performance: ComputePerformanceSummary,
         sock: socket.socket,
     ) -> RuntimePeerConnection:
         peer_id = f"worker:{node_name}@{peer_address}:{peer_port}"
@@ -54,10 +72,25 @@ class HomeClusterRegistry:
             peer_address=peer_address,
             peer_port=peer_port,
             hardware=hardware,
+            performance=performance,
             sock=sock,
         )
         with self._lock:
             self._workers[peer_id] = connection
+            for reported_hardware in performance.ranked_hardware:
+                hardware_id = f"hardware:{self._next_hardware_id}"
+                self._next_hardware_id += 1
+                worker_hardware = WorkerHardwareCapability(
+                    hardware_id=hardware_id,
+                    worker_peer_id=peer_id,
+                    worker_node_name=node_name,
+                    hardware_type=reported_hardware.hardware_type,
+                    effective_gflops=reported_hardware.effective_gflops,
+                    rank=reported_hardware.rank,
+                )
+                self._worker_hardware[hardware_id] = worker_hardware
+                connection.hardware_ids.append(hardware_id)
+                self._total_effective_gflops += reported_hardware.effective_gflops
         return connection
 
     @trace_function
@@ -84,7 +117,15 @@ class HomeClusterRegistry:
     @trace_function
     def remove_worker(self, peer_id: str) -> RuntimePeerConnection | None:
         with self._lock:
-            return self._workers.pop(peer_id, None)
+            connection = self._workers.pop(peer_id, None)
+            if connection is None:
+                return None
+
+            for hardware_id in connection.hardware_ids:
+                worker_hardware = self._worker_hardware.pop(hardware_id, None)
+                if worker_hardware is not None:
+                    self._total_effective_gflops -= worker_hardware.effective_gflops
+            return connection
 
     @trace_function
     def remove_client(self, peer_id: str) -> RuntimePeerConnection | None:
@@ -96,6 +137,10 @@ class HomeClusterRegistry:
         with self._lock:
             connection = self._workers.pop(peer_id, None)
             if connection is not None:
+                for hardware_id in connection.hardware_ids:
+                    worker_hardware = self._worker_hardware.pop(hardware_id, None)
+                    if worker_hardware is not None:
+                        self._total_effective_gflops -= worker_hardware.effective_gflops
                 return connection
             return self._clients.pop(peer_id, None)
 
@@ -138,6 +183,8 @@ class HomeClusterRegistry:
             items = list(self._workers.values()) + list(self._clients.values())
             self._workers.clear()
             self._clients.clear()
+            self._worker_hardware.clear()
+            self._total_effective_gflops = 0.0
             return items
 
     @trace_function
@@ -155,6 +202,20 @@ class HomeClusterRegistry:
         with self._lock:
             return len(self._workers) + len(self._clients)
 
+    @trace_function
+    def list_worker_hardware(self) -> list[WorkerHardwareCapability]:
+        with self._lock:
+            return list(self._worker_hardware.values())
 
-HomeComputerRegistry = HomeClusterRegistry
-WorkerRegistry = HomeClusterRegistry
+    @trace_function
+    def count_registered_hardware(self) -> int:
+        with self._lock:
+            return len(self._worker_hardware)
+
+    @trace_function
+    def total_registered_gflops(self) -> float:
+        with self._lock:
+            return self._total_effective_gflops
+
+ComputeNodeRegistry = ClusterRegistry
+WorkerRegistry = ClusterRegistry

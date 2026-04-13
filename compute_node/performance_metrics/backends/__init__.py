@@ -12,14 +12,15 @@ Each backend object is responsible for one compute target, for example:
 - Metal
 - OpenCL
 
-Today the automatic benchmark flow only wires in CPU, but this folder is where
-future hardware-specific runners should be added.
+Today the automatic benchmark flow wires in CPU, CUDA, and Metal, and this
+folder is where future hardware-specific runners should be added.
 """
 
 from __future__ import annotations
 
 from backends.cpu_backend import CpuBackend
 from backends.cuda_backend import CudaBackend
+from backends.metal_backend import MetalBackend
 
 
 def _known_backend_factories() -> dict[str, type[object]]:
@@ -28,6 +29,7 @@ def _known_backend_factories() -> dict[str, type[object]]:
     return {
         "cpu": CpuBackend,
         "cuda": CudaBackend,
+        "metal": MetalBackend,
     }
 
 
@@ -39,7 +41,7 @@ def _default_backend_names() -> list[str]:
     safe to include CUDA here even on machines without a CUDA toolchain.
     """
 
-    return ["cpu", "cuda"]
+    return ["cpu", "cuda", "metal"]
 
 
 def build_backends(names: list[str] | None = None) -> list[object]:

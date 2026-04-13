@@ -2,6 +2,7 @@
 __pycache__/
 *.py[codz]
 *$py.class
+.DS_Store
 
 # C extensions
 *.so
@@ -9,6 +10,18 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+!compute_node/performance_metrics/fixed_matrix_vector_multiplication/cpu/macos/build/
+compute_node/performance_metrics/fixed_matrix_vector_multiplication/cpu/macos/build/*
+!compute_node/performance_metrics/fixed_matrix_vector_multiplication/cpu/macos/build/fmvm_cpu_macos
+!compute_node/performance_metrics/fixed_matrix_vector_multiplication/cpu/windows/build/
+compute_node/performance_metrics/fixed_matrix_vector_multiplication/cpu/windows/build/*
+!compute_node/performance_metrics/fixed_matrix_vector_multiplication/cpu/windows/build/fmvm_cpu_windows.exe
+!compute_node/performance_metrics/fixed_matrix_vector_multiplication/cuda/build/
+compute_node/performance_metrics/fixed_matrix_vector_multiplication/cuda/build/*
+!compute_node/performance_metrics/fixed_matrix_vector_multiplication/cuda/build/fmvm_cuda_runner.exe
+!compute_node/performance_metrics/fixed_matrix_vector_multiplication/metal/build/
+compute_node/performance_metrics/fixed_matrix_vector_multiplication/metal/build/*
+!compute_node/performance_metrics/fixed_matrix_vector_multiplication/metal/build/fmvm_metal_runner
 develop-eggs/
 dist/
 downloads/
@@ -138,6 +151,7 @@ celerybeat.pid
 .env
 .envrc
 .venv
+/.venv/
 env/
 venv/
 ENV/
@@ -206,19 +220,20 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# Performance metrics generated artifacts
-/performance metrics/result.json
-/performance metrics/fixed_matrix_vector_multiplication/input matrix/generated/
-/performance metrics/**/build/
-/performance metrics/fixed_matrix_vector_multiplication/cpu/windows/build/*
-/performance metrics/fixed_matrix_vector_multiplication/cuda/build/*
-/performance metrics/**/*.exe
-/performance metrics/**/*.obj
-/performance metrics/**/*.ilk
-/performance metrics/**/*.pdb
-/performance metrics/**/*.lib
-/performance metrics/**/*.exp
-!/performance metrics/fixed_matrix_vector_multiplication/cpu/windows/build/
-!/performance metrics/fixed_matrix_vector_multiplication/cuda/build/
-!/performance metrics/fixed_matrix_vector_multiplication/cpu/windows/build/fmvm_cpu_windows.exe
-!/performance metrics/fixed_matrix_vector_multiplication/cuda/build/fmvm_cuda_runner.exe
+# Legacy pre-move compute workspace paths should stay empty locally.
+/performance metrics/
+/compute_node/performance metrics/
+/compute_node/input matrix/
+
+# Local generated datasets and benchmark reports
+/compute_node/performance_metrics/result.json
+/compute_node/input_matrix/generated/
+
+# Local build artifacts from performance_metrics
+/compute_node/performance_metrics/**/*.obj
+/compute_node/performance_metrics/**/*.ilk
+/compute_node/performance_metrics/**/*.pdb
+/compute_node/performance_metrics/**/*.lib
+/compute_node/performance_metrics/**/*.exp
+/compute_node/performance_metrics/**/fmvm_cpu_output.bin
+/compute_node/performance_metrics/**/fmvm_cuda_output.bin

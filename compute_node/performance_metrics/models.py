@@ -17,6 +17,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+DEFAULT_AUTOTUNE_REPEATS = 3
+DEFAULT_MEASUREMENT_REPEATS = 20
+
 
 @dataclass(slots=True)
 class BenchmarkSpec:
@@ -97,6 +100,7 @@ class BackendResult:
     backend: str
     available: bool
     selected_config: dict[str, Any] | None
+    autotune_trial: TrialRecord | None
     best_trial: TrialRecord | None
     trials: list[TrialRecord] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
@@ -108,6 +112,7 @@ class BackendResult:
             "backend": self.backend,
             "available": self.available,
             "selected_config": None if self.selected_config is None else dict(self.selected_config),
+            "autotune_trial": None if self.autotune_trial is None else self.autotune_trial.to_dict(),
             "best_trial": None if self.best_trial is None else self.best_trial.to_dict(),
             "trials": [trial.to_dict() for trial in self.trials],
             "notes": list(self.notes),

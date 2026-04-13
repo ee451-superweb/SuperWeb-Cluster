@@ -23,17 +23,23 @@ struct Options {
     std::vector<int> transpose_modes;
     std::vector<int> block_sizes;
     std::vector<int> tile_sizes;
-    int repeats = 2;
+    int autotune_repeats = 1;
+    int measurement_repeats = 1;
+};
+
+struct PhaseMetrics {
+    int repeats = 0;
+    double wall_clock_latency_seconds = std::numeric_limits<double>::infinity();
+    double effective_gflops = 0.0;
+    std::string checksum;
 };
 
 struct TrialMetrics {
     int transpose = 0;
     int block_size = 0;
     int tile_size = 0;
-    int repeats = 0;
-    double wall_clock_latency_seconds = std::numeric_limits<double>::infinity();
-    double effective_gflops = 0.0;
-    std::string checksum;
+    PhaseMetrics autotune;
+    PhaseMetrics measurement;
 };
 
 inline void cuda_check(cudaError_t status, const char* message) {
@@ -84,8 +90,10 @@ Options parse_args(int argc, char** argv) {
             options.block_sizes = parse_int_list(value);
         } else if (key == "--tile-sizes") {
             options.tile_sizes = parse_int_list(value);
-        } else if (key == "--repeats") {
-            options.repeats = std::stoi(value);
+        } else if (key == "--autotune-repeats") {
+            options.autotune_repeats = std::stoi(value);
+        } else if (key == "--measurement-repeats") {
+            options.measurement_repeats = std::stoi(value);
         } else {
             throw std::runtime_error("unknown flag: " + key);
         }
@@ -100,8 +108,8 @@ Options parse_args(int argc, char** argv) {
     if (options.transpose_modes.empty() || options.block_sizes.empty() || options.tile_sizes.empty()) {
         throw std::runtime_error("transpose/block/tile candidate lists are required");
     }
-    if (options.repeats <= 0) {
-        throw std::runtime_error("repeats must be positive");
+    if (options.autotune_repeats <= 0 || options.measurement_repeats <= 0) {
+        throw std::runtime_error("autotune and measurement repeats must be positive");
     }
     return options;
 }
@@ -388,9 +396,109 @@ int main(int argc, char** argv) {
 
         const dim3 grid(options.rows);
         TrialMetrics best_metrics;
+        bool have_best_trial = false;
         std::vector<float> host_output(static_cast<size_t>(options.rows), 0.0f);
         std::vector<float> best_output_values(static_cast<size_t>(options.rows), 0.0f);
         int trials_run = 0;
+
+        auto measure_config = [&](
+            int transpose_mode,
+            int block_size,
+            int tile_size,
+            const float* matrix_pointer,
+            int repeats
+        ) -> PhaseMetrics {
+            const dim3 block(block_size);
+            const size_t shared_bytes = static_cast<size_t>(block_size) * sizeof(float);
+
+            if (transpose_mode != 0) {
+                launch_transposed_kernel(
+                    tile_size,
+                    grid,
+                    block,
+                    shared_bytes,
+                    matrix_pointer,
+                    device_vector,
+                    device_output,
+                    options.rows,
+                    options.cols);
+            } else {
+                launch_row_major_kernel(
+                    tile_size,
+                    grid,
+                    block,
+                    shared_bytes,
+                    matrix_pointer,
+                    device_vector,
+                    device_output,
+                    options.rows,
+                    options.cols);
+            }
+            cuda_check(cudaGetLastError(), "warmup kernel launch");
+            cuda_check(cudaDeviceSynchronize(), "cudaDeviceSynchronize warmup");
+
+            cudaEvent_t start_event{};
+            cudaEvent_t stop_event{};
+            cuda_check(cudaEventCreate(&start_event), "cudaEventCreate start");
+            cuda_check(cudaEventCreate(&stop_event), "cudaEventCreate stop");
+            cuda_check(cudaEventRecord(start_event), "cudaEventRecord start");
+
+            for (int repeat = 0; repeat < repeats; ++repeat) {
+                if (transpose_mode != 0) {
+                    launch_transposed_kernel(
+                        tile_size,
+                        grid,
+                        block,
+                        shared_bytes,
+                        matrix_pointer,
+                        device_vector,
+                        device_output,
+                        options.rows,
+                        options.cols);
+                } else {
+                    launch_row_major_kernel(
+                        tile_size,
+                        grid,
+                        block,
+                        shared_bytes,
+                        matrix_pointer,
+                        device_vector,
+                        device_output,
+                        options.rows,
+                        options.cols);
+                }
+            }
+
+            cuda_check(cudaGetLastError(), "kernel launch");
+            cuda_check(cudaEventRecord(stop_event), "cudaEventRecord stop");
+            cuda_check(cudaEventSynchronize(stop_event), "cudaEventSynchronize stop");
+
+            float elapsed_ms = 0.0f;
+            cuda_check(cudaEventElapsedTime(&elapsed_ms, start_event, stop_event), "cudaEventElapsedTime");
+            cuda_check(cudaEventDestroy(start_event), "cudaEventDestroy start");
+            cuda_check(cudaEventDestroy(stop_event), "cudaEventDestroy stop");
+
+            const double total_seconds = static_cast<double>(elapsed_ms) / 1000.0;
+            const double latency_seconds = total_seconds / static_cast<double>(repeats);
+            const double effective_gflops =
+                (2.0 * static_cast<double>(options.rows) * static_cast<double>(options.cols))
+                / std::max(latency_seconds, 1e-12) / 1.0e9;
+
+            cuda_check(
+                cudaMemcpy(
+                    host_output.data(),
+                    device_output,
+                    host_output.size() * sizeof(float),
+                    cudaMemcpyDeviceToHost),
+                "cudaMemcpy output");
+
+            PhaseMetrics metrics;
+            metrics.repeats = repeats;
+            metrics.wall_clock_latency_seconds = latency_seconds;
+            metrics.effective_gflops = effective_gflops;
+            metrics.checksum = fnv1a64_checksum(host_output);
+            return metrics;
+        };
 
         for (const int transpose_mode : options.transpose_modes) {
             const float* matrix_pointer = device_row_major;
@@ -403,106 +511,46 @@ int main(int argc, char** argv) {
                 if (block_size <= 0 || block_size > 1024) {
                     continue;
                 }
-                const dim3 block(block_size);
-                const size_t shared_bytes = static_cast<size_t>(block_size) * sizeof(float);
 
                 for (const int tile_size : options.tile_sizes) {
                     ++trials_run;
 
-                    if (transpose_mode != 0) {
-                        launch_transposed_kernel(
-                            tile_size,
-                            grid,
-                            block,
-                            shared_bytes,
-                            matrix_pointer,
-                            device_vector,
-                            device_output,
-                            options.rows,
-                            options.cols);
-                    } else {
-                        launch_row_major_kernel(
-                            tile_size,
-                            grid,
-                            block,
-                            shared_bytes,
-                            matrix_pointer,
-                            device_vector,
-                            device_output,
-                            options.rows,
-                            options.cols);
-                    }
-                    cuda_check(cudaGetLastError(), "warmup kernel launch");
-                    cuda_check(cudaDeviceSynchronize(), "cudaDeviceSynchronize warmup");
+                    const PhaseMetrics autotune_metrics = measure_config(
+                        transpose_mode,
+                        block_size,
+                        tile_size,
+                        matrix_pointer,
+                        options.autotune_repeats
+                    );
 
-                    cudaEvent_t start_event{};
-                    cudaEvent_t stop_event{};
-                    cuda_check(cudaEventCreate(&start_event), "cudaEventCreate start");
-                    cuda_check(cudaEventCreate(&stop_event), "cudaEventCreate stop");
-                    cuda_check(cudaEventRecord(start_event), "cudaEventRecord start");
-
-                    for (int repeat = 0; repeat < options.repeats; ++repeat) {
-                        if (transpose_mode != 0) {
-                            launch_transposed_kernel(
-                                tile_size,
-                                grid,
-                                block,
-                                shared_bytes,
-                                matrix_pointer,
-                                device_vector,
-                                device_output,
-                                options.rows,
-                                options.cols);
-                        } else {
-                            launch_row_major_kernel(
-                                tile_size,
-                                grid,
-                                block,
-                                shared_bytes,
-                                matrix_pointer,
-                                device_vector,
-                                device_output,
-                                options.rows,
-                                options.cols);
-                        }
-                    }
-
-                    cuda_check(cudaGetLastError(), "kernel launch");
-                    cuda_check(cudaEventRecord(stop_event), "cudaEventRecord stop");
-                    cuda_check(cudaEventSynchronize(stop_event), "cudaEventSynchronize stop");
-
-                    float elapsed_ms = 0.0f;
-                    cuda_check(cudaEventElapsedTime(&elapsed_ms, start_event, stop_event), "cudaEventElapsedTime");
-                    cuda_check(cudaEventDestroy(start_event), "cudaEventDestroy start");
-                    cuda_check(cudaEventDestroy(stop_event), "cudaEventDestroy stop");
-
-                    const double total_seconds = static_cast<double>(elapsed_ms) / 1000.0;
-                    const double latency_seconds = total_seconds / static_cast<double>(options.repeats);
-                    const double effective_gflops =
-                        (2.0 * static_cast<double>(options.rows) * static_cast<double>(options.cols))
-                        / std::max(latency_seconds, 1e-12) / 1.0e9;
-
-                    if (latency_seconds < best_metrics.wall_clock_latency_seconds) {
-                        cuda_check(
-                            cudaMemcpy(
-                                host_output.data(),
-                                device_output,
-                                host_output.size() * sizeof(float),
-                                cudaMemcpyDeviceToHost),
-                            "cudaMemcpy output");
-
+                    if (!have_best_trial || autotune_metrics.wall_clock_latency_seconds < best_metrics.autotune.wall_clock_latency_seconds) {
+                        have_best_trial = true;
                         best_metrics.transpose = transpose_mode;
                         best_metrics.block_size = block_size;
                         best_metrics.tile_size = tile_size;
-                        best_metrics.repeats = options.repeats;
-                        best_metrics.wall_clock_latency_seconds = latency_seconds;
-                        best_metrics.effective_gflops = effective_gflops;
-                        best_metrics.checksum = fnv1a64_checksum(host_output);
-                        best_output_values = host_output;
+                        best_metrics.autotune = autotune_metrics;
                     }
                 }
             }
         }
+
+        if (!have_best_trial) {
+            throw std::runtime_error("CUDA benchmark ran zero valid trials");
+        }
+
+        const float* best_matrix_pointer = device_row_major;
+        if (best_metrics.transpose != 0) {
+            ensure_transposed_matrix();
+            best_matrix_pointer = device_transposed;
+        }
+        best_metrics.measurement = measure_config(
+            best_metrics.transpose,
+            best_metrics.block_size,
+            best_metrics.tile_size,
+            best_matrix_pointer,
+            options.measurement_repeats
+        );
+        best_output_values = host_output;
 
         if (!options.output_path.empty()) {
             write_float32_file(options.output_path, best_output_values);
@@ -522,13 +570,19 @@ int main(int argc, char** argv) {
                   << "\"transpose\":" << best_metrics.transpose << ","
                   << "\"block_size\":" << best_metrics.block_size << ","
                   << "\"tile_size\":" << best_metrics.tile_size << ","
-                  << "\"repeats\":" << best_metrics.repeats << ","
+                  << "\"autotune_repeats\":" << best_metrics.autotune.repeats << ","
+                  << "\"measurement_repeats\":" << best_metrics.measurement.repeats << ","
                   << "\"trials_run\":" << trials_run << ","
-                  << "\"wall_clock_latency_seconds\":" << std::fixed << std::setprecision(9)
-                  << best_metrics.wall_clock_latency_seconds << ","
-                  << "\"effective_gflops\":" << std::fixed << std::setprecision(9)
-                  << best_metrics.effective_gflops << ","
-                  << "\"checksum\":\"" << best_metrics.checksum << "\""
+                  << "\"autotune_wall_clock_latency_seconds\":" << std::fixed << std::setprecision(9)
+                  << best_metrics.autotune.wall_clock_latency_seconds << ","
+                  << "\"autotune_effective_gflops\":" << std::fixed << std::setprecision(9)
+                  << best_metrics.autotune.effective_gflops << ","
+                  << "\"autotune_checksum\":\"" << best_metrics.autotune.checksum << "\","
+                  << "\"measurement_wall_clock_latency_seconds\":" << std::fixed << std::setprecision(9)
+                  << best_metrics.measurement.wall_clock_latency_seconds << ","
+                  << "\"measurement_effective_gflops\":" << std::fixed << std::setprecision(9)
+                  << best_metrics.measurement.effective_gflops << ","
+                  << "\"measurement_checksum\":\"" << best_metrics.measurement.checksum << "\""
                   << "}" << std::endl;
         return 0;
     } catch (const std::exception& exc) {

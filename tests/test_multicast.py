@@ -6,11 +6,11 @@ from unittest import mock
 from adapters import network
 from config import AppConfig
 from constants import (
+    COMPUTE_NODE_NAME,
     DEFAULT_BUFFER_SIZE,
     DEFAULT_DISCOVERY_PORT,
     DEFAULT_MULTICAST_GROUP,
     DEFAULT_MULTICAST_TTL,
-    HOME_COMPUTER_NAME,
 )
 from discovery.multicast import (
     close,
@@ -89,7 +89,7 @@ class MulticastTests(unittest.TestCase):
 
     def test_recv_packet_returns_raw_payload(self) -> None:
         fake_socket = mock.Mock()
-        payload = build_discover_message(HOME_COMPUTER_NAME)
+        payload = build_discover_message(COMPUTE_NODE_NAME)
         fake_socket.recvfrom.return_value = (payload, ("10.0.0.2", 5000))
         endpoint = mock.Mock()
         endpoint.sock = fake_socket
@@ -99,7 +99,7 @@ class MulticastTests(unittest.TestCase):
 
     def test_recv_discover_parses_valid_discover_message(self) -> None:
         fake_socket = mock.Mock()
-        payload = build_discover_message(HOME_COMPUTER_NAME)
+        payload = build_discover_message(COMPUTE_NODE_NAME)
         fake_socket.recvfrom.return_value = (payload, ("10.0.0.2", 5000))
         fake_socket.gettimeout.return_value = 1.0
         endpoint = mock.Mock()

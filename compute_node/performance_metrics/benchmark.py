@@ -1,0 +1,157 @@
+"""Top-level benchmark entry point.
+
+This file now stays intentionally small:
+
+- CLI parsing lives here
+- high-level orchestration lives here
+- dataset prep and report assembly live in helper modules
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import time
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from backends import build_backends
+from compute_node.input_matrix import build_dataset_layout
+from dataset_runner import generate_dataset_if_missing, resolve_dataset_dir
+from path_utils import to_relative_string
+from reporting import build_report, probe_backends
+from workloads import build_benchmark_spec
+
+ROOT_DIR = Path(__file__).resolve().parent
+DEFAULT_DATASET_DIR = ROOT_DIR.parent / "input_matrix" / "generated"
+DEFAULT_OUTPUT_PATH = ROOT_DIR / "result.json"
+GENERATE_SCRIPT_PATH = ROOT_DIR.parent / "input_matrix" / "generate.py"
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Describe the small CLI surface for the benchmark runner."""
+
+    parser = argparse.ArgumentParser(description="Benchmark fixed matrix-vector multiplication backends.")
+    parser.add_argument(
+        "--backend",
+        action="append",
+        default=None,
+        help="Backend to run. Repeatable. Default: current auto-detected backend order.",
+    )
+    parser.add_argument(
+        "--dataset-dir",
+        type=Path,
+        default=DEFAULT_DATASET_DIR,
+        help="Directory where A.bin, x.bin, and dataset_meta.json live.",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=DEFAULT_OUTPUT_PATH,
+        help="JSON file that receives the benchmark report.",
+    )
+    parser.add_argument(
+        "--time-budget",
+        type=float,
+        default=240.0,
+        help="Total benchmark time budget in seconds. Defaults to 240 (< 5 minutes).",
+    )
+    parser.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="Force backend executables to rebuild instead of reusing checked-in or cached binaries.",
+    )
+    parser.add_argument("--rows", type=int, help="Optional test-only override for the matrix row count.")
+    parser.add_argument("--cols", type=int, help="Optional test-only override for the matrix column count.")
+    return parser
+
+
+def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
+    """Run the benchmark and return the JSON-serializable report."""
+
+    backends = build_backends(args.backend)
+    force_rebuild = bool(getattr(args, "rebuild", False))
+    hardware_inventory = probe_backends(backends)
+    detected_backends = [
+        backend.name
+        for backend in backends
+        if bool((hardware_inventory.get(backend.name) or {}).get("probe_available"))
+    ]
+
+    spec = build_benchmark_spec(rows=args.rows, cols=args.cols)
+    dataset_dir = resolve_dataset_dir(args, spec, default_dataset_dir=DEFAULT_DATASET_DIR)
+    dataset = build_dataset_layout(dataset_dir)
+    dataset_was_generated = False
+    if detected_backends:
+        dataset_was_generated = generate_dataset_if_missing(
+            dataset_dir,
+            spec.rows,
+            spec.cols,
+            root_dir=ROOT_DIR,
+            generate_script_path=GENERATE_SCRIPT_PATH,
+        )
+
+    total_started = time.perf_counter()
+    backend_results = []
+    runnable_backends = [backend for backend in backends if backend.name in detected_backends]
+    runnable_index = 0
+    for index, backend in enumerate(backends):
+        if backend.name not in detected_backends:
+            backend_results.append(
+                backend.run(
+                    spec,
+                    dataset,
+                    time_budget_seconds=1.0,
+                    force_rebuild=force_rebuild,
+                )
+            )
+            continue
+
+        elapsed = time.perf_counter() - total_started
+        remaining = max(args.time_budget - elapsed, 1.0)
+        per_backend_budget = remaining / max(len(runnable_backends) - runnable_index, 1)
+        backend_results.append(
+            backend.run(
+                spec,
+                dataset,
+                time_budget_seconds=per_backend_budget,
+                force_rebuild=force_rebuild,
+            )
+        )
+        runnable_index += 1
+
+    total_elapsed = time.perf_counter() - total_started
+    return build_report(
+        method="fixed_matrix_vector_multiplication",
+        total_elapsed=total_elapsed,
+        force_rebuild=force_rebuild,
+        dataset=dataset,
+        spec=spec,
+        dataset_was_generated=dataset_was_generated,
+        hardware_inventory=hardware_inventory,
+        detected_backends=detected_backends,
+        backend_results=backend_results,
+        backends=backends,
+        to_relative_string=to_relative_string,
+        root_dir=ROOT_DIR,
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI wrapper around `run_benchmark()`."""
+
+    args = build_parser().parse_args(argv)
+    report = run_benchmark(args)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    report_text = json.dumps(report, indent=2)
+    args.output.write_text(report_text, encoding="utf-8")
+    print(report_text, flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

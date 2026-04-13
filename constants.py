@@ -1,16 +1,16 @@
-"""Shared constants for the kickoff version."""
+"""Shared constants for superweb-cluster Sprint 1."""
 
-APP_NAME = "home cluster"
-APP_SLUG = "home-cluster"
-LOGGER_NAME = "home_cluster"
+APP_NAME = "superweb-cluster"
+APP_SLUG = "superweb-cluster"
+LOGGER_NAME = "superweb_cluster"
 
 DEFAULT_NODE_NAME = "node"
-HOME_SCHEDULER_NAME = "home scheduler"
-HOME_SCHEDULER_SLUG = "home-scheduler"
-HOME_COMPUTER_NAME = "home computer"
-HOME_COMPUTER_SLUG = "home-computer"
-HOME_CLIENT_NAME = "home client"
-HOME_CLIENT_SLUG = "home-client"
+MAIN_NODE_NAME = "main node"
+MAIN_NODE_SLUG = "main-node"
+COMPUTE_NODE_NAME = "compute node"
+COMPUTE_NODE_SLUG = "compute-node"
+SUPERWEB_CLIENT_NAME = "superweb client"
+SUPERWEB_CLIENT_SLUG = "superweb-client"
 
 RUNTIME_ROLE_WORKER = "worker"
 RUNTIME_ROLE_CLIENT = "client"
@@ -30,8 +30,8 @@ DEFAULT_HEARTBEAT_INTERVAL = 10.0
 DEFAULT_HEARTBEAT_RETRY_COUNT = 3
 DEFAULT_MAX_PROTOBUF_MESSAGE_SIZE = 65536
 
-MDNS_SERVICE_TYPE = "_homecluster-hs._tcp.local."
-MDNS_SERVICE_ROLE = HOME_SCHEDULER_SLUG
+MDNS_SERVICE_TYPE = "_superweb-cluster._tcp.local."
+MDNS_SERVICE_ROLE = MAIN_NODE_SLUG
 MDNS_RECORD_TTL = 120
 MDNS_QUERY_UNICAST_RESPONSE = True
 
@@ -43,9 +43,9 @@ RUNTIME_MSG_CLIENT_JOIN = "CLIENT_JOIN"
 RUNTIME_MSG_CLIENT_REQUEST = "CLIENT_REQUEST"
 RUNTIME_MSG_CLIENT_RESPONSE = "CLIENT_RESPONSE"
 
-WINDOWS_FIREWALL_RULE_NAME = "HomeClusterDiscoveryUDP"
+WINDOWS_FIREWALL_RULE_NAME = "SuperWebClusterDiscoveryUDP"
 
 MSG_DISCOVERY_TIMEOUT = "Discovery timed out."
 MSG_MANUAL_PROMPT = "Enter peer host or host:port (leave blank to cancel): "
 MSG_MANUAL_CANCELLED = "Manual input cancelled."
-MSG_NOT_IMPLEMENTED = "Not implemented in kickoff version."
+MSG_NOT_IMPLEMENTED = "Not implemented in Sprint 1."

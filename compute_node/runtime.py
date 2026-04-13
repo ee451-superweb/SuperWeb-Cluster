@@ -8,6 +8,7 @@ from collections.abc import Callable
 
 from common.hardware import collect_hardware_profile
 from common.types import DiscoveryResult
+from compute_node.performance_summary import load_compute_performance_summary
 from compute_node.heartbeat import WorkerHeartbeat
 from compute_node.session import WorkerSession
 from config import AppConfig
@@ -17,21 +18,21 @@ from trace_utils import trace_function
 
 
 class ComputeNodeRuntime:
-    """Connect to the scheduler and stay attached to the runtime session."""
+    """Connect to the main node and stay attached to the runtime session."""
 
     @trace_function
     def __init__(
         self,
         config: AppConfig,
-        scheduler_host: str,
-        scheduler_port: int,
+        main_node_host: str,
+        main_node_port: int,
         logger: logging.Logger,
         should_stop: Callable[[], bool] | None = None,
         session_factory: Callable[..., WorkerSession] | None = None,
     ) -> None:
         self.config = config
-        self.scheduler_host = scheduler_host
-        self.scheduler_port = scheduler_port
+        self.main_node_host = main_node_host
+        self.main_node_port = main_node_port
         self.logger = logger
         self.should_stop = should_stop or (lambda: False)
         self.heartbeat_state = WorkerHeartbeat()
@@ -40,8 +41,8 @@ class ComputeNodeRuntime:
     @trace_function
     def _build_session(self) -> WorkerSession:
         return self._session_factory(
-            self.scheduler_host,
-            self.scheduler_port,
+            self.main_node_host,
+            self.main_node_port,
             connect_timeout=self.config.tcp_connect_timeout,
             socket_timeout=self.config.runtime_socket_timeout,
             max_message_size=self.config.max_message_size,
@@ -51,18 +52,25 @@ class ComputeNodeRuntime:
     def run(self) -> DiscoveryResult:
         session = self._build_session()
         try:
-            hardware = collect_hardware_profile(self.scheduler_host, self.scheduler_port)
+            hardware = collect_hardware_profile(self.main_node_host, self.main_node_port)
+            performance = load_compute_performance_summary()
             session.connect()
-            register_ok = session.register(self.config.node_name, hardware)
+            register_ok = session.register(self.config.node_name, hardware, performance)
 
             print(
-                f"Connected to home scheduler {register_ok.scheduler_name} "
-                f"at {register_ok.scheduler_ip}:{register_ok.scheduler_port}",
+                f"Connected to main node {register_ok.main_node_name} "
+                f"at {register_ok.main_node_ip}:{register_ok.main_node_port}",
                 flush=True,
             )
             print(
-                f"Registered home computer {self.config.node_name} "
+                f"Registered compute node {self.config.node_name} "
                 f"with cpu={hardware.logical_cpu_count} memory_bytes={hardware.memory_bytes}",
+                flush=True,
+            )
+            print(
+                "Reported compute backends "
+                f"count={performance.hardware_count} "
+                f"ranking={[f'{item.hardware_type}:{item.effective_gflops:.3f}' for item in performance.ranked_hardware]}",
                 flush=True,
             )
 
@@ -75,10 +83,10 @@ class ComputeNodeRuntime:
                 if message is None:
                     return DiscoveryResult(
                         success=False,
-                        peer_address=self.scheduler_host,
-                        peer_port=self.scheduler_port,
-                        source="home_computer",
-                        message="Home scheduler closed the TCP session.",
+                        peer_address=self.main_node_host,
+                        peer_port=self.main_node_port,
+                        source="compute_node",
+                        message="Main node closed the TCP session.",
                     )
 
                 if message.kind == MessageKind.HEARTBEAT and message.heartbeat is not None:
@@ -90,7 +98,7 @@ class ComputeNodeRuntime:
                         )
                     )
                     print(
-                        f"{RUNTIME_MSG_HEARTBEAT} from {message.heartbeat.scheduler_name} "
+                        f"{RUNTIME_MSG_HEARTBEAT} from {message.heartbeat.main_node_name} "
                         f"at {message.heartbeat.unix_time_ms}",
                         flush=True,
                     )
@@ -105,18 +113,18 @@ class ComputeNodeRuntime:
 
             return DiscoveryResult(
                 success=True,
-                peer_address=self.scheduler_host,
-                peer_port=self.scheduler_port,
-                source="home_computer",
-                message="Home computer runtime stopped.",
+                peer_address=self.main_node_host,
+                peer_port=self.main_node_port,
+                source="compute_node",
+                message="Compute-node runtime stopped.",
             )
         except (OSError, ValueError, ConnectionError, RuntimeError) as exc:
             return DiscoveryResult(
                 success=False,
-                peer_address=self.scheduler_host,
-                peer_port=self.scheduler_port,
-                source="home_computer",
-                message=f"Unable to join home scheduler TCP runtime: {exc}.",
+                peer_address=self.main_node_host,
+                peer_port=self.main_node_port,
+                source="compute_node",
+                message=f"Unable to join main-node TCP runtime: {exc}.",
             )
         finally:
             session.close()
