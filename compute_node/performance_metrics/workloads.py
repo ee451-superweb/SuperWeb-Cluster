@@ -13,10 +13,15 @@ The default matrix shape below is exactly the one requested by the user:
 
 from __future__ import annotations
 
-from models import BenchmarkSpec
+import sys
+from pathlib import Path
 
-DEFAULT_ROWS = 16_384
-DEFAULT_COLS = 32_768
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from compute_node.input_matrix import DEFAULT_COLS, DEFAULT_ROWS
+from models import BenchmarkSpec
 
 # These scoring constants keep the score linear while still leaving room for
 # slower CPUs and future accelerators to spread out meaningfully.

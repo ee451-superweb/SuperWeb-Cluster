@@ -9,6 +9,9 @@ Its job is to answer:
 - what their best measured GFLOPS are for the fixed workload
 - how those backends should be ranked for later scheduling decisions
 
+This workspace does not own the input-file format. It consumes the shared
+matrix/vector dataset described in `../input_matrix/README.md`.
+
 `bootstrap.py` is still the top-level project entrypoint. In normal use, this
 benchmark workspace is invoked automatically when
 `compute_node/performance_metrics/result.json` is missing.
@@ -18,7 +21,7 @@ benchmark workspace is invoked automatically when
 The current flow is:
 
 1. `bootstrap.py` prepares `.venv` and dependencies.
-2. `bootstrap.py` ensures this benchmark has produced `result.json`.
+2. `bootstrap.py` ensures the shared input dataset and this benchmark result exist.
 3. A compute node later loads that result summary during runtime registration.
 4. It sends only the compact summary upstream:
    - hardware backend count
@@ -54,8 +57,8 @@ The fixed FMVM workload now runs in two stages:
 `benchmark.py` acts as the orchestrator:
 
 1. resolve the benchmark shape
-2. check whether `A.bin` and `x.bin` already exist
-3. call `generate.py` only if the dataset is missing or mismatched
+2. check whether the shared `A.bin` and `x.bin` already exist
+3. call `../input_matrix/generate.py` only if the dataset is missing or mismatched
 4. run all enabled backend adapters
 5. autotune each backend config with the short repeat count
 6. rerun the winning config with the long repeat count
@@ -66,9 +69,22 @@ The fixed FMVM workload now runs in two stages:
 - `benchmark.py`
   - top-level benchmark runner
   - handles dataset checks, backend execution, ranking, and JSON output
-- `fmvm_dataset.py`
-  - dataset layout and validation
-  - deterministic streamed generation of `A.bin`, `x.bin`, and metadata
+- `dataset_runner.py`
+  - resolves dataset directories and shells out to `../input_matrix/generate.py` when needed
+- `reporting.py`
+  - assembles the final `result.json` structure from backend outcomes
+- `../input_matrix/README.md`
+  - documents the shared dataset format and generator CLI
+- `../input_matrix/__init__.py`
+  - package entrypoint for the shared dataset API
+- `../input_matrix/spec.py`
+  - dataset shape, layout dataclasses, and fixed constants
+- `../input_matrix/storage.py`
+  - dataset validation plus inspection helpers used by tests and benchmark flow
+- `../input_matrix/generator.py`
+  - deterministic streamed generation of `A.bin`, `x.bin`, and generic metadata
+- `../input_matrix/generate.py`
+  - CLI entrypoint that creates or refreshes the shared dataset on disk
 - `backends/`
   - one adapter per hardware family
   - keeps benchmark orchestration hardware-agnostic
@@ -192,10 +208,16 @@ Run only the Metal backend:
 python "compute_node/performance_metrics/benchmark.py" --backend metal
 ```
 
-Generate the dataset without running the benchmark:
+Generate the shared dataset without running the benchmark:
 
 ```bash
-python "compute_node/input matrix/generate.py"
+python "compute_node/input_matrix/generate.py"
+```
+
+Manually tune the generator for a faster one-time dataset build:
+
+```bash
+python "compute_node/input_matrix/generate.py" --workers 4 --chunk-mib 32
 ```
 
 Write the report to a different path:
@@ -213,12 +235,23 @@ python "compute_node/performance_metrics/benchmark.py" --rebuild
 
 `--rows` and `--cols` remain available for tiny tests. When you use those
 overrides without changing `--dataset-dir`, the generated files are written to
-`compute_node/input matrix/generated/overrides/<rows>x<cols>/` so the main
+`compute_node/input_matrix/generated/overrides/<rows>x<cols>/` so the main
 production dataset does not get overwritten.
 
 ## Notes
 
-- Generated datasets and benchmark reports are local-only and git-ignored.
+- Generated datasets in `compute_node/input_matrix/generated/` and benchmark
+  reports such as `result.json` are local-only and git-ignored.
+- `generate.py` uses 32 MiB streaming chunks by default and, when NumPy is
+  installed, generates each chunk with vectorized integer math instead of a
+  Python per-value loop.
+- The matrix generator can also fan out chunk writes across multiple workers
+  for a faster one-time dataset build on larger machines.
+- The benchmark entrypoint itself is now split into smaller helper modules so
+  dataset preparation and report assembly do not live in one giant file.
+- The shared dataset metadata is intentionally generic. It records dataset
+  shape, dtype, seeds, hashes, and file layout without embedding
+  `performance_metrics/`-specific tuning state.
 - The benchmark picks the binary that matches the current OS. If that binary
   is missing or older than the current OS source, it falls back to compiling
   the current OS source.

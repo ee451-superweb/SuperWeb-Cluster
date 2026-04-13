@@ -51,10 +51,12 @@ Everything else is supporting infrastructure:
   - decides whether this process becomes a compute node or the main node
 - `compute_node/`
   - worker-side runtime logic and benchmark summary loading
+- `compute_node/input_matrix/`
+  - shared matrix/vector dataset generator used by local compute benchmarks
 - `main_node/`
   - main-node runtime, registry, and cluster capability tracking
 - `compute_node/performance_metrics/`
-  - fixed benchmark workspace used to characterize local compute hardware
+  - benchmark workspace that characterizes local compute hardware against the shared dataset
 - `standalone_model/`
   - isolated network experiments, not the main runtime entry
 
@@ -121,8 +123,14 @@ worker-hardware capability object and keeps a running cluster-wide GFLOPS total.
 - `proto/`: protocol documentation, including `proto/superweb_cluster_runtime.proto`
 - `main_node/`: main-node runtime logic
 - `compute_node/`: worker-side runtime logic
-- `compute_node/input matrix/`: fixed benchmark dataset generator and local dataset cache
+- `compute_node/input_matrix/`: shared matrix/vector dataset generator and local dataset cache
+  - owns `A.bin`, `x.bin`, and `dataset_meta.json`
+  - split into smaller `spec / storage / splitmix / generator` modules
+  - documented in `compute_node/input_matrix/README.md`
 - `compute_node/performance_metrics/`: CPU/CUDA/Metal benchmark workspace and result summary
+  - consumes the shared dataset from `compute_node/input_matrix/`
+  - split into a smaller `benchmark.py` plus helper modules
+  - documented in `compute_node/performance_metrics/README.md`
   - writes a schema-versioned `result.json` with host metadata, hardware probes,
     backend rankings, a two-phase workload definition, and best measured GFLOPS
 - `standalone_model/`: separate network experiments
@@ -148,10 +156,10 @@ Run only the benchmark workspace:
 python "compute_node/performance_metrics/benchmark.py"
 ```
 
-Generate only the fixed benchmark dataset:
+Generate only the shared matrix/vector dataset:
 
 ```bash
-python "compute_node/input matrix/generate.py"
+python "compute_node/input_matrix/generate.py"
 ```
 
 ## Notes
@@ -161,11 +169,15 @@ python "compute_node/input matrix/generate.py"
   `main node`, and `compute node` terminology consistently.
 - `bootstrap.py` is the intended top-level entry. Running lower-level modules
   directly is mainly for development and debugging.
-- Benchmark datasets and `result.json` are local machine artifacts and stay
-  git-ignored.
+- Generated datasets under `compute_node/input_matrix/generated/` and benchmark
+  reports such as `compute_node/performance_metrics/result.json` are local
+  machine artifacts and stay git-ignored.
 - The fixed FMVM benchmark now uses a two-phase workload:
   autotune each candidate config with `3` repeats, then measure the winning
   config with `20` repeats for the reported result.
+- The dataset generator is now independent from `performance_metrics/`; the
+  benchmark workspace consumes `compute_node/input_matrix/` rather than owning
+  the input-file format itself.
 - The benchmark prefers the executable that matches the current OS and falls
   back to compiling that OS's source when the matching binary is missing or
   older than the source.

@@ -11,6 +11,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 PERF_DIR = Path(__file__).resolve().parents[1] / "compute_node" / "performance_metrics"
 if str(PERF_DIR) not in sys.path:
     sys.path.insert(0, str(PERF_DIR))
@@ -35,8 +39,9 @@ from backends.metal_backend import (
     _candidate_block_sizes as metal_candidate_block_sizes,
     _candidate_tile_sizes as metal_candidate_tile_sizes,
 )
-from fmvm_dataset import (
+from compute_node.input_matrix import (
     build_dataset_layout,
+    build_input_matrix_spec,
     compare_float32_vectors,
     dataset_is_generated,
     generate_dataset,
@@ -128,7 +133,7 @@ class PerformanceMatricsTests(unittest.TestCase):
         self.assertEqual(spec.vector_bytes, 32_768 * 4)
 
     def test_generate_dataset_with_small_override(self) -> None:
-        spec = build_benchmark_spec(rows=8, cols=16)
+        spec = build_input_matrix_spec(rows=8, cols=16)
         with tempfile.TemporaryDirectory() as temp_dir:
             layout = build_dataset_layout(Path(temp_dir))
             generate_dataset(layout, spec)
@@ -138,13 +143,35 @@ class PerformanceMatricsTests(unittest.TestCase):
             self.assertEqual(layout.matrix_path.stat().st_size, spec.matrix_bytes)
             self.assertEqual(layout.vector_path.stat().st_size, spec.vector_bytes)
 
+    def test_parallel_generate_dataset_matches_single_process_bytes(self) -> None:
+        spec = build_input_matrix_spec(rows=64, cols=64)
+        with tempfile.TemporaryDirectory() as sequential_dir, tempfile.TemporaryDirectory() as parallel_dir:
+            sequential_layout = build_dataset_layout(Path(sequential_dir))
+            parallel_layout = build_dataset_layout(Path(parallel_dir))
+
+            generate_dataset(sequential_layout, spec, generator_workers=1, chunk_values=16)
+            generate_dataset(parallel_layout, spec, generator_workers=2, chunk_values=16)
+
+            self.assertEqual(
+                sequential_layout.matrix_path.read_bytes(),
+                parallel_layout.matrix_path.read_bytes(),
+            )
+            self.assertEqual(
+                sequential_layout.vector_path.read_bytes(),
+                parallel_layout.vector_path.read_bytes(),
+            )
+            self.assertEqual(
+                json.loads(sequential_layout.meta_path.read_text(encoding="utf-8"))["files"]["matrix"]["sha256"],
+                json.loads(parallel_layout.meta_path.read_text(encoding="utf-8"))["files"]["matrix"]["sha256"],
+            )
+
     def test_dataset_is_generated_rejects_mismatched_metadata(self) -> None:
-        spec = build_benchmark_spec(rows=8, cols=16)
+        spec = build_input_matrix_spec(rows=8, cols=16)
         with tempfile.TemporaryDirectory() as temp_dir:
             layout = build_dataset_layout(Path(temp_dir))
             generate_dataset(layout, spec)
             metadata = json.loads(layout.meta_path.read_text(encoding="utf-8"))
-            metadata["benchmark"]["rows"] = 9
+            metadata["dataset"]["rows"] = 9
             layout.meta_path.write_text(json.dumps(metadata), encoding="utf-8")
 
             self.assertFalse(dataset_is_generated(layout, spec))

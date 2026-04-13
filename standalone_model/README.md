@@ -8,9 +8,12 @@
 1. mDNS 收发端，用来验证局域网或校园 Wi-Fi 上的 `224.0.0.251:5353` 是否能通。
 2. TCP 吞吐测试端，用来粗测两台机器之间应用层 TCP 发送/接收速度。
 
-如果你要跑固定矩阵向量乘法的 CPU/CUDA benchmark，现在请看
-`../compute_node/performance_metrics/README.md`。`standalone_model/` 只保留网络连通性和
-吞吐实验，不负责计算性能评分。
+如果你要看当前计算基准相关的目录，请分别看：
+
+- `../compute_node/input_matrix/README.md`
+- `../compute_node/performance_metrics/README.md`
+
+`standalone_model/` 只保留网络连通性和吞吐实验，不负责共享数据集生成或计算性能评分。
 
 ## 文件
 

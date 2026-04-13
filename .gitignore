@@ -220,13 +220,16 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# Legacy pre-move benchmark workspace should stay empty locally.
+# Legacy pre-move compute workspace paths should stay empty locally.
 /performance metrics/
 /compute_node/performance metrics/
+/compute_node/input matrix/
 
-# Performance metrics generated artifacts
+# Local generated datasets and benchmark reports
 /compute_node/performance_metrics/result.json
-/compute_node/input matrix/generated/
+/compute_node/input_matrix/generated/
+
+# Local build artifacts from performance_metrics
 /compute_node/performance_metrics/**/*.obj
 /compute_node/performance_metrics/**/*.ilk
 /compute_node/performance_metrics/**/*.pdb
