@@ -50,6 +50,8 @@ message RegisterOk {
   string main_node_name = 1;
   string main_node_ip = 2;
   uint32 main_node_port = 3;
+  // Runtime id assigned by the main node, for example "worker-1".
+  string node_id = 4;
 }
 
 message Heartbeat {
@@ -70,12 +72,15 @@ message ClientJoin {
 message ClientRequest {
   string request_id = 1;
   string client_name = 2;
+  // Structured method name, such as fixed_matrix_vector_multiplication.
   string method = 3;
   string object_id = 4;
   string stream_id = 5;
   uint64 timestamp_ms = 6;
   uint32 vector_length = 7;
   bytes vector_data = 8;
+  // How many times the cluster should execute the same computation request.
+  uint32 iteration_count = 9;
 }
 
 message ClientResponse {
@@ -90,10 +95,15 @@ message ClientResponse {
   bytes output_vector = 9;
   uint32 worker_count = 10;
   uint32 client_count = 11;
+  // Runtime id assigned by the main node, for example "client-1".
+  string client_id = 12;
+  // Echoes the iteration_count from the matching ClientRequest.
+  uint32 iteration_count = 13;
 }
 
 message TaskAssign {
   string request_id = 1;
+  // Runtime id of the compute node selected by the main node.
   string node_id = 2;
   string task_id = 3;
   string method = 4;
@@ -104,6 +114,8 @@ message TaskAssign {
   uint32 row_end = 9;
   uint32 vector_length = 10;
   bytes vector_data = 11;
+  // How many times the assigned processor slice should execute this math.
+  uint32 iteration_count = 12;
 }
 
 message TaskAccept {
@@ -133,6 +145,8 @@ message TaskResult {
   uint32 row_end = 7;
   uint32 output_length = 8;
   bytes output_vector = 9;
+  // Echoes the iteration_count from the matching TaskAssign.
+  uint32 iteration_count = 10;
 }
 
 message RuntimeEnvelope {

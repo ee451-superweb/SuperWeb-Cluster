@@ -60,6 +60,7 @@ class _FakeExecutor:
             row_end=task.row_end,
             output_length=task.row_end - task.row_start,
             output_vector=pack_float32_values([1.0] * (task.row_end - task.row_start)),
+            iteration_count=task.iteration_count,
         )
 
 
@@ -107,6 +108,7 @@ class ComputeNodeRuntimeTests(unittest.TestCase):
                 row_end=2,
                 vector_length=4,
                 vector_data=pack_float32_values([1.0, 2.0, 3.0, 4.0]),
+                iteration_count=5,
             ),
         )
         fake_session = _FakeSession(
@@ -122,6 +124,7 @@ class ComputeNodeRuntimeTests(unittest.TestCase):
                 main_node_name=MAIN_NODE_NAME,
                 main_node_ip="10.0.0.5",
                 main_node_port=52020,
+                node_id="worker-1",
             ),
         )
         fake_executor = _FakeExecutor(inventory)
@@ -156,6 +159,9 @@ class ComputeNodeRuntimeTests(unittest.TestCase):
         self.assertEqual(fake_session.sent_messages[0].kind, MessageKind.HEARTBEAT_OK)
         self.assertEqual(fake_session.sent_messages[1].kind, MessageKind.TASK_ACCEPT)
         self.assertEqual(fake_session.sent_messages[2].kind, MessageKind.TASK_RESULT)
+        self.assertEqual(fake_session.sent_messages[1].task_accept.node_id, "worker-1")
+        self.assertEqual(fake_session.sent_messages[2].task_result.node_id, "worker-1")
+        self.assertEqual(fake_session.sent_messages[2].task_result.iteration_count, 5)
         self.assertEqual(fake_session.sent_messages[2].task_result.output_length, 2)
         self.assertEqual(len(fake_executor.tasks), 1)
         self.assertTrue(print_mock.called)
@@ -191,7 +197,7 @@ class ComputeNodeRuntimeTests(unittest.TestCase):
             main_node_host="10.0.0.5",
             main_node_port=52020,
             logger=mock.Mock(),
-            session_factory=lambda *args, **kwargs: _BrokenSession([], RegisterOk("", "", 0)),
+            session_factory=lambda *args, **kwargs: _BrokenSession([], RegisterOk("", "", 0, "")),
         )
 
         result = runtime.run()

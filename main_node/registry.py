@@ -17,6 +17,7 @@ class RuntimePeerConnection:
     """Connected runtime peer metadata stored by the scheduler."""
 
     peer_id: str
+    runtime_id: str
     node_name: str
     role: str
     peer_address: str
@@ -37,6 +38,7 @@ class WorkerHardwareCapability:
 
     hardware_id: str
     worker_peer_id: str
+    worker_runtime_id: str
     worker_node_name: str
     hardware_type: str
     effective_gflops: float
@@ -52,6 +54,8 @@ class ClusterRegistry:
         self._clients: dict[str, RuntimePeerConnection] = {}
         self._worker_hardware: dict[str, WorkerHardwareCapability] = {}
         self._next_hardware_id = 1
+        self._next_worker_id = 1
+        self._next_client_id = 1
         self._total_effective_gflops = 0.0
         self._lock = threading.Lock()
 
@@ -66,17 +70,20 @@ class ClusterRegistry:
         sock: socket.socket,
     ) -> RuntimePeerConnection:
         peer_id = f"worker:{node_name}@{peer_address}:{peer_port}"
-        connection = RuntimePeerConnection(
-            peer_id=peer_id,
-            node_name=node_name,
-            role=RUNTIME_ROLE_WORKER,
-            peer_address=peer_address,
-            peer_port=peer_port,
-            hardware=hardware,
-            performance=performance,
-            sock=sock,
-        )
         with self._lock:
+            runtime_id = f"worker-{self._next_worker_id}"
+            self._next_worker_id += 1
+            connection = RuntimePeerConnection(
+                peer_id=peer_id,
+                runtime_id=runtime_id,
+                node_name=node_name,
+                role=RUNTIME_ROLE_WORKER,
+                peer_address=peer_address,
+                peer_port=peer_port,
+                hardware=hardware,
+                performance=performance,
+                sock=sock,
+            )
             self._workers[peer_id] = connection
             for reported_hardware in performance.ranked_hardware:
                 hardware_id = f"hardware:{self._next_hardware_id}"
@@ -84,6 +91,7 @@ class ClusterRegistry:
                 worker_hardware = WorkerHardwareCapability(
                     hardware_id=hardware_id,
                     worker_peer_id=peer_id,
+                    worker_runtime_id=runtime_id,
                     worker_node_name=node_name,
                     hardware_type=reported_hardware.hardware_type,
                     effective_gflops=reported_hardware.effective_gflops,
@@ -103,15 +111,18 @@ class ClusterRegistry:
         sock: socket.socket,
     ) -> RuntimePeerConnection:
         peer_id = f"client:{node_name}@{peer_address}:{peer_port}"
-        connection = RuntimePeerConnection(
-            peer_id=peer_id,
-            node_name=node_name,
-            role=RUNTIME_ROLE_CLIENT,
-            peer_address=peer_address,
-            peer_port=peer_port,
-            sock=sock,
-        )
         with self._lock:
+            runtime_id = f"client-{self._next_client_id}"
+            self._next_client_id += 1
+            connection = RuntimePeerConnection(
+                peer_id=peer_id,
+                runtime_id=runtime_id,
+                node_name=node_name,
+                role=RUNTIME_ROLE_CLIENT,
+                peer_address=peer_address,
+                peer_port=peer_port,
+                sock=sock,
+            )
             self._clients[peer_id] = connection
         return connection
 

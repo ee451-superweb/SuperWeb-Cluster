@@ -108,7 +108,9 @@ Options parse_args(int argc, char** argv) {
             options.fixed_tile_size = std::stoi(value);
         } else if (key == "--autotune-repeats") {
             options.autotune_repeats = std::stoi(value);
-        } else if (key == "--measurement-repeats") {
+        } else if (key == "--measurement-repeats" || key == "--iteration-count") {
+            // Task execution reuses the measurement loop but exposes the more
+            // domain-specific name iteration-count to the runtime layer.
             options.measurement_repeats = std::stoi(value);
         } else {
             throw std::runtime_error("unknown flag: " + key);
@@ -597,7 +599,7 @@ int main(int argc, char** argv) {
                       << "\"tile_size\":" << options.fixed_tile_size << ","
                       << "\"row_start\":" << options.row_start << ","
                       << "\"row_end\":" << options.row_end << ","
-                      << "\"measurement_repeats\":" << metrics.repeats << ","
+                      << "\"iteration_count\":" << metrics.repeats << ","
                       << "\"wall_clock_latency_seconds\":" << std::fixed << std::setprecision(9)
                       << metrics.wall_clock_latency_seconds << ","
                       << "\"effective_gflops\":" << std::fixed << std::setprecision(9)

@@ -97,7 +97,9 @@ Options parse_args(int argc, char** argv) {
             options.tile_sizes = parse_int_list(value);
         } else if (key == "--autotune-repeats") {
             options.autotune_repeats = std::stoi(value);
-        } else if (key == "--measurement-repeats") {
+        } else if (key == "--measurement-repeats" || key == "--iteration-count") {
+            // Task execution reuses the measurement loop but exposes the more
+            // domain-specific name iteration-count to the runtime layer.
             options.measurement_repeats = std::stoi(value);
         } else {
             throw std::runtime_error("unknown flag: " + key);

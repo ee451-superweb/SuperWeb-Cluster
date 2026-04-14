@@ -77,10 +77,12 @@ class ComputeNodeRuntime:
             task_executor = self._task_executor_factory(runtime_inventory)
             session.connect()
             register_ok = session.register(self.config.node_name, hardware, performance)
+            assigned_node_id = register_ok.node_id or self.config.node_name
 
             print(
                 f"Connected to main node {register_ok.main_node_name} "
-                f"at {register_ok.main_node_ip}:{register_ok.main_node_port}",
+                f"at {register_ok.main_node_ip}:{register_ok.main_node_port} "
+                f"assigned_node_id={assigned_node_id}",
                 flush=True,
             )
             print(
@@ -135,14 +137,15 @@ class ComputeNodeRuntime:
                     session.send(
                         build_task_accept(
                             request_id=task.request_id,
-                            node_id=self.config.node_name,
+                            node_id=assigned_node_id,
                             task_id=task.task_id,
                             status_code=STATUS_ACCEPTED,
                         )
                     )
                     print(
                         f"{RUNTIME_MSG_TASK_ACCEPT} from {self.config.node_name} "
-                        f"task_id={task.task_id} rows={task.row_start}:{task.row_end}",
+                        f"id={assigned_node_id} task_id={task.task_id} "
+                        f"rows={task.row_start}:{task.row_end} iteration_count={task.iteration_count}",
                         flush=True,
                     )
                     try:
@@ -151,7 +154,7 @@ class ComputeNodeRuntime:
                         session.send(
                             build_task_fail(
                                 request_id=task.request_id,
-                                node_id=self.config.node_name,
+                                node_id=assigned_node_id,
                                 task_id=task.task_id,
                                 status_code=STATUS_INTERNAL_ERROR,
                                 error_message=str(exc),
@@ -159,7 +162,7 @@ class ComputeNodeRuntime:
                         )
                         print(
                             f"{RUNTIME_MSG_TASK_FAIL} from {self.config.node_name} "
-                            f"task_id={task.task_id} error={exc}",
+                            f"id={assigned_node_id} task_id={task.task_id} error={exc}",
                             flush=True,
                         )
                         continue
@@ -167,17 +170,20 @@ class ComputeNodeRuntime:
                     session.send(
                         build_task_result(
                             request_id=task_result.request_id,
-                            node_id=self.config.node_name,
+                            node_id=assigned_node_id,
                             task_id=task_result.task_id,
                             status_code=task_result.status_code,
                             row_start=task_result.row_start,
                             row_end=task_result.row_end,
                             output_vector=task_result.output_vector,
+                            iteration_count=task_result.iteration_count,
                         )
                     )
                     print(
                         f"{RUNTIME_MSG_TASK_RESULT} from {self.config.node_name} "
-                        f"task_id={task.task_id} rows={task_result.row_start}:{task_result.row_end}",
+                        f"id={assigned_node_id} task_id={task.task_id} "
+                        f"rows={task_result.row_start}:{task_result.row_end} "
+                        f"iteration_count={task_result.iteration_count}",
                         flush=True,
                     )
                     continue

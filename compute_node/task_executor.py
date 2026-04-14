@@ -82,7 +82,7 @@ class FixedMatrixVectorTaskExecutor:
                     executor.map(
                         lambda processor_slice: (
                             processor_slice.row_start,
-                            self._run_processor_slice(processor_slice, vector_path, temp_root),
+                            self._run_processor_slice(processor_slice, task.iteration_count, vector_path, temp_root),
                         ),
                         processor_slices,
                     )
@@ -99,6 +99,7 @@ class FixedMatrixVectorTaskExecutor:
             row_end=task.row_end,
             output_length=task.row_end - task.row_start,
             output_vector=merged,
+            iteration_count=task.iteration_count,
         )
 
     def _validate_task(self, task: TaskAssign) -> None:
@@ -110,6 +111,8 @@ class FixedMatrixVectorTaskExecutor:
             raise ValueError(f"task vector length {task.vector_length} does not match expected {self.spec.cols}")
         if len(task.vector_data) != task.vector_length * 4:
             raise ValueError("task vector byte size does not match vector_length")
+        if task.iteration_count <= 0:
+            raise ValueError("task iteration_count must be positive")
         if not dataset_is_generated(self.dataset_layout, self.spec):
             raise FileNotFoundError(
                 f"missing generated input matrix at {self.dataset_layout.root_dir}; run compute_node/input_matrix/generate.py"
@@ -136,11 +139,17 @@ class FixedMatrixVectorTaskExecutor:
             )
         return slices
 
-    def _run_processor_slice(self, processor_slice: ProcessorTaskSlice, vector_path: Path, temp_root: Path) -> bytes:
+    def _run_processor_slice(
+        self,
+        processor_slice: ProcessorTaskSlice,
+        iteration_count: int,
+        vector_path: Path,
+        temp_root: Path,
+    ) -> bytes:
         output_path = temp_root / (
             f"{processor_slice.processor.hardware_type}_{processor_slice.row_start}_{processor_slice.row_end}.bin"
         )
-        command = self._build_runtime_command(processor_slice, vector_path, output_path)
+        command = self._build_runtime_command(processor_slice, iteration_count, vector_path, output_path)
         completed = subprocess.run(
             command,
             check=True,
@@ -163,7 +172,13 @@ class FixedMatrixVectorTaskExecutor:
             )
         return raw
 
-    def _build_runtime_command(self, processor_slice: ProcessorTaskSlice, vector_path: Path, output_path: Path) -> list[str]:
+    def _build_runtime_command(
+        self,
+        processor_slice: ProcessorTaskSlice,
+        iteration_count: int,
+        vector_path: Path,
+        output_path: Path,
+    ) -> list[str]:
         processor = processor_slice.processor
         if processor.hardware_type == "cpu":
             executable_path = CPU_WINDOWS_EXECUTABLE if sys.platform == "win32" else CPU_MACOS_EXECUTABLE
@@ -189,8 +204,10 @@ class FixedMatrixVectorTaskExecutor:
                 str(workers),
                 "--fixed-tile-size",
                 str(tile_size),
-                "--measurement-repeats",
-                "1",
+                # Task mode uses iteration_count to repeat the same math locally
+                # without resending the client request through the cluster.
+                "--iteration-count",
+                str(iteration_count),
             ]
 
         if processor.hardware_type == "cuda":
@@ -220,8 +237,10 @@ class FixedMatrixVectorTaskExecutor:
                 str(block_size),
                 "--fixed-tile-size",
                 str(tile_size),
-                "--measurement-repeats",
-                "1",
+                # Task mode uses iteration_count to repeat the same math locally
+                # without resending the client request through the cluster.
+                "--iteration-count",
+                str(iteration_count),
             ]
 
         raise ValueError(f"unsupported local processor type: {processor.hardware_type}")

@@ -70,7 +70,7 @@ class RuntimeProtocolTests(unittest.TestCase):
         self.assertAlmostEqual(decoded.register_worker.performance.ranked_hardware[0].effective_gflops, 122.992902574)
 
     def test_register_ok_round_trip(self) -> None:
-        encoded = encode_envelope(build_register_ok("10.0.0.5", 52020, MAIN_NODE_NAME))
+        encoded = encode_envelope(build_register_ok("10.0.0.5", 52020, node_id="worker-1", main_node_name=MAIN_NODE_NAME))
         decoded = parse_envelope(encoded)
 
         self.assertEqual(decoded.kind, MessageKind.REGISTER_OK)
@@ -78,6 +78,7 @@ class RuntimeProtocolTests(unittest.TestCase):
         assert decoded.register_ok is not None
         self.assertEqual(decoded.register_ok.main_node_ip, "10.0.0.5")
         self.assertEqual(decoded.register_ok.main_node_port, 52020)
+        self.assertEqual(decoded.register_ok.node_id, "worker-1")
 
     def test_heartbeat_ok_round_trip(self) -> None:
         encoded = encode_envelope(build_heartbeat_ok(COMPUTE_NODE_NAME, 123456, 123999))
@@ -103,6 +104,7 @@ class RuntimeProtocolTests(unittest.TestCase):
                     vector_data,
                     object_id="input_matrix/default",
                     stream_id="stream-1",
+                    iteration_count=7,
                 )
             )
         )
@@ -117,6 +119,8 @@ class RuntimeProtocolTests(unittest.TestCase):
                     output_vector=output_vector,
                     worker_count=2,
                     client_count=1,
+                    client_id="client-1",
+                    iteration_count=7,
                 )
             )
         )
@@ -126,11 +130,14 @@ class RuntimeProtocolTests(unittest.TestCase):
         self.assertEqual(request.kind, MessageKind.CLIENT_REQUEST)
         self.assertEqual(request.client_request.method, METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION)
         self.assertEqual(request.client_request.vector_length, 4)
+        self.assertEqual(request.client_request.iteration_count, 7)
         self.assertEqual(unpack_float32_bytes(request.client_request.vector_data), [1.0, 2.0, 3.0, 4.0])
         self.assertEqual(response.kind, MessageKind.CLIENT_RESPONSE)
         self.assertEqual(response.client_response.status_code, STATUS_OK)
         self.assertEqual(response.client_response.worker_count, 2)
         self.assertEqual(response.client_response.client_count, 1)
+        self.assertEqual(response.client_response.client_id, "client-1")
+        self.assertEqual(response.client_response.iteration_count, 7)
         self.assertEqual(unpack_float32_bytes(response.client_response.output_vector), [5.0, 6.0])
 
     def test_task_messages_round_trip(self) -> None:
@@ -148,6 +155,7 @@ class RuntimeProtocolTests(unittest.TestCase):
                     vector_data=vector_data,
                     object_id="input_matrix/default",
                     stream_id="stream-1",
+                    iteration_count=11,
                 )
             )
         )
@@ -167,6 +175,7 @@ class RuntimeProtocolTests(unittest.TestCase):
                     row_start=10,
                     row_end=12,
                     output_vector=result_vector,
+                    iteration_count=11,
                 )
             )
         )
@@ -174,6 +183,7 @@ class RuntimeProtocolTests(unittest.TestCase):
         self.assertEqual(assign.kind, MessageKind.TASK_ASSIGN)
         self.assertEqual(assign.task_assign.row_start, 10)
         self.assertEqual(assign.task_assign.row_end, 12)
+        self.assertEqual(assign.task_assign.iteration_count, 11)
         self.assertEqual(unpack_float32_bytes(assign.task_assign.vector_data), [1.0, 2.0, 3.0, 4.0])
         self.assertEqual(accept.kind, MessageKind.TASK_ACCEPT)
         self.assertEqual(accept.task_accept.status_code, STATUS_ACCEPTED)
@@ -181,6 +191,7 @@ class RuntimeProtocolTests(unittest.TestCase):
         self.assertEqual(fail.task_fail.error_message, "boom")
         self.assertEqual(result.kind, MessageKind.TASK_RESULT)
         self.assertEqual(result.task_result.output_length, 2)
+        self.assertEqual(result.task_result.iteration_count, 11)
         self.assertEqual(unpack_float32_bytes(result.task_result.output_vector), [9.0, 10.0])
 
     def test_framed_send_receive_round_trip(self) -> None:

@@ -66,6 +66,7 @@ class RegisterOk:
     main_node_name: str
     main_node_ip: str
     main_node_port: int
+    node_id: str
 
 
 @dataclass(slots=True)
@@ -104,6 +105,7 @@ class ClientRequest:
     timestamp_ms: int
     vector_length: int
     vector_data: bytes
+    iteration_count: int
 
 
 @dataclass(slots=True)
@@ -121,6 +123,8 @@ class ClientResponse:
     output_vector: bytes
     worker_count: int
     client_count: int
+    client_id: str
+    iteration_count: int
 
 
 @dataclass(slots=True)
@@ -156,6 +160,7 @@ class TaskAssign:
     row_end: int
     vector_length: int
     vector_data: bytes
+    iteration_count: int
 
 
 @dataclass(slots=True)
@@ -194,6 +199,7 @@ class TaskResult:
     row_end: int
     output_length: int
     output_vector: bytes
+    iteration_count: int
 
 
 def _encode_varint(value: int) -> bytes:
@@ -430,6 +436,7 @@ def _parse_register_ok(payload: bytes) -> RegisterOk:
     main_node_name = ""
     main_node_ip = ""
     main_node_port = 0
+    node_id = ""
 
     for field_number, wire_type, value in _parse_fields(payload):
         if field_number == 1:
@@ -438,11 +445,14 @@ def _parse_register_ok(payload: bytes) -> RegisterOk:
             main_node_ip = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
         elif field_number == 3:
             main_node_port = _require_varint(wire_type, value)
+        elif field_number == 4:
+            node_id = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
 
     return RegisterOk(
         main_node_name=main_node_name,
         main_node_ip=main_node_ip,
         main_node_port=main_node_port,
+        node_id=node_id,
     )
 
 
@@ -452,6 +462,7 @@ def _encode_register_ok(payload: RegisterOk) -> bytes:
             _encode_string_field(1, payload.main_node_name),
             _encode_string_field(2, payload.main_node_ip),
             _encode_uint_field(3, payload.main_node_port),
+            _encode_string_field(4, payload.node_id),
         ]
     )
 
@@ -531,6 +542,7 @@ def _parse_client_request(payload: bytes) -> ClientRequest:
     timestamp_ms = 0
     vector_length = 0
     vector_data = b""
+    iteration_count = 1
 
     for field_number, wire_type, value in _parse_fields(payload):
         if field_number == 1:
@@ -549,6 +561,8 @@ def _parse_client_request(payload: bytes) -> ClientRequest:
             vector_length = _require_varint(wire_type, value)
         elif field_number == 8:
             vector_data = _require_bytes(wire_type, value)
+        elif field_number == 9:
+            iteration_count = _require_varint(wire_type, value)
 
     return ClientRequest(
         request_id=request_id,
@@ -559,6 +573,7 @@ def _parse_client_request(payload: bytes) -> ClientRequest:
         timestamp_ms=timestamp_ms,
         vector_length=vector_length,
         vector_data=vector_data,
+        iteration_count=iteration_count,
     )
 
 
@@ -573,6 +588,7 @@ def _encode_client_request(payload: ClientRequest) -> bytes:
             _encode_uint_field(6, payload.timestamp_ms),
             _encode_uint_field(7, payload.vector_length),
             _encode_bytes_field(8, payload.vector_data),
+            _encode_uint_field(9, payload.iteration_count),
         ]
     )
 
@@ -589,6 +605,8 @@ def _parse_client_response(payload: bytes) -> ClientResponse:
     output_vector = b""
     worker_count = 0
     client_count = 0
+    client_id = ""
+    iteration_count = 1
 
     for field_number, wire_type, value in _parse_fields(payload):
         if field_number == 1:
@@ -613,6 +631,10 @@ def _parse_client_response(payload: bytes) -> ClientResponse:
             worker_count = _require_varint(wire_type, value)
         elif field_number == 11:
             client_count = _require_varint(wire_type, value)
+        elif field_number == 12:
+            client_id = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
+        elif field_number == 13:
+            iteration_count = _require_varint(wire_type, value)
 
     return ClientResponse(
         request_id=request_id,
@@ -626,6 +648,8 @@ def _parse_client_response(payload: bytes) -> ClientResponse:
         output_vector=output_vector,
         worker_count=worker_count,
         client_count=client_count,
+        client_id=client_id,
+        iteration_count=iteration_count,
     )
 
 
@@ -643,6 +667,8 @@ def _encode_client_response(payload: ClientResponse) -> bytes:
             _encode_bytes_field(9, payload.output_vector),
             _encode_uint_field(10, payload.worker_count),
             _encode_uint_field(11, payload.client_count),
+            _encode_string_field(12, payload.client_id),
+            _encode_uint_field(13, payload.iteration_count),
         ]
     )
 
@@ -659,6 +685,7 @@ def _parse_task_assign(payload: bytes) -> TaskAssign:
     row_end = 0
     vector_length = 0
     vector_data = b""
+    iteration_count = 1
 
     for field_number, wire_type, value in _parse_fields(payload):
         if field_number == 1:
@@ -683,6 +710,8 @@ def _parse_task_assign(payload: bytes) -> TaskAssign:
             vector_length = _require_varint(wire_type, value)
         elif field_number == 11:
             vector_data = _require_bytes(wire_type, value)
+        elif field_number == 12:
+            iteration_count = _require_varint(wire_type, value)
 
     return TaskAssign(
         request_id=request_id,
@@ -696,6 +725,7 @@ def _parse_task_assign(payload: bytes) -> TaskAssign:
         row_end=row_end,
         vector_length=vector_length,
         vector_data=vector_data,
+        iteration_count=iteration_count,
     )
 
 
@@ -713,6 +743,7 @@ def _encode_task_assign(payload: TaskAssign) -> bytes:
             _encode_uint_field(9, payload.row_end),
             _encode_uint_field(10, payload.vector_length),
             _encode_bytes_field(11, payload.vector_data),
+            _encode_uint_field(12, payload.iteration_count),
         ]
     )
 
@@ -812,6 +843,7 @@ def _parse_task_result(payload: bytes) -> TaskResult:
     row_end = 0
     output_length = 0
     output_vector = b""
+    iteration_count = 1
 
     for field_number, wire_type, value in _parse_fields(payload):
         if field_number == 1:
@@ -832,6 +864,8 @@ def _parse_task_result(payload: bytes) -> TaskResult:
             output_length = _require_varint(wire_type, value)
         elif field_number == 9:
             output_vector = _require_bytes(wire_type, value)
+        elif field_number == 10:
+            iteration_count = _require_varint(wire_type, value)
 
     return TaskResult(
         request_id=request_id,
@@ -843,6 +877,7 @@ def _parse_task_result(payload: bytes) -> TaskResult:
         row_end=row_end,
         output_length=output_length,
         output_vector=output_vector,
+        iteration_count=iteration_count,
     )
 
 
@@ -858,6 +893,7 @@ def _encode_task_result(payload: TaskResult) -> bytes:
             _encode_uint_field(7, payload.row_end),
             _encode_uint_field(8, payload.output_length),
             _encode_bytes_field(9, payload.output_vector),
+            _encode_uint_field(10, payload.iteration_count),
         ]
     )
 
@@ -1033,7 +1069,13 @@ def build_register_worker(
 
 
 @trace_function
-def build_register_ok(main_node_ip: str, main_node_port: int, main_node_name: str = MAIN_NODE_NAME) -> RuntimeEnvelope:
+def build_register_ok(
+    main_node_ip: str,
+    main_node_port: int,
+    *,
+    node_id: str = "",
+    main_node_name: str = MAIN_NODE_NAME,
+) -> RuntimeEnvelope:
     """Create a main-node registration-ack message."""
 
     return RuntimeEnvelope(
@@ -1042,6 +1084,7 @@ def build_register_ok(main_node_ip: str, main_node_port: int, main_node_name: st
             main_node_name=main_node_name,
             main_node_ip=main_node_ip,
             main_node_port=main_node_port,
+            node_id=node_id,
         ),
     )
 
@@ -1094,6 +1137,7 @@ def build_client_request(
     stream_id: str = "",
     timestamp_ms: int | None = None,
     vector_length: int | None = None,
+    iteration_count: int = 1,
 ) -> RuntimeEnvelope:
     """Create a client request message."""
 
@@ -1101,6 +1145,8 @@ def build_client_request(
         timestamp_ms = int(time.time() * 1000)
     if vector_length is None:
         vector_length = len(vector_data) // 4
+    if iteration_count <= 0:
+        raise ValueError("iteration_count must be positive")
 
     return RuntimeEnvelope(
         kind=MessageKind.CLIENT_REQUEST,
@@ -1113,6 +1159,7 @@ def build_client_request(
             timestamp_ms=timestamp_ms,
             vector_length=vector_length,
             vector_data=vector_data,
+            iteration_count=iteration_count,
         ),
     )
 
@@ -1131,6 +1178,8 @@ def build_client_response(
     output_length: int | None = None,
     worker_count: int = 0,
     client_count: int = 0,
+    client_id: str = "",
+    iteration_count: int = 1,
 ) -> RuntimeEnvelope:
     """Create a main-node response to a client join or request."""
 
@@ -1138,6 +1187,8 @@ def build_client_response(
         timestamp_ms = int(time.time() * 1000)
     if output_length is None:
         output_length = len(output_vector) // 4
+    if iteration_count <= 0:
+        raise ValueError("iteration_count must be positive")
 
     return RuntimeEnvelope(
         kind=MessageKind.CLIENT_RESPONSE,
@@ -1153,6 +1204,8 @@ def build_client_response(
             output_vector=output_vector,
             worker_count=worker_count,
             client_count=client_count,
+            client_id=client_id,
+            iteration_count=iteration_count,
         ),
     )
 
@@ -1171,6 +1224,7 @@ def build_task_assign(
     stream_id: str = "",
     timestamp_ms: int | None = None,
     vector_length: int | None = None,
+    iteration_count: int = 1,
 ) -> RuntimeEnvelope:
     """Create one task assignment message for a worker."""
 
@@ -1178,6 +1232,8 @@ def build_task_assign(
         timestamp_ms = int(time.time() * 1000)
     if vector_length is None:
         vector_length = len(vector_data) // 4
+    if iteration_count <= 0:
+        raise ValueError("iteration_count must be positive")
 
     return RuntimeEnvelope(
         kind=MessageKind.TASK_ASSIGN,
@@ -1193,6 +1249,7 @@ def build_task_assign(
             row_end=row_end,
             vector_length=vector_length,
             vector_data=vector_data,
+            iteration_count=iteration_count,
         ),
     )
 
@@ -1261,6 +1318,7 @@ def build_task_result(
     *,
     timestamp_ms: int | None = None,
     output_length: int | None = None,
+    iteration_count: int = 1,
 ) -> RuntimeEnvelope:
     """Create a task-result message from a worker."""
 
@@ -1268,6 +1326,8 @@ def build_task_result(
         timestamp_ms = int(time.time() * 1000)
     if output_length is None:
         output_length = len(output_vector) // 4
+    if iteration_count <= 0:
+        raise ValueError("iteration_count must be positive")
 
     return RuntimeEnvelope(
         kind=MessageKind.TASK_RESULT,
@@ -1281,6 +1341,7 @@ def build_task_result(
             row_end=row_end,
             output_length=output_length,
             output_vector=output_vector,
+            iteration_count=iteration_count,
         ),
     )
 

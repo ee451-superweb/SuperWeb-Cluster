@@ -142,6 +142,7 @@ class MainNodeRuntimeTests(unittest.TestCase):
         runtime.registry.count_registered_hardware.return_value = 2
         worker_connection = mock.Mock()
         worker_connection.node_name = COMPUTE_NODE_NAME
+        worker_connection.runtime_id = "worker-1"
         worker_connection.peer_address = "10.0.0.2"
         worker_connection.peer_port = 5000
         worker_connection.hardware = hardware = HardwareProfile(
@@ -180,6 +181,7 @@ class MainNodeRuntimeTests(unittest.TestCase):
         response = send_message_mock.call_args.args[1]
         self.assertEqual(response.kind, MessageKind.REGISTER_OK)
         self.assertEqual(response.register_ok.main_node_ip, "10.0.0.5")
+        self.assertEqual(response.register_ok.node_id, "worker-1")
         self.assertTrue(print_mock.called)
 
     @mock.patch("builtins.print")
@@ -204,6 +206,7 @@ class MainNodeRuntimeTests(unittest.TestCase):
         runtime.registry.count_clients.return_value = 1
         client_connection = mock.Mock()
         client_connection.node_name = SUPERWEB_CLIENT_NAME
+        client_connection.runtime_id = "client-1"
         runtime.registry.register_client.return_value = client_connection
         thread_instance = mock.Mock()
         thread_mock.return_value = thread_instance
@@ -224,6 +227,7 @@ class MainNodeRuntimeTests(unittest.TestCase):
         self.assertEqual(response.client_response.status_code, STATUS_OK)
         self.assertEqual(response.client_response.worker_count, 2)
         self.assertEqual(response.client_response.client_count, 1)
+        self.assertEqual(response.client_response.client_id, "client-1")
         thread_mock.assert_called_once()
         thread_instance.start.assert_called_once()
         self.assertTrue(print_mock.called)
@@ -252,6 +256,7 @@ class MainNodeRuntimeTests(unittest.TestCase):
         task_assignment = WorkerTaskSlice(
             connection=mock.Mock(
                 node_name=COMPUTE_NODE_NAME,
+                runtime_id="worker-1",
                 peer_id="worker:compute node@10.0.0.2:5000",
                 peer_address="10.0.0.2",
                 peer_port=5000,
@@ -267,7 +272,7 @@ class MainNodeRuntimeTests(unittest.TestCase):
         runtime.dispatcher.dispatch_fixed_matrix_vector_multiplication.return_value = [task_assignment]
         task_result = TaskResult(
             request_id="req-1",
-            node_id=COMPUTE_NODE_NAME,
+            node_id="worker-1",
             task_id="req-1:worker",
             timestamp_ms=123456,
             status_code=STATUS_OK,
@@ -275,6 +280,7 @@ class MainNodeRuntimeTests(unittest.TestCase):
             row_end=runtime.fixed_matvec_spec.rows,
             output_length=runtime.fixed_matvec_spec.rows,
             output_vector=pack_float32_values([1.0] * runtime.fixed_matvec_spec.rows),
+            iteration_count=4,
         )
         runtime._run_worker_task_slice = mock.Mock(return_value=task_result)
         runtime.aggregator = mock.Mock()
@@ -283,6 +289,7 @@ class MainNodeRuntimeTests(unittest.TestCase):
         connection = mock.Mock()
         connection.peer_id = "client:superweb client@10.0.0.3:6000"
         connection.node_name = SUPERWEB_CLIENT_NAME
+        connection.runtime_id = "client-1"
         connection.peer_address = "10.0.0.3"
         connection.peer_port = 6000
         connection.sock = mock.Mock()
@@ -296,6 +303,7 @@ class MainNodeRuntimeTests(unittest.TestCase):
                 request_vector,
                 object_id="input_matrix/default",
                 stream_id="stream-1",
+                iteration_count=4,
             ),
             None,
         ]
@@ -307,6 +315,8 @@ class MainNodeRuntimeTests(unittest.TestCase):
         self.assertEqual(response.kind, MessageKind.CLIENT_RESPONSE)
         self.assertEqual(response.client_response.request_id, "req-1")
         self.assertEqual(response.client_response.status_code, STATUS_OK)
+        self.assertEqual(response.client_response.client_id, "client-1")
+        self.assertEqual(response.client_response.iteration_count, 4)
         self.assertEqual(response.client_response.output_length, runtime.fixed_matvec_spec.rows)
         self.assertEqual(len(response.client_response.output_vector), runtime.fixed_matvec_spec.rows * 4)
         self.assertEqual(unpack_float32_bytes(response.client_response.output_vector)[:2], [1.0, 1.0])
@@ -328,6 +338,7 @@ class MainNodeRuntimeTests(unittest.TestCase):
 
         worker_connection = mock.Mock()
         worker_connection.node_name = COMPUTE_NODE_NAME
+        worker_connection.runtime_id = "worker-1"
         worker_connection.peer_id = "worker:compute node@10.0.0.2:5000"
         worker_connection.peer_address = "10.0.0.2"
         worker_connection.peer_port = 5000
@@ -342,6 +353,7 @@ class MainNodeRuntimeTests(unittest.TestCase):
             pack_float32_values([1.0] * runtime.fixed_matvec_spec.cols),
             object_id="input_matrix/default",
             stream_id="stream-1",
+            iteration_count=6,
         ).client_request
         assert request is not None
 
@@ -350,7 +362,7 @@ class MainNodeRuntimeTests(unittest.TestCase):
                 kind=MessageKind.TASK_ACCEPT,
                 task_accept=TaskAccept(
                     request_id="req-1",
-                    node_id=COMPUTE_NODE_NAME,
+                    node_id="worker-1",
                     task_id="req-1:worker",
                     timestamp_ms=123456,
                     status_code=STATUS_ACCEPTED,
@@ -360,7 +372,7 @@ class MainNodeRuntimeTests(unittest.TestCase):
                 kind=MessageKind.TASK_RESULT,
                 task_result=TaskResult(
                     request_id="req-1",
-                    node_id=COMPUTE_NODE_NAME,
+                    node_id="worker-1",
                     task_id="req-1:worker",
                     timestamp_ms=123457,
                     status_code=STATUS_OK,
@@ -368,6 +380,7 @@ class MainNodeRuntimeTests(unittest.TestCase):
                     row_end=10,
                     output_length=10,
                     output_vector=pack_float32_values([1.0] * 10),
+                    iteration_count=6,
                 ),
             ),
         ]
@@ -386,8 +399,10 @@ class MainNodeRuntimeTests(unittest.TestCase):
         self.assertEqual(result.row_end, 10)
         sent_message = send_message_mock.call_args.args[1]
         self.assertEqual(sent_message.kind, MessageKind.TASK_ASSIGN)
+        self.assertEqual(sent_message.task_assign.node_id, "worker-1")
         self.assertEqual(sent_message.task_assign.row_start, 0)
         self.assertEqual(sent_message.task_assign.row_end, 10)
+        self.assertEqual(sent_message.task_assign.iteration_count, 6)
         worker_connection.sock.settimeout.assert_any_call(30.0)
         worker_connection.sock.settimeout.assert_any_call(1.0)
 

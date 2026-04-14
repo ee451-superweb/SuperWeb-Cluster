@@ -144,10 +144,13 @@ class MainNodeRuntime:
                 main_node_ip=main_node_ip,
                 main_node_port=self.config.tcp_port,
                 main_node_name=MAIN_NODE_NAME,
+                node_id=connection.runtime_id,
             ),
         )
         print(
-            f"Registered compute node {connection.node_name} from {connection.peer_address}:{connection.peer_port} "
+            f"Registered compute node {connection.node_name} "
+            f"id={connection.runtime_id} "
+            f"from {connection.peer_address}:{connection.peer_port} "
             f"cpu={connection.hardware.logical_cpu_count} memory_bytes={connection.hardware.memory_bytes} "
             f"reported_hardware={connection.performance.hardware_count if connection.performance else 0} "
             f"ranking={self._format_reported_hardware(connection)}",
@@ -177,10 +180,13 @@ class MainNodeRuntime:
                 status_code=STATUS_OK,
                 worker_count=worker_count,
                 client_count=client_count,
+                client_id=connection.runtime_id,
             ),
         )
         print(
-            f"Registered client {connection.node_name} from {connection.peer_address}:{connection.peer_port}",
+            f"Registered client {connection.node_name} "
+            f"id={connection.runtime_id} "
+            f"from {connection.peer_address}:{connection.peer_port}",
             flush=True,
         )
         client_thread = threading.Thread(
@@ -253,7 +259,7 @@ class MainNodeRuntime:
         previous_timeout = sock.gettimeout()
         task_assign = build_task_assign(
             request_id=request.request_id,
-            node_id=assignment.connection.node_name,
+            node_id=assignment.connection.runtime_id,
             task_id=assignment.task_id,
             method=request.method,
             object_id=request.object_id,
@@ -262,6 +268,7 @@ class MainNodeRuntime:
             row_end=assignment.row_end,
             vector_data=request.vector_data,
             vector_length=request.vector_length,
+            iteration_count=request.iteration_count,
         )
 
         try:
@@ -270,7 +277,9 @@ class MainNodeRuntime:
                 send_message(sock, task_assign)
                 print(
                     f"{RUNTIME_MSG_TASK_ASSIGN} to {assignment.connection.node_name} "
-                    f"task_id={assignment.task_id} rows={assignment.row_start}:{assignment.row_end}",
+                    f"id={assignment.connection.runtime_id} "
+                    f"task_id={assignment.task_id} rows={assignment.row_start}:{assignment.row_end} "
+                    f"iteration_count={request.iteration_count}",
                     flush=True,
                 )
 
@@ -282,7 +291,11 @@ class MainNodeRuntime:
                         f"expected {RUNTIME_MSG_TASK_ACCEPT}, got {describe_message_kind(accept_message.kind)}"
                     )
                 task_accept = accept_message.task_accept
-                if task_accept.request_id != request.request_id or task_accept.task_id != assignment.task_id:
+                if (
+                    task_accept.request_id != request.request_id
+                    or task_accept.task_id != assignment.task_id
+                    or task_accept.node_id != assignment.connection.runtime_id
+                ):
                     raise ValueError("received TASK_ACCEPT for the wrong request or task id")
 
                 result_message = recv_message(sock, max_size=self.config.max_message_size)
@@ -290,13 +303,23 @@ class MainNodeRuntime:
                     raise ConnectionError("worker closed the TCP session before TASK_RESULT")
                 if result_message.kind == MessageKind.TASK_FAIL and result_message.task_fail is not None:
                     task_fail = result_message.task_fail
+                    if (
+                        task_fail.request_id != request.request_id
+                        or task_fail.task_id != assignment.task_id
+                        or task_fail.node_id != assignment.connection.runtime_id
+                    ):
+                        raise ValueError("received TASK_FAIL for the wrong request or task id")
                     raise RuntimeError(task_fail.error_message or "worker reported TASK_FAIL")
                 if result_message.kind != MessageKind.TASK_RESULT or result_message.task_result is None:
                     raise ValueError(
                         f"expected {RUNTIME_MSG_TASK_RESULT}, got {describe_message_kind(result_message.kind)}"
                     )
                 task_result = result_message.task_result
-                if task_result.request_id != request.request_id or task_result.task_id != assignment.task_id:
+                if (
+                    task_result.request_id != request.request_id
+                    or task_result.task_id != assignment.task_id
+                    or task_result.node_id != assignment.connection.runtime_id
+                ):
                     raise ValueError("received TASK_RESULT for the wrong request or task id")
                 return task_result
         except (OSError, ValueError, ConnectionError, RuntimeError) as exc:
@@ -322,6 +345,8 @@ class MainNodeRuntime:
                 error_message=f"unsupported method: {request.method}",
                 worker_count=worker_count,
                 client_count=client_count,
+                client_id="",
+                iteration_count=request.iteration_count,
             )
 
         if request.vector_length != self.fixed_matvec_spec.cols:
@@ -337,6 +362,8 @@ class MainNodeRuntime:
                 ),
                 worker_count=worker_count,
                 client_count=client_count,
+                client_id="",
+                iteration_count=request.iteration_count,
             )
 
         if len(request.vector_data) != request.vector_length * 4:
@@ -349,6 +376,21 @@ class MainNodeRuntime:
                 error_message="vector_data byte length does not match vector_length",
                 worker_count=worker_count,
                 client_count=client_count,
+                client_id="",
+                iteration_count=request.iteration_count,
+            )
+        if request.iteration_count <= 0:
+            return build_client_response(
+                request_id=request.request_id,
+                status_code=STATUS_BAD_REQUEST,
+                method=request.method,
+                object_id=request.object_id,
+                stream_id=request.stream_id,
+                error_message="iteration_count must be positive",
+                worker_count=worker_count,
+                client_count=client_count,
+                client_id="",
+                iteration_count=1,
             )
 
         assignments = self.dispatcher.dispatch_fixed_matrix_vector_multiplication(
@@ -367,6 +409,8 @@ class MainNodeRuntime:
                 error_message="no registered compute workers are currently available",
                 worker_count=worker_count,
                 client_count=client_count,
+                client_id="",
+                iteration_count=request.iteration_count,
             )
 
         try:
@@ -387,6 +431,8 @@ class MainNodeRuntime:
                 output_length=self.fixed_matvec_spec.rows,
                 worker_count=worker_count,
                 client_count=client_count,
+                client_id="",
+                iteration_count=request.iteration_count,
             )
         except (OSError, ValueError, ConnectionError, RuntimeError) as exc:
             worker_count, client_count = self._cluster_counts()
@@ -399,6 +445,8 @@ class MainNodeRuntime:
                 error_message=str(exc),
                 worker_count=worker_count,
                 client_count=client_count,
+                client_id="",
+                iteration_count=request.iteration_count,
             )
 
     @trace_function
@@ -441,10 +489,12 @@ class MainNodeRuntime:
             print(
                 f"{RUNTIME_MSG_CLIENT_REQUEST} from {request.client_name} "
                 f"request_id={request.request_id} method={request.method} "
-                f"vector_length={request.vector_length}",
+                f"vector_length={request.vector_length} iteration_count={request.iteration_count}",
                 flush=True,
             )
             response = self._build_client_response_for_request(request)
+            if response.client_response is not None:
+                response.client_response.client_id = connection.runtime_id
             send_message(connection.sock, response)
             print(
                 f"{RUNTIME_MSG_CLIENT_RESPONSE} to {request.client_name} "

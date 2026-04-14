@@ -116,9 +116,9 @@ The current startup flow is:
     - host hardware profile
     - filtered hardware backend count
     - ranked backend GFLOPS summary from the benchmark
-14. The main node assigns per-hardware ids, updates total cluster GFLOPS, then replies with `REGISTER_OK`.
-15. Clients send structured `CLIENT_REQUEST` messages.
-16. The main node emits `TASK_ASSIGN` slices to workers and waits for `TASK_RESULT` or `TASK_FAIL`.
+14. The main node assigns a runtime id to the compute node, assigns per-hardware ids, updates total cluster GFLOPS, then replies with `REGISTER_OK`.
+15. Clients join, receive their own runtime ids, and send structured `CLIENT_REQUEST` messages.
+16. Each `CLIENT_REQUEST` can include an `iteration_count`, and the main node emits matching `TASK_ASSIGN` slices to workers.
 17. The main node aggregates row slices and returns one `CLIENT_RESPONSE`.
 
 ## Local Vs Networked Steps
@@ -174,6 +174,10 @@ Right now the active executable method is:
 The client sends one 32K-length FP32 vector, the main node splits matrix rows
 across workers in proportion to registered GFLOPS, and compute nodes execute
 their assigned row ranges on the processors they kept after local filtering.
+Both the client response and worker task messages echo the assigned runtime id
+and the requested `iteration_count`.
+That `iteration_count` is a compute-side loop count for one structured request,
+not a request-resend count at the client or main-node layer.
 
 ## Quick Start
 
