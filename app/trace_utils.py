@@ -1,4 +1,4 @@
-"""Helpers for lightweight runtime function tracing."""
+﻿"""Helpers for lightweight runtime function tracing."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import functools
 import logging
 from typing import Callable, ParamSpec, TypeVar
 
-from constants import LOGGER_NAME
+from app.constants import LOGGER_NAME
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -31,3 +31,4 @@ def trace_function(func: Callable[P, R]) -> Callable[P, R]:
         return func(*args, **kwargs)
 
     return wrapper
+

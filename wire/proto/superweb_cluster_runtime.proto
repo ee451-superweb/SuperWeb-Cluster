@@ -11,6 +11,10 @@ enum MessageKind {
   CLIENT_JOIN = 5;
   CLIENT_REQUEST = 6;
   CLIENT_RESPONSE = 7;
+  TASK_ASSIGN = 8;
+  TASK_ACCEPT = 9;
+  TASK_FAIL = 10;
+  TASK_RESULT = 11;
 }
 
 message HardwareProfile {
@@ -64,19 +68,71 @@ message ClientJoin {
 }
 
 message ClientRequest {
-  string client_name = 1;
-  string request_id = 2;
-  string command = 3;
-  string payload = 4;
+  string request_id = 1;
+  string client_name = 2;
+  string method = 3;
+  string object_id = 4;
+  string stream_id = 5;
+  uint64 timestamp_ms = 6;
+  uint32 vector_length = 7;
+  bytes vector_data = 8;
 }
 
 message ClientResponse {
   string request_id = 1;
-  bool ok = 2;
-  string message = 3;
-  string payload = 4;
-  uint32 worker_count = 5;
-  uint32 client_count = 6;
+  string method = 2;
+  string object_id = 3;
+  string stream_id = 4;
+  uint64 timestamp_ms = 5;
+  uint32 status_code = 6;
+  string error_message = 7;
+  uint32 output_length = 8;
+  bytes output_vector = 9;
+  uint32 worker_count = 10;
+  uint32 client_count = 11;
+}
+
+message TaskAssign {
+  string request_id = 1;
+  string node_id = 2;
+  string task_id = 3;
+  string method = 4;
+  string object_id = 5;
+  string stream_id = 6;
+  uint64 timestamp_ms = 7;
+  uint32 row_start = 8;
+  uint32 row_end = 9;
+  uint32 vector_length = 10;
+  bytes vector_data = 11;
+}
+
+message TaskAccept {
+  string request_id = 1;
+  string node_id = 2;
+  string task_id = 3;
+  uint64 timestamp_ms = 4;
+  uint32 status_code = 5;
+}
+
+message TaskFail {
+  string request_id = 1;
+  string node_id = 2;
+  string task_id = 3;
+  uint64 timestamp_ms = 4;
+  uint32 status_code = 5;
+  string error_message = 6;
+}
+
+message TaskResult {
+  string request_id = 1;
+  string node_id = 2;
+  string task_id = 3;
+  uint64 timestamp_ms = 4;
+  uint32 status_code = 5;
+  uint32 row_start = 6;
+  uint32 row_end = 7;
+  uint32 output_length = 8;
+  bytes output_vector = 9;
 }
 
 message RuntimeEnvelope {
@@ -88,4 +144,8 @@ message RuntimeEnvelope {
   ClientJoin client_join = 6;
   ClientRequest client_request = 7;
   ClientResponse client_response = 8;
+  TaskAssign task_assign = 9;
+  TaskAccept task_accept = 10;
+  TaskFail task_fail = 11;
+  TaskResult task_result = 12;
 }

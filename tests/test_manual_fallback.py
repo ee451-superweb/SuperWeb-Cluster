@@ -1,9 +1,9 @@
-"""Manual fallback tests."""
+﻿"""Manual fallback tests."""
 
 import unittest
 from unittest import mock
 
-from constants import DEFAULT_TCP_PORT
+from app.constants import DEFAULT_TCP_PORT
 from discovery.fallback import prompt_manual_address
 
 
@@ -20,3 +20,4 @@ class ManualFallbackTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

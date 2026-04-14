@@ -1,11 +1,11 @@
-"""Manual fallback when multicast discovery fails."""
+﻿"""Manual fallback when multicast discovery fails."""
 
 from __future__ import annotations
 
 from common.types import DiscoveryResult
-from constants import MSG_MANUAL_CANCELLED, MSG_MANUAL_PROMPT
-from protocol import normalize_manual_address
-from trace_utils import trace_function
+from app.constants import MSG_MANUAL_CANCELLED, MSG_MANUAL_PROMPT
+from wire.discovery import normalize_manual_address
+from app.trace_utils import trace_function
 
 
 @trace_function
@@ -34,3 +34,5 @@ def prompt_manual_address(default_port: int) -> DiscoveryResult:
         source="manual",
         message=f"Using manual peer {host}:{port}.",
     )
+
+

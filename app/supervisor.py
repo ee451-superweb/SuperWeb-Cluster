@@ -1,4 +1,4 @@
-"""Minimal supervisor for superweb-cluster Sprint 1."""
+﻿"""Minimal supervisor for superweb-cluster Sprint 1."""
 
 from __future__ import annotations
 
@@ -10,11 +10,11 @@ from adapters.firewall import cleanup_rules
 from common.state import RuntimeState
 from common.types import DiscoveryResult, FirewallStatus, PlatformInfo
 from compute_node.runtime import ComputeNodeRuntime
-from config import AppConfig
+from app.config import AppConfig
 from discovery.fallback import prompt_manual_address
 from discovery.pairing import run_pairing
 from main_node.runtime import MainNodeRuntime
-from trace_utils import trace_function
+from app.trace_utils import trace_function
 
 
 class Supervisor:
@@ -160,3 +160,4 @@ class Supervisor:
         status = cleanup_rules(self.platform_info, self.config.udp_port)
         self.logger.info("Firewall cleanup: %s", status.message)
         return status
+

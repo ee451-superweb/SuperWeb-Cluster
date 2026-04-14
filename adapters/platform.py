@@ -1,4 +1,4 @@
-"""Platform and privilege detection helpers."""
+﻿"""Platform and privilege detection helpers."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import subprocess
 import sys
 
 from common.types import PlatformInfo
-from trace_utils import trace_function
+from app.trace_utils import trace_function
 
 
 @trace_function
@@ -104,3 +104,4 @@ def relaunch_as_admin(argv: list[str] | None = None) -> bool:
         return False
 
     return result > 32
+

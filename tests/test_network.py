@@ -1,4 +1,4 @@
-"""Network helper tests."""
+﻿"""Network helper tests."""
 
 import socket
 import struct
@@ -6,7 +6,7 @@ import unittest
 from unittest import mock
 
 from adapters import network
-from constants import DEFAULT_DISCOVERY_PORT, DEFAULT_MULTICAST_GROUP, DEFAULT_MULTICAST_TTL
+from app.constants import DEFAULT_DISCOVERY_PORT, DEFAULT_MULTICAST_GROUP, DEFAULT_MULTICAST_TTL
 
 
 class NetworkTests(unittest.TestCase):
@@ -105,3 +105,4 @@ class NetworkTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

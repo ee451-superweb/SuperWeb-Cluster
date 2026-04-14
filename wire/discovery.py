@@ -1,4 +1,4 @@
-"""Minimal mDNS/DNS-SD helpers for superweb-cluster main-node discovery."""
+﻿"""Minimal mDNS/DNS-SD helpers for superweb-cluster main-node discovery."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import socket
 import struct
 from dataclasses import dataclass
 
-from constants import (
+from app.constants import (
     MAIN_NODE_NAME,
     MDNS_QUERY_UNICAST_RESPONSE,
     MDNS_RECORD_TTL,
@@ -498,3 +498,4 @@ def normalize_manual_address(value: str, default_port: int) -> tuple[str, int]:
         raise ValueError("manual port is invalid") from exc
 
     return host, port
+

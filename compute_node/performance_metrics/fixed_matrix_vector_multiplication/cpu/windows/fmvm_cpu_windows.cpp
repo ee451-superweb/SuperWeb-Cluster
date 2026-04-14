@@ -19,10 +19,15 @@ struct Options {
     std::string output_path;
     int rows = 0;
     int cols = 0;
+    int row_start = 0;
+    int row_end = 0;
     std::vector<int> worker_candidates;
     std::vector<int> tile_sizes;
+    int fixed_workers = 0;
+    int fixed_tile_size = 0;
     int autotune_repeats = 1;
     int measurement_repeats = 1;
+    bool task_mode = false;
 };
 
 struct PhaseMetrics {
@@ -58,7 +63,7 @@ std::vector<int> parse_int_list(const std::string& text) {
     return values;
 }
 
-// Parse the small command-line surface that the Python backend passes in.
+// Parse the small command-line surface used by both benchmark mode and task mode.
 Options parse_args(int argc, char** argv) {
     Options options;
     for (int index = 1; index < argc; index += 2) {
@@ -78,10 +83,18 @@ Options parse_args(int argc, char** argv) {
             options.rows = std::stoi(value);
         } else if (key == "--cols") {
             options.cols = std::stoi(value);
+        } else if (key == "--row-start") {
+            options.row_start = std::stoi(value);
+        } else if (key == "--row-end") {
+            options.row_end = std::stoi(value);
         } else if (key == "--workers") {
             options.worker_candidates = parse_int_list(value);
         } else if (key == "--tile-sizes") {
             options.tile_sizes = parse_int_list(value);
+        } else if (key == "--fixed-workers") {
+            options.fixed_workers = std::stoi(value);
+        } else if (key == "--fixed-tile-size") {
+            options.fixed_tile_size = std::stoi(value);
         } else if (key == "--autotune-repeats") {
             options.autotune_repeats = std::stoi(value);
         } else if (key == "--measurement-repeats") {
@@ -97,14 +110,33 @@ Options parse_args(int argc, char** argv) {
     if (options.rows <= 0 || options.cols <= 0) {
         throw std::runtime_error("rows and cols must be positive");
     }
-    if (options.worker_candidates.empty()) {
-        throw std::runtime_error("worker candidate list is required");
+    if (options.row_end == 0) {
+        options.row_end = options.rows;
     }
-    if (options.tile_sizes.empty()) {
-        throw std::runtime_error("tile-size candidate list is required");
+    if (options.row_start < 0 || options.row_end <= options.row_start || options.row_end > options.rows) {
+        throw std::runtime_error("row range is invalid");
     }
-    if (options.autotune_repeats <= 0 || options.measurement_repeats <= 0) {
-        throw std::runtime_error("autotune and measurement repeats must be positive");
+    if (options.measurement_repeats <= 0) {
+        throw std::runtime_error("measurement repeats must be positive");
+    }
+
+    const bool has_fixed_workers = options.fixed_workers > 0;
+    const bool has_fixed_tile_size = options.fixed_tile_size > 0;
+    if (has_fixed_workers != has_fixed_tile_size) {
+        throw std::runtime_error("task mode requires both fixed-workers and fixed-tile-size");
+    }
+    options.task_mode = has_fixed_workers && has_fixed_tile_size;
+
+    if (!options.task_mode) {
+        if (options.worker_candidates.empty()) {
+            throw std::runtime_error("worker candidate list is required");
+        }
+        if (options.tile_sizes.empty()) {
+            throw std::runtime_error("tile-size candidate list is required");
+        }
+        if (options.autotune_repeats <= 0) {
+            throw std::runtime_error("autotune repeats must be positive");
+        }
     }
 
     return options;
@@ -165,7 +197,8 @@ void compute_row_range(
     int cols,
     int row_start,
     int row_end,
-    int tile_size
+    int tile_size,
+    int output_row_offset
 ) {
     for (int row = row_start; row < row_end; ++row) {
         const size_t row_base = static_cast<size_t>(row) * static_cast<size_t>(cols);
@@ -173,7 +206,12 @@ void compute_row_range(
 
         // Keep the CPU path in FP32 so it matches the benchmark's intended
         // arithmetic model rather than silently upgrading to FP64.
-        output_values[static_cast<size_t>(row)] = dot_product_tiled(matrix_row, vector_values, cols, tile_size);
+        output_values[static_cast<size_t>(row - output_row_offset)] = dot_product_tiled(
+            matrix_row,
+            vector_values,
+            cols,
+            tile_size
+        );
     }
 }
 
@@ -181,31 +219,34 @@ int run_once(
     const std::vector<float>& matrix_values,
     const std::vector<float>& vector_values,
     std::vector<float>& output_values,
-    int rows,
     int cols,
+    int row_start,
+    int row_end,
     int requested_workers,
     int tile_size
 ) {
-    const int actual_workers = std::max(1, std::min({requested_workers, rows}));
+    const int task_rows = row_end - row_start;
+    const int actual_workers = std::max(1, std::min({requested_workers, task_rows}));
     if (actual_workers == 1) {
-        compute_row_range(matrix_values, vector_values, output_values, cols, 0, rows, tile_size);
+        compute_row_range(matrix_values, vector_values, output_values, cols, row_start, row_end, tile_size, row_start);
         return actual_workers;
     }
 
     std::vector<std::thread> workers;
     workers.reserve(static_cast<size_t>(actual_workers));
     for (int worker_index = 0; worker_index < actual_workers; ++worker_index) {
-        const int row_start = (rows * worker_index) / actual_workers;
-        const int row_end = (rows * (worker_index + 1)) / actual_workers;
+        const int partition_start = row_start + (task_rows * worker_index) / actual_workers;
+        const int partition_end = row_start + (task_rows * (worker_index + 1)) / actual_workers;
         workers.emplace_back(
             compute_row_range,
             std::cref(matrix_values),
             std::cref(vector_values),
             std::ref(output_values),
             cols,
-            row_start,
-            row_end,
-            tile_size
+            partition_start,
+            partition_end,
+            tile_size,
+            row_start
         );
     }
 
@@ -221,18 +262,21 @@ PhaseMetrics measure_config(
     const std::vector<float>& matrix_values,
     const std::vector<float>& vector_values,
     std::vector<float>& output_values,
-    int rows,
     int cols,
+    int row_start,
+    int row_end,
     int requested_workers,
     int tile_size,
     int repeats
 ) {
+    const int task_rows = row_end - row_start;
     const int warmup_workers = run_once(
         matrix_values,
         vector_values,
         output_values,
-        rows,
         cols,
+        row_start,
+        row_end,
         requested_workers,
         tile_size
     );
@@ -244,8 +288,9 @@ PhaseMetrics measure_config(
             matrix_values,
             vector_values,
             output_values,
-            rows,
             cols,
+            row_start,
+            row_end,
             requested_workers,
             tile_size
         );
@@ -255,7 +300,7 @@ PhaseMetrics measure_config(
     const double total_seconds = std::chrono::duration<double>(finished - started).count();
     const double latency_seconds = total_seconds / static_cast<double>(repeats);
     const double effective_gflops =
-        (2.0 * static_cast<double>(rows) * static_cast<double>(cols))
+        (2.0 * static_cast<double>(task_rows) * static_cast<double>(cols))
         / std::max(latency_seconds, 1e-12) / 1.0e9;
 
     PhaseMetrics metrics;
@@ -311,11 +356,48 @@ int main(int argc, char** argv) {
             throw std::runtime_error("vector size does not match cols");
         }
 
+        const int task_rows = options.row_end - options.row_start;
+        std::vector<float> output_values(static_cast<size_t>(task_rows), 0.0f);
+
+        if (options.task_mode) {
+            const PhaseMetrics metrics = measure_config(
+                matrix_values,
+                vector_values,
+                output_values,
+                options.cols,
+                options.row_start,
+                options.row_end,
+                options.fixed_workers,
+                options.fixed_tile_size,
+                options.measurement_repeats
+            );
+
+            if (!options.output_path.empty()) {
+                write_float32_file(options.output_path, output_values);
+            }
+
+            std::cout << "{"
+                      << "\"backend\":\"cpu\","
+                      << "\"mode\":\"task\","
+                      << "\"requested_workers\":" << options.fixed_workers << ","
+                      << "\"actual_workers\":" << metrics.actual_workers << ","
+                      << "\"tile_size\":" << options.fixed_tile_size << ","
+                      << "\"row_start\":" << options.row_start << ","
+                      << "\"row_end\":" << options.row_end << ","
+                      << "\"measurement_repeats\":" << metrics.repeats << ","
+                      << "\"wall_clock_latency_seconds\":" << std::fixed << std::setprecision(9)
+                      << metrics.wall_clock_latency_seconds << ","
+                      << "\"effective_gflops\":" << std::fixed << std::setprecision(9)
+                      << metrics.effective_gflops << ","
+                      << "\"checksum\":\"" << metrics.checksum << "\""
+                      << "}" << std::endl;
+            return 0;
+        }
+
         // The executable loads A and x exactly once, then benchmarks multiple
         // configurations in memory. This keeps the benchmark focused on compute
         // throughput instead of repeated disk I/O.
-        std::vector<float> output_values(static_cast<size_t>(options.rows), 0.0f);
-        std::vector<float> best_output_values(static_cast<size_t>(options.rows), 0.0f);
+        std::vector<float> best_output_values(static_cast<size_t>(task_rows), 0.0f);
         TrialMetrics best_metrics;
         bool have_best_trial = false;
         int trials_run = 0;
@@ -328,14 +410,18 @@ int main(int argc, char** argv) {
                     matrix_values,
                     vector_values,
                     output_values,
-                    options.rows,
                     options.cols,
+                    options.row_start,
+                    options.row_end,
                     requested_workers,
                     tile_size,
                     options.autotune_repeats
                 );
 
-                if (!have_best_trial || autotune_metrics.wall_clock_latency_seconds < best_metrics.autotune.wall_clock_latency_seconds) {
+                if (
+                    !have_best_trial ||
+                    autotune_metrics.wall_clock_latency_seconds < best_metrics.autotune.wall_clock_latency_seconds
+                ) {
                     have_best_trial = true;
                     best_metrics.requested_workers = requested_workers;
                     best_metrics.tile_size = tile_size;
@@ -349,8 +435,9 @@ int main(int argc, char** argv) {
             matrix_values,
             vector_values,
             output_values,
-            options.rows,
             options.cols,
+            options.row_start,
+            options.row_end,
             best_metrics.requested_workers,
             best_metrics.tile_size,
             options.measurement_repeats

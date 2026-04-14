@@ -1,4 +1,4 @@
-"""Registry of connected workers and clients."""
+﻿"""Registry of connected workers and clients."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ import time
 from dataclasses import dataclass, field
 
 from common.types import ComputePerformanceSummary, HardwareProfile
-from constants import RUNTIME_ROLE_CLIENT, RUNTIME_ROLE_WORKER
-from trace_utils import trace_function
+from app.constants import RUNTIME_ROLE_CLIENT, RUNTIME_ROLE_WORKER
+from app.trace_utils import trace_function
 
 
 @dataclass(slots=True)
@@ -28,6 +28,7 @@ class RuntimePeerConnection:
     registered_at: float = field(default_factory=time.time)
     last_heartbeat_at: float = 0.0
     last_request_at: float = 0.0
+    io_lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
 
 @dataclass(slots=True)
@@ -217,5 +218,11 @@ class ClusterRegistry:
         with self._lock:
             return self._total_effective_gflops
 
+    @trace_function
+    def get_worker(self, peer_id: str) -> RuntimePeerConnection | None:
+        with self._lock:
+            return self._workers.get(peer_id)
+
 ComputeNodeRegistry = ClusterRegistry
 WorkerRegistry = ClusterRegistry
+

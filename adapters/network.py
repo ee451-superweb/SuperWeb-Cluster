@@ -1,4 +1,4 @@
-"""Network helpers used by multicast discovery."""
+﻿"""Network helpers used by multicast discovery."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import socket
 import struct
 import uuid
 
-from trace_utils import trace_function
+from app.trace_utils import trace_function
 
 
 @trace_function
@@ -132,3 +132,4 @@ def get_local_mac_address() -> str:
     node = uuid.getnode()
     octets = [(node >> shift) & 0xFF for shift in range(40, -1, -8)]
     return ":".join(f"{octet:02x}" for octet in octets)
+

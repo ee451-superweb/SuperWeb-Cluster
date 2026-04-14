@@ -1,0 +1,173 @@
+superweb-cluster/
+├── README.md
+│   - Project overview, runtime model, and top-level entrypoint
+├── requirements.txt
+│   - Python dependencies
+├── bootstrap.py
+│   - Main human-facing entrypoint
+│   - Starts the runtime after checking the local environment is ready
+│   - Relaunches itself with the project `.venv` interpreter when needed
+├── setup.py
+│   - Environment-preparation entrypoint
+│   - Creates `.venv` locally and installs dependencies when needed
+│
+├── app/
+│   ├── __init__.py
+│   ├── config.py
+│   ├── constants.py
+│   ├── logging_setup.py
+│   ├── recovery.py
+│   ├── supervisor.py
+│   └── trace_utils.py
+│   - Application-level support modules
+│   - Runtime config, constants, logging, supervision, recovery, and tracing
+│
+├── adapters/
+│   ├── __init__.py
+│   ├── audit_log.py
+│   ├── network.py
+│   ├── platform.py
+│   ├── process.py
+│   └── firewall/
+│       ├── __init__.py
+│       ├── windows.py
+│       ├── linux.py
+│       └── macos.py
+│   - Host and OS integration helpers
+│
+├── common/
+│   ├── __init__.py
+│   ├── errors.py
+│   ├── float32_codec.py
+│   ├── hardware.py
+│   ├── messages.py
+│   ├── state.py
+│   ├── types.py
+│   └── work_partition.py
+│   - Shared types and reusable low-level helpers
+│
+├── discovery/
+│   ├── __init__.py
+│   ├── fallback.py
+│   ├── multicast.py
+│   └── pairing.py
+│   - mDNS discovery and pairing helpers
+│
+├── wire/
+│   ├── __init__.py
+│   ├── discovery.py
+│   ├── runtime.py
+│   └── proto/
+│       └── superweb_cluster_runtime.proto
+│   - Discovery and runtime wire-format helpers plus protobuf schema sources
+│
+├── main_node/
+│   ├── __init__.py
+│   ├── aggregator.py
+│   ├── dispatcher.py
+│   ├── handlers.py
+│   ├── heartbeat.py
+│   ├── registry.py
+│   └── runtime.py
+│   - Main-node scheduling and cluster-state package
+│
+├── compute_node/
+│   ├── __init__.py
+│   ├── executor.py
+│   ├── handlers.py
+│   ├── heartbeat.py
+│   ├── performance_summary.py
+│   ├── runtime.py
+│   ├── session.py
+│   ├── task_executor.py
+│   │   - Worker-side runtime execution using the locally benchmarked processors
+│   │
+│   ├── input_matrix/
+│   │   ├── __init__.py
+│   │   ├── README.md
+│   │   ├── generate.py
+│   │   ├── generator.py
+│   │   ├── spec.py
+│   │   ├── splitmix.py
+│   │   ├── storage.py
+│   │   └── generated/                    [local-only, git-ignored]
+│   │   - Shared deterministic matrix/vector dataset package
+│   │
+│   └── performance_metrics/
+│       ├── README.md
+│       ├── benchmark.py
+│       ├── dataset_runner.py
+│       ├── models.py
+│       ├── path_utils.py
+│       ├── reporting.py
+│       ├── scoring.py
+│       ├── workloads.py
+│       ├── result.json                   [local-only, git-ignored]
+│       │
+│       ├── backends/
+│       │   ├── __init__.py
+│       │   ├── cpu_backend.py
+│       │   ├── cuda_backend.py
+│       │   └── metal_backend.py
+│       │
+│       └── fixed_matrix_vector_multiplication/
+│           ├── cpu/
+│           │   ├── macos/
+│           │   │   ├── fmvm_cpu_macos.cpp
+│           │   │   └── build/            [local build dir]
+│           │   └── windows/
+│           │       ├── fmvm_cpu_windows.cpp
+│           │       └── build/            [local build dir; exe may be tracked]
+│           ├── cuda/
+│           │   ├── fmvm_cuda_runner.cu
+│           │   └── build/                [local build dir; exe may be tracked]
+│           └── metal/
+│               ├── fmvm_metal_kernels.metal
+│               ├── fmvm_metal_runner.mm
+│               └── build/                [local build dir]
+│       - Local benchmark workspace
+│
+├── experiments/
+│   └── networking/
+│       ├── README.md
+│       ├── mdns_minimal.py
+│       ├── receiver.py
+│       ├── sender.py
+│       ├── tcp_receiver.py
+│       ├── tcp_sender.py
+│       ├── tcp_speed.py
+│       ├── zmq_receiver.py
+│       └── zmq_sender.py
+│       - Standalone networking experiments outside the main runtime path
+│
+├── docs/
+│   ├── file_system_tree.txt
+│   └── implementation_plan.txt
+│   - Human-facing project structure and planning notes
+│
+├── tests/
+│   ├── __init__.py
+│   ├── test_bootstrap.py
+│   ├── test_compute_node_performance_summary.py
+│   ├── test_compute_node_runtime.py
+│   ├── test_firewall.py
+│   ├── test_main_node_registry.py
+│   ├── test_main_node_runtime.py
+│   ├── test_manual_fallback.py
+│   ├── test_multicast.py
+│   ├── test_network.py
+│   ├── test_performance_matrics.py
+│   ├── test_platform.py
+│   ├── test_protocol.py
+│   ├── test_runtime_protocol.py
+│   └── test_supervisor.py
+│   - Automated tests
+│
+└── .venv/                                [local-only, git-ignored]
+    - Project-local virtual environment
+
+Notes:
+- `bootstrap.py` intentionally remains at the repository root so the entrypoint is easy to find.
+- Most operational support modules moved into `app/` to keep the root smaller and clearer.
+- Standalone experiments live under `experiments/` so they no longer read like runtime code.
+- Generated datasets, benchmark reports, and most build intermediates remain local-only.

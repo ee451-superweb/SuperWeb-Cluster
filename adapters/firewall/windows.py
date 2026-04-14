@@ -1,12 +1,12 @@
-"""Windows firewall implementation for the UDP discovery rule."""
+﻿"""Windows firewall implementation for the UDP discovery rule."""
 
 from __future__ import annotations
 
 import subprocess
 
 from common.types import FirewallStatus
-from constants import WINDOWS_FIREWALL_RULE_NAME
-from trace_utils import trace_function
+from app.constants import WINDOWS_FIREWALL_RULE_NAME
+from app.trace_utils import trace_function
 
 
 def _inbound_rule_name() -> str:
@@ -133,3 +133,4 @@ def cleanup_rules(discovery_port: int, is_admin_user: bool) -> FirewallStatus:
         backend="windows",
         message=output or "Windows firewall rule cleanup completed.",
     )
+

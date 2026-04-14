@@ -1,4 +1,4 @@
-"""Low-level UDP multicast helpers."""
+﻿"""Low-level UDP multicast helpers."""
 
 from __future__ import annotations
 
@@ -9,15 +9,15 @@ from dataclasses import dataclass
 
 from adapters import network
 from common.types import DiscoveryResult
-from config import AppConfig
-from protocol import (
+from app.config import AppConfig
+from wire.discovery import (
     describe_discovery_message,
     build_announce_message,
     build_discover_message,
     parse_announce_message,
     parse_discover_message,
 )
-from trace_utils import trace_function
+from app.trace_utils import trace_function
 
 
 @dataclass(slots=True)
@@ -115,12 +115,12 @@ def recv_announce(endpoint: MulticastSocket, config: AppConfig) -> DiscoveryResu
         endpoint.sock.settimeout(original_timeout)
 
 
-@trace_function
 def recv_packet(endpoint: MulticastSocket, buffer_size: int) -> tuple[tuple[str, int], bytes] | None:
     """Receive one UDP packet."""
 
     try:
         data, addr = endpoint.sock.recvfrom(buffer_size)
+        print(f"UDP multicast: received {len(data)} bytes from {addr}")
     except socket.timeout:
         return None
 
@@ -182,3 +182,5 @@ def close(endpoint: MulticastSocket | None) -> None:
     if endpoint is None:
         return
     endpoint.close()
+
+

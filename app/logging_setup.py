@@ -1,9 +1,9 @@
-"""Logging configuration helpers."""
+﻿"""Logging configuration helpers."""
 
 import logging
 
-from constants import LOGGER_NAME
-from trace_utils import trace_function
+from app.constants import LOGGER_NAME
+from app.trace_utils import trace_function
 
 
 @trace_function
@@ -16,3 +16,4 @@ def configure_logging(verbose: bool = False) -> logging.Logger:
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
     )
     return logging.getLogger(LOGGER_NAME)
+

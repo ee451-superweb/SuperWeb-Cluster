@@ -1,3 +1,13 @@
+Sprint 1 历史实施计划（归档）:
+
+说明:
+
+- 这份文件保留的是项目最早期开工阶段的边界说明，作为历史记录。
+- 当前仓库结构已经整理过，像 `supervisor.py / config.py / constants.py / logging_setup.py`
+  这类应用级文件现在位于 `app/`。
+- 原来根目录里的 `protocol.py / runtime_protocol.py / proto/` 现在位于 `wire/`。
+- `standalone_model/` 也已经迁移到了 `experiments/networking/`。
+
 开工版真实要做的功能范围（必须实现）:
 
 1. OS 识别

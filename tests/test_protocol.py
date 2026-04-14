@@ -1,14 +1,14 @@
-"""Protocol format tests."""
+﻿"""Protocol format tests."""
 
 import unittest
 
-from constants import (
+from app.constants import (
     COMPUTE_NODE_NAME,
     DEFAULT_TCP_PORT,
     MAIN_NODE_NAME,
     MDNS_SERVICE_TYPE,
 )
-from protocol import (
+from wire.discovery import (
     describe_discovery_message,
     build_announce_message,
     build_discover_message,
@@ -47,3 +47,5 @@ class ProtocolTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
