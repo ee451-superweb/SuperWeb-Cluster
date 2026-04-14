@@ -1,4 +1,4 @@
-"""Hardware discovery helpers for compute-node registration."""
+﻿"""Hardware discovery helpers for compute-node registration."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import socket
 
 from adapters import network
 from common.types import HardwareProfile
-from trace_utils import trace_function
+from app.trace_utils import trace_function
 
 
 def _detect_total_memory_bytes() -> int:
@@ -52,3 +52,4 @@ def collect_hardware_profile(remote_host: str = "", remote_port: int = 0) -> Har
         logical_cpu_count=os.cpu_count() or 0,
         memory_bytes=_detect_total_memory_bytes(),
     )
+

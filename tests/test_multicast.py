@@ -1,11 +1,11 @@
-"""Minimal multicast helper tests."""
+﻿"""Minimal multicast helper tests."""
 
 import unittest
 from unittest import mock
 
 from adapters import network
-from config import AppConfig
-from constants import (
+from app.config import AppConfig
+from app.constants import (
     COMPUTE_NODE_NAME,
     DEFAULT_BUFFER_SIZE,
     DEFAULT_DISCOVERY_PORT,
@@ -21,7 +21,7 @@ from discovery.multicast import (
     recv_packet,
     send_discover,
 )
-from protocol import build_discover_message
+from wire.discovery import build_discover_message
 
 
 class MulticastTests(unittest.TestCase):
@@ -178,3 +178,5 @@ class MulticastTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+

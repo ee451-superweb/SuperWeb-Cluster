@@ -1,19 +1,19 @@
-# standalone_model
+# Networking Experiments
 
 `superweb-cluster` 的总入口仍然是项目根目录下的 `bootstrap.py`。  
 这个目录不是主运行时入口，而是 Sprint 1 阶段保留下来的独立网络实验区。
 
-目前项目已经完成 Sprint 1，准备进入 Sprint 2。`standalone_model/` 继续承担：
+目前项目已经完成 Sprint 1，准备进入 Sprint 2。`experiments/networking/` 继续承担：
 
 1. mDNS 收发端，用来验证局域网或校园 Wi-Fi 上的 `224.0.0.251:5353` 是否能通。
 2. TCP 吞吐测试端，用来粗测两台机器之间应用层 TCP 发送/接收速度。
 
 如果你要看当前计算基准相关的目录，请分别看：
 
-- `../compute_node/input_matrix/README.md`
-- `../compute_node/performance_metrics/README.md`
+- `../../compute_node/input_matrix/README.md`
+- `../../compute_node/performance_metrics/README.md`
 
-`standalone_model/` 只保留网络连通性和吞吐实验，不负责共享数据集生成或计算性能评分。
+`experiments/networking/` 只保留网络连通性和吞吐实验，不负责共享数据集生成或计算性能评分。
 
 ## 文件
 
@@ -33,20 +33,20 @@
 在接收端机器上：
 
 ```bash
-python3 standalone_model/receiver.py --name dorm-node --port 52020 --once
+python3 experiments/networking/receiver.py --name dorm-node --port 52020 --once
 ```
 
 在发送端机器上：
 
 ```bash
-python3 standalone_model/sender.py
+python3 experiments/networking/sender.py
 ```
 
 如果你想显式指定 Wi-Fi 的本地 IPv4：
 
 ```bash
-python3 standalone_model/receiver.py --interface-ip 10.23.44.193 --host-ip 10.23.44.193 --once
-python3 standalone_model/sender.py --interface-ip 10.23.135.240
+python3 experiments/networking/receiver.py --interface-ip 10.23.44.193 --host-ip 10.23.44.193 --once
+python3 experiments/networking/sender.py --interface-ip 10.23.135.240
 ```
 
 ### mDNS 结果判断
@@ -60,25 +60,25 @@ python3 standalone_model/sender.py --interface-ip 10.23.135.240
 在接收端机器上先启动：
 
 ```bash
-python3 standalone_model/tcp_receiver.py --bind 0.0.0.0 --port 52021 --once
+python3 experiments/networking/tcp_receiver.py --bind 0.0.0.0 --port 52021 --once
 ```
 
 在发送端机器上连接它：
 
 ```bash
-python3 standalone_model/tcp_sender.py 192.168.1.23 --port 52021 --duration 10
+python3 experiments/networking/tcp_sender.py 192.168.1.23 --port 52021 --duration 10
 ```
 
 如果你想模拟 `iperf3 -P 4` 这种多流并发，可以这样：
 
 ```bash
-python3 standalone_model/tcp_sender.py 192.168.1.23 --port 52021 --duration 15 --streams 4 --chunk-size 1MiB --send-buffer 4MiB
+python3 experiments/networking/tcp_sender.py 192.168.1.23 --port 52021 --duration 15 --streams 4 --chunk-size 1MiB --send-buffer 4MiB
 ```
 
 如果你想固定测试总数据量，也可以这样：
 
 ```bash
-python3 standalone_model/tcp_sender.py 192.168.1.23 --port 52021 --bytes 1GiB
+python3 experiments/networking/tcp_sender.py 192.168.1.23 --port 52021 --bytes 1GiB
 ```
 
 一些常用参数：
@@ -111,13 +111,13 @@ python -m venv .venv
 在接收端机器上先启动：
 
 ```powershell
-.\.venv\Scripts\python standalone_model\zmq_receiver.py --bind 0.0.0.0 --port 52041 --rcvbuf 4MiB
+.\.venv\Scripts\python experiments\networking\zmq_receiver.py --bind 0.0.0.0 --port 52041 --rcvbuf 4MiB
 ```
 
 在发送端机器上连接它：
 
 ```powershell
-.\.venv\Scripts\python standalone_model\zmq_sender.py 192.168.1.23 --port 52041 --duration 15 --chunk-size 1MiB --sndbuf 4MiB
+.\.venv\Scripts\python experiments\networking\zmq_sender.py 192.168.1.23 --port 52041 --duration 15 --chunk-size 1MiB --sndbuf 4MiB
 ```
 
 说明：

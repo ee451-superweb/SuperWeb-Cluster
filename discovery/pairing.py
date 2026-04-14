@@ -1,11 +1,11 @@
-"""Sprint 1 discovery flow."""
+﻿"""Sprint 1 discovery flow."""
 
 from __future__ import annotations
 
 from common.types import DiscoveryResult
-from config import AppConfig
+from app.config import AppConfig
 from discovery import multicast
-from trace_utils import trace_function
+from app.trace_utils import trace_function
 
 
 @trace_function
@@ -67,3 +67,4 @@ def run_pairing(config: AppConfig) -> DiscoveryResult:
     if config.role == "announce":
         return announce_peer(config)
     return discover_peer(config)
+

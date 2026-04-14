@@ -1,17 +1,16 @@
-"""Top-level bootstrap entry point for superweb-cluster."""
+﻿"""Top-level bootstrap entry point for superweb-cluster."""
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import subprocess
 import sys
 from pathlib import Path
 
 from adapters.firewall import ensure_rules
 from adapters.platform import detect_os, relaunch_as_admin
-from config import AppConfig
-from constants import (
+from app.config import AppConfig
+from app.constants import (
     APP_NAME,
     COMPUTE_NODE_NAME,
     DEFAULT_NODE_NAME,
@@ -23,49 +22,76 @@ from constants import (
     DEFAULT_TCP_PORT,
     MAIN_NODE_NAME,
 )
-from logging_setup import configure_logging
-from supervisor import Supervisor
-from trace_utils import trace_function
+from app.logging_setup import configure_logging
+from app.supervisor import Supervisor
+from app.trace_utils import trace_function
+from setup import REQUIREMENTS_STAMP_PATH, active_python_path, inspect_project_environment, project_python_path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-VENV_DIR = PROJECT_ROOT / ".venv"
-REQUIREMENTS_PATH = PROJECT_ROOT / "requirements.txt"
-REQUIREMENTS_STAMP_PATH = VENV_DIR / ".requirements.sha256"
 COMPUTE_NODE_DIR = PROJECT_ROOT / "compute_node"
 BENCHMARK_DIR = COMPUTE_NODE_DIR / "performance_metrics"
 BENCHMARK_SCRIPT_PATH = BENCHMARK_DIR / "benchmark.py"
 BENCHMARK_RESULT_PATH = BENCHMARK_DIR / "result.json"
 
 
-def _project_python_path() -> Path:
-    """Return the Python executable inside the project's virtual environment."""
-
-    if sys.platform == "win32":
-        return VENV_DIR / "Scripts" / "python.exe"
-    return VENV_DIR / "bin" / "python"
-
-
-def _active_python_path() -> Path:
-    """Prefer the project venv interpreter when it already exists."""
-
-    project_python = _project_python_path()
-    if project_python.exists():
-        return project_python
-    return Path(sys.executable)
-
-
 def _benchmark_command() -> list[str]:
     """Build the local benchmark command using the current Python executable."""
 
-    return [str(_active_python_path()), str(BENCHMARK_SCRIPT_PATH)]
+    return [str(active_python_path()), str(BENCHMARK_SCRIPT_PATH)]
 
 
-def _requirements_hash() -> str:
-    """Fingerprint `requirements.txt` so installs only rerun when it changes."""
+def _setup_command() -> list[str]:
+    """Build the explicit setup command users should run when the venv is not ready."""
 
-    if not REQUIREMENTS_PATH.exists():
-        return ""
-    return hashlib.sha256(REQUIREMENTS_PATH.read_bytes()).hexdigest()
+    return [sys.executable, str(PROJECT_ROOT / "setup.py")]
+
+
+def _display_project_path(path: Path) -> str:
+    """Render a project-local path for bootstrap log messages."""
+
+    return path.relative_to(PROJECT_ROOT).as_posix()
+
+
+@trace_function
+def ensure_bootstrap_runtime_environment(logger, argv: list[str]) -> int | None:
+    """Ensure bootstrap runs with the prepared project venv.
+
+    Returns:
+        `None` when bootstrap can continue locally.
+        An exit code when bootstrap should stop or after it relaunches itself.
+    """
+
+    status = inspect_project_environment()
+    if not status.ready:
+        setup_command = " ".join(_setup_command())
+        logger.error(
+            "Project Python environment is not ready. Run `%s` first, then retry bootstrap.",
+            setup_command,
+        )
+        if not status.venv_exists:
+            logger.error("Missing local virtual environment at %s.", _display_project_path(project_python_path()))
+        if not status.requirements_current:
+            logger.error("Project dependencies are missing or out of date for %s.", _display_project_path(REQUIREMENTS_STAMP_PATH))
+        return 1
+
+    if status.using_project_python:
+        return None
+
+    relaunch_command = [str(project_python_path()), str(PROJECT_ROOT / "bootstrap.py"), *argv]
+    logger.info(
+        "Relaunching bootstrap with the project virtual environment: %s",
+        " ".join(relaunch_command),
+    )
+    try:
+        result = subprocess.run(
+            relaunch_command,
+            check=False,
+            cwd=PROJECT_ROOT,
+        )
+    except OSError as exc:
+        logger.error("Failed to relaunch bootstrap with the project virtual environment: %s", exc)
+        return 1
+    return int(result.returncode)
 
 
 @trace_function
@@ -127,49 +153,6 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         discovery_retry_delay=args.retry_delay,
         enable_manual_fallback=args.manual_fallback,
     )
-
-
-def _display_project_path(path: Path) -> str:
-    """Render a project-local path for user-facing log messages."""
-
-    return path.relative_to(PROJECT_ROOT).as_posix()
-
-
-@trace_function
-def ensure_project_python_environment(logger) -> bool:
-    """Create `.venv` and install `requirements.txt` when needed."""
-
-    try:
-        project_python = _project_python_path()
-        if not project_python.exists():
-            logger.info("Creating project virtual environment at %s.", _display_project_path(VENV_DIR))
-            subprocess.run(
-                [sys.executable, "-m", "venv", str(VENV_DIR)],
-                check=True,
-                cwd=PROJECT_ROOT,
-            )
-
-        requirements_hash = _requirements_hash()
-        installed_hash = REQUIREMENTS_STAMP_PATH.read_text(encoding="utf-8").strip() if REQUIREMENTS_STAMP_PATH.exists() else ""
-        if requirements_hash and requirements_hash != installed_hash:
-            logger.info(
-                "Installing project requirements from %s using %s.",
-                _display_project_path(REQUIREMENTS_PATH),
-                _display_project_path(project_python),
-            )
-            subprocess.run(
-                [str(project_python), "-m", "pip", "install", "-r", str(REQUIREMENTS_PATH)],
-                check=True,
-                cwd=PROJECT_ROOT,
-            )
-            REQUIREMENTS_STAMP_PATH.parent.mkdir(parents=True, exist_ok=True)
-            REQUIREMENTS_STAMP_PATH.write_text(requirements_hash, encoding="utf-8")
-        return True
-    except (OSError, subprocess.CalledProcessError) as exc:
-        logger.error("Failed to prepare project virtual environment: %s", exc)
-        return False
-
-
 @trace_function
 def ensure_compute_node_benchmark_ready(logger) -> bool:
     """Make sure a local compute benchmark result exists before bootstrap continues."""
@@ -216,9 +199,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     logger = configure_logging(verbose=args.verbose)
-
-    if not ensure_project_python_environment(logger):
-        return 1
+    effective_argv = list(argv) if argv is not None else sys.argv[1:]
+    relaunch_result = ensure_bootstrap_runtime_environment(logger, effective_argv)
+    if relaunch_result is not None:
+        return relaunch_result
 
     if not ensure_compute_node_benchmark_ready(logger):
         return 1
@@ -275,3 +259,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+

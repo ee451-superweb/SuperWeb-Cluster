@@ -1,4 +1,4 @@
-"""Compute-node TCP runtime."""
+﻿"""Compute-node TCP runtime."""
 
 from __future__ import annotations
 
@@ -8,13 +8,30 @@ from collections.abc import Callable
 
 from common.hardware import collect_hardware_profile
 from common.types import DiscoveryResult
-from compute_node.performance_summary import load_compute_performance_summary
+from compute_node.performance_summary import load_runtime_processor_inventory
 from compute_node.heartbeat import WorkerHeartbeat
 from compute_node.session import WorkerSession
-from config import AppConfig
-from constants import RUNTIME_MSG_HEARTBEAT, RUNTIME_MSG_HEARTBEAT_OK
-from runtime_protocol import MessageKind, build_heartbeat_ok, describe_message_kind
-from trace_utils import trace_function
+from compute_node.task_executor import FixedMatrixVectorTaskExecutor
+from app.config import AppConfig
+from app.constants import (
+    RUNTIME_MSG_HEARTBEAT,
+    RUNTIME_MSG_HEARTBEAT_OK,
+    RUNTIME_MSG_TASK_ACCEPT,
+    RUNTIME_MSG_TASK_ASSIGN,
+    RUNTIME_MSG_TASK_FAIL,
+    RUNTIME_MSG_TASK_RESULT,
+    STATUS_ACCEPTED,
+    STATUS_INTERNAL_ERROR,
+)
+from wire.runtime import (
+    MessageKind,
+    build_heartbeat_ok,
+    build_task_accept,
+    build_task_fail,
+    build_task_result,
+    describe_message_kind,
+)
+from app.trace_utils import trace_function
 
 
 class ComputeNodeRuntime:
@@ -29,6 +46,7 @@ class ComputeNodeRuntime:
         logger: logging.Logger,
         should_stop: Callable[[], bool] | None = None,
         session_factory: Callable[..., WorkerSession] | None = None,
+        task_executor_factory: Callable[..., FixedMatrixVectorTaskExecutor] | None = None,
     ) -> None:
         self.config = config
         self.main_node_host = main_node_host
@@ -37,6 +55,7 @@ class ComputeNodeRuntime:
         self.should_stop = should_stop or (lambda: False)
         self.heartbeat_state = WorkerHeartbeat()
         self._session_factory = session_factory or WorkerSession
+        self._task_executor_factory = task_executor_factory or FixedMatrixVectorTaskExecutor
 
     @trace_function
     def _build_session(self) -> WorkerSession:
@@ -53,7 +72,9 @@ class ComputeNodeRuntime:
         session = self._build_session()
         try:
             hardware = collect_hardware_profile(self.main_node_host, self.main_node_port)
-            performance = load_compute_performance_summary()
+            runtime_inventory = load_runtime_processor_inventory()
+            performance = runtime_inventory.to_summary()
+            task_executor = self._task_executor_factory(runtime_inventory)
             session.connect()
             register_ok = session.register(self.config.node_name, hardware, performance)
 
@@ -109,6 +130,58 @@ class ComputeNodeRuntime:
                     )
                     continue
 
+                if message.kind == MessageKind.TASK_ASSIGN and message.task_assign is not None:
+                    task = message.task_assign
+                    session.send(
+                        build_task_accept(
+                            request_id=task.request_id,
+                            node_id=self.config.node_name,
+                            task_id=task.task_id,
+                            status_code=STATUS_ACCEPTED,
+                        )
+                    )
+                    print(
+                        f"{RUNTIME_MSG_TASK_ACCEPT} from {self.config.node_name} "
+                        f"task_id={task.task_id} rows={task.row_start}:{task.row_end}",
+                        flush=True,
+                    )
+                    try:
+                        task_result = task_executor.execute_task(task)
+                    except (OSError, RuntimeError, ValueError) as exc:
+                        session.send(
+                            build_task_fail(
+                                request_id=task.request_id,
+                                node_id=self.config.node_name,
+                                task_id=task.task_id,
+                                status_code=STATUS_INTERNAL_ERROR,
+                                error_message=str(exc),
+                            )
+                        )
+                        print(
+                            f"{RUNTIME_MSG_TASK_FAIL} from {self.config.node_name} "
+                            f"task_id={task.task_id} error={exc}",
+                            flush=True,
+                        )
+                        continue
+
+                    session.send(
+                        build_task_result(
+                            request_id=task_result.request_id,
+                            node_id=self.config.node_name,
+                            task_id=task_result.task_id,
+                            status_code=task_result.status_code,
+                            row_start=task_result.row_start,
+                            row_end=task_result.row_end,
+                            output_vector=task_result.output_vector,
+                        )
+                    )
+                    print(
+                        f"{RUNTIME_MSG_TASK_RESULT} from {self.config.node_name} "
+                        f"task_id={task.task_id} rows={task_result.row_start}:{task_result.row_end}",
+                        flush=True,
+                    )
+                    continue
+
                 self.logger.warning("Ignoring unexpected runtime message kind=%s", describe_message_kind(message.kind))
 
             return DiscoveryResult(
@@ -128,3 +201,5 @@ class ComputeNodeRuntime:
             )
         finally:
             session.close()
+
+

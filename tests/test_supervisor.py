@@ -1,11 +1,11 @@
-"""Supervisor lifecycle tests."""
+﻿"""Supervisor lifecycle tests."""
 
 import unittest
 from unittest import mock
 
 from common.types import DiscoveryResult, FirewallStatus, PlatformInfo
-from config import AppConfig
-from supervisor import Supervisor
+from app.config import AppConfig
+from app.supervisor import Supervisor
 
 
 class SupervisorTests(unittest.TestCase):
@@ -33,9 +33,9 @@ class SupervisorTests(unittest.TestCase):
             logger=mock.Mock(),
         )
 
-    @mock.patch("supervisor.Supervisor.register_signal_handlers")
-    @mock.patch("supervisor.Supervisor._join_main_node")
-    @mock.patch("supervisor.Supervisor._discover_with_retries")
+    @mock.patch("app.supervisor.Supervisor.register_signal_handlers")
+    @mock.patch("app.supervisor.Supervisor._join_main_node")
+    @mock.patch("app.supervisor.Supervisor._discover_with_retries")
     def test_discover_success_enters_compute_runtime(
         self,
         discover_with_retries_mock: mock.Mock,
@@ -58,8 +58,8 @@ class SupervisorTests(unittest.TestCase):
         self.assertTrue(result.success)
         join_main_node_mock.assert_called_once()
 
-    @mock.patch("supervisor.Supervisor.register_signal_handlers")
-    @mock.patch("supervisor.Supervisor._promote_to_main_node")
+    @mock.patch("app.supervisor.Supervisor.register_signal_handlers")
+    @mock.patch("app.supervisor.Supervisor._promote_to_main_node")
     def test_announce_role_enters_main_node_runtime(
         self,
         promote_to_main_node_mock: mock.Mock,
@@ -77,3 +77,4 @@ class SupervisorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

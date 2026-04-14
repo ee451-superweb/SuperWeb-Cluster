@@ -1,9 +1,9 @@
-"""Firewall adapter entry points."""
+﻿"""Firewall adapter entry points."""
 
 from __future__ import annotations
 
 from common.types import FirewallStatus, PlatformInfo
-from trace_utils import trace_function
+from app.trace_utils import trace_function
 
 
 @trace_function
@@ -62,3 +62,4 @@ def cleanup_rules(platform_info: PlatformInfo, discovery_port: int) -> FirewallS
         backend="none",
         message="Firewall cleanup unavailable for this platform.",
     )
+

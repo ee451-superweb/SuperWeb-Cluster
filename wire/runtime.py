@@ -1,4 +1,4 @@
-"""Minimal protobuf wire-format helpers for the superweb-cluster TCP runtime."""
+﻿"""Minimal protobuf wire-format helpers for the superweb-cluster TCP runtime."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 
 from common.types import ComputeHardwarePerformance, ComputePerformanceSummary, HardwareProfile
-from constants import (
+from app.constants import (
     MAIN_NODE_NAME,
     RUNTIME_MSG_CLIENT_JOIN,
     RUNTIME_MSG_CLIENT_REQUEST,
@@ -18,9 +18,13 @@ from constants import (
     RUNTIME_MSG_HEARTBEAT_OK,
     RUNTIME_MSG_REGISTER_OK,
     RUNTIME_MSG_REGISTER_WORKER,
+    RUNTIME_MSG_TASK_ACCEPT,
+    RUNTIME_MSG_TASK_ASSIGN,
+    RUNTIME_MSG_TASK_FAIL,
+    RUNTIME_MSG_TASK_RESULT,
     SUPERWEB_CLIENT_NAME,
 )
-from trace_utils import trace_function
+from app.trace_utils import trace_function
 
 FRAME_HEADER = struct.Struct("!I")
 DOUBLE_LE = struct.Struct("<d")
@@ -40,6 +44,10 @@ class MessageKind(enum.IntEnum):
     CLIENT_JOIN = 5
     CLIENT_REQUEST = 6
     CLIENT_RESPONSE = 7
+    TASK_ASSIGN = 8
+    TASK_ACCEPT = 9
+    TASK_FAIL = 10
+    TASK_RESULT = 11
 
 
 @dataclass(slots=True)
@@ -88,10 +96,14 @@ class ClientJoin:
 class ClientRequest:
     """Client request sent to the main node."""
 
-    client_name: str
     request_id: str
-    command: str
-    payload: str
+    client_name: str
+    method: str
+    object_id: str
+    stream_id: str
+    timestamp_ms: int
+    vector_length: int
+    vector_data: bytes
 
 
 @dataclass(slots=True)
@@ -99,9 +111,14 @@ class ClientResponse:
     """Main-node response sent back to a client."""
 
     request_id: str
-    ok: bool
-    message: str
-    payload: str
+    method: str
+    object_id: str
+    stream_id: str
+    timestamp_ms: int
+    status_code: int
+    error_message: str
+    output_length: int
+    output_vector: bytes
     worker_count: int
     client_count: int
 
@@ -118,6 +135,65 @@ class RuntimeEnvelope:
     client_join: ClientJoin | None = None
     client_request: ClientRequest | None = None
     client_response: ClientResponse | None = None
+    task_assign: "TaskAssign" | None = None
+    task_accept: "TaskAccept" | None = None
+    task_fail: "TaskFail" | None = None
+    task_result: "TaskResult" | None = None
+
+
+@dataclass(slots=True)
+class TaskAssign:
+    """Main-node instruction telling one worker to compute a row slice."""
+
+    request_id: str
+    node_id: str
+    task_id: str
+    method: str
+    object_id: str
+    stream_id: str
+    timestamp_ms: int
+    row_start: int
+    row_end: int
+    vector_length: int
+    vector_data: bytes
+
+
+@dataclass(slots=True)
+class TaskAccept:
+    """Worker acknowledgement that one assigned task was accepted."""
+
+    request_id: str
+    node_id: str
+    task_id: str
+    timestamp_ms: int
+    status_code: int
+
+
+@dataclass(slots=True)
+class TaskFail:
+    """Worker error result for one assigned task."""
+
+    request_id: str
+    node_id: str
+    task_id: str
+    timestamp_ms: int
+    status_code: int
+    error_message: str
+
+
+@dataclass(slots=True)
+class TaskResult:
+    """Worker-computed output rows for one assigned task."""
+
+    request_id: str
+    node_id: str
+    task_id: str
+    timestamp_ms: int
+    status_code: int
+    row_start: int
+    row_end: int
+    output_length: int
+    output_vector: bytes
 
 
 def _encode_varint(value: int) -> bytes:
@@ -172,6 +248,10 @@ def _encode_double_field(field_number: int, value: float) -> bytes:
 def _encode_string_field(field_number: int, value: str) -> bytes:
     raw = value.encode("utf-8")
     return _encode_key(field_number, WIRE_LENGTH_DELIMITED) + _encode_varint(len(raw)) + raw
+
+
+def _encode_bytes_field(field_number: int, value: bytes) -> bytes:
+    return _encode_key(field_number, WIRE_LENGTH_DELIMITED) + _encode_varint(len(value)) + value
 
 
 def _encode_message_field(field_number: int, payload: bytes) -> bytes:
@@ -443,40 +523,70 @@ def _encode_client_join(payload: ClientJoin) -> bytes:
 
 
 def _parse_client_request(payload: bytes) -> ClientRequest:
-    client_name = ""
     request_id = ""
-    command = ""
-    request_payload = ""
+    client_name = ""
+    method = ""
+    object_id = ""
+    stream_id = ""
+    timestamp_ms = 0
+    vector_length = 0
+    vector_data = b""
 
     for field_number, wire_type, value in _parse_fields(payload):
         if field_number == 1:
-            client_name = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
-        elif field_number == 2:
             request_id = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
+        elif field_number == 2:
+            client_name = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
         elif field_number == 3:
-            command = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
+            method = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
         elif field_number == 4:
-            request_payload = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
+            object_id = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
+        elif field_number == 5:
+            stream_id = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
+        elif field_number == 6:
+            timestamp_ms = _require_varint(wire_type, value)
+        elif field_number == 7:
+            vector_length = _require_varint(wire_type, value)
+        elif field_number == 8:
+            vector_data = _require_bytes(wire_type, value)
 
-    return ClientRequest(client_name=client_name, request_id=request_id, command=command, payload=request_payload)
+    return ClientRequest(
+        request_id=request_id,
+        client_name=client_name,
+        method=method,
+        object_id=object_id,
+        stream_id=stream_id,
+        timestamp_ms=timestamp_ms,
+        vector_length=vector_length,
+        vector_data=vector_data,
+    )
 
 
 def _encode_client_request(payload: ClientRequest) -> bytes:
     return b"".join(
         [
-            _encode_string_field(1, payload.client_name),
-            _encode_string_field(2, payload.request_id),
-            _encode_string_field(3, payload.command),
-            _encode_string_field(4, payload.payload),
+            _encode_string_field(1, payload.request_id),
+            _encode_string_field(2, payload.client_name),
+            _encode_string_field(3, payload.method),
+            _encode_string_field(4, payload.object_id),
+            _encode_string_field(5, payload.stream_id),
+            _encode_uint_field(6, payload.timestamp_ms),
+            _encode_uint_field(7, payload.vector_length),
+            _encode_bytes_field(8, payload.vector_data),
         ]
     )
 
 
 def _parse_client_response(payload: bytes) -> ClientResponse:
     request_id = ""
-    ok = False
-    message = ""
-    response_payload = ""
+    method = ""
+    object_id = ""
+    stream_id = ""
+    timestamp_ms = 0
+    status_code = 0
+    error_message = ""
+    output_length = 0
+    output_vector = b""
     worker_count = 0
     client_count = 0
 
@@ -484,21 +594,36 @@ def _parse_client_response(payload: bytes) -> ClientResponse:
         if field_number == 1:
             request_id = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
         elif field_number == 2:
-            ok = _require_bool(wire_type, value)
+            method = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
         elif field_number == 3:
-            message = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
+            object_id = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
         elif field_number == 4:
-            response_payload = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
+            stream_id = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
         elif field_number == 5:
-            worker_count = _require_varint(wire_type, value)
+            timestamp_ms = _require_varint(wire_type, value)
         elif field_number == 6:
+            status_code = _require_varint(wire_type, value)
+        elif field_number == 7:
+            error_message = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
+        elif field_number == 8:
+            output_length = _require_varint(wire_type, value)
+        elif field_number == 9:
+            output_vector = _require_bytes(wire_type, value)
+        elif field_number == 10:
+            worker_count = _require_varint(wire_type, value)
+        elif field_number == 11:
             client_count = _require_varint(wire_type, value)
 
     return ClientResponse(
         request_id=request_id,
-        ok=ok,
-        message=message,
-        payload=response_payload,
+        method=method,
+        object_id=object_id,
+        stream_id=stream_id,
+        timestamp_ms=timestamp_ms,
+        status_code=status_code,
+        error_message=error_message,
+        output_length=output_length,
+        output_vector=output_vector,
         worker_count=worker_count,
         client_count=client_count,
     )
@@ -508,11 +633,231 @@ def _encode_client_response(payload: ClientResponse) -> bytes:
     return b"".join(
         [
             _encode_string_field(1, payload.request_id),
-            _encode_bool_field(2, payload.ok),
-            _encode_string_field(3, payload.message),
-            _encode_string_field(4, payload.payload),
-            _encode_uint_field(5, payload.worker_count),
-            _encode_uint_field(6, payload.client_count),
+            _encode_string_field(2, payload.method),
+            _encode_string_field(3, payload.object_id),
+            _encode_string_field(4, payload.stream_id),
+            _encode_uint_field(5, payload.timestamp_ms),
+            _encode_uint_field(6, payload.status_code),
+            _encode_string_field(7, payload.error_message),
+            _encode_uint_field(8, payload.output_length),
+            _encode_bytes_field(9, payload.output_vector),
+            _encode_uint_field(10, payload.worker_count),
+            _encode_uint_field(11, payload.client_count),
+        ]
+    )
+
+
+def _parse_task_assign(payload: bytes) -> TaskAssign:
+    request_id = ""
+    node_id = ""
+    task_id = ""
+    method = ""
+    object_id = ""
+    stream_id = ""
+    timestamp_ms = 0
+    row_start = 0
+    row_end = 0
+    vector_length = 0
+    vector_data = b""
+
+    for field_number, wire_type, value in _parse_fields(payload):
+        if field_number == 1:
+            request_id = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
+        elif field_number == 2:
+            node_id = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
+        elif field_number == 3:
+            task_id = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
+        elif field_number == 4:
+            method = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
+        elif field_number == 5:
+            object_id = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
+        elif field_number == 6:
+            stream_id = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
+        elif field_number == 7:
+            timestamp_ms = _require_varint(wire_type, value)
+        elif field_number == 8:
+            row_start = _require_varint(wire_type, value)
+        elif field_number == 9:
+            row_end = _require_varint(wire_type, value)
+        elif field_number == 10:
+            vector_length = _require_varint(wire_type, value)
+        elif field_number == 11:
+            vector_data = _require_bytes(wire_type, value)
+
+    return TaskAssign(
+        request_id=request_id,
+        node_id=node_id,
+        task_id=task_id,
+        method=method,
+        object_id=object_id,
+        stream_id=stream_id,
+        timestamp_ms=timestamp_ms,
+        row_start=row_start,
+        row_end=row_end,
+        vector_length=vector_length,
+        vector_data=vector_data,
+    )
+
+
+def _encode_task_assign(payload: TaskAssign) -> bytes:
+    return b"".join(
+        [
+            _encode_string_field(1, payload.request_id),
+            _encode_string_field(2, payload.node_id),
+            _encode_string_field(3, payload.task_id),
+            _encode_string_field(4, payload.method),
+            _encode_string_field(5, payload.object_id),
+            _encode_string_field(6, payload.stream_id),
+            _encode_uint_field(7, payload.timestamp_ms),
+            _encode_uint_field(8, payload.row_start),
+            _encode_uint_field(9, payload.row_end),
+            _encode_uint_field(10, payload.vector_length),
+            _encode_bytes_field(11, payload.vector_data),
+        ]
+    )
+
+
+def _parse_task_accept(payload: bytes) -> TaskAccept:
+    request_id = ""
+    node_id = ""
+    task_id = ""
+    timestamp_ms = 0
+    status_code = 0
+
+    for field_number, wire_type, value in _parse_fields(payload):
+        if field_number == 1:
+            request_id = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
+        elif field_number == 2:
+            node_id = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
+        elif field_number == 3:
+            task_id = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
+        elif field_number == 4:
+            timestamp_ms = _require_varint(wire_type, value)
+        elif field_number == 5:
+            status_code = _require_varint(wire_type, value)
+
+    return TaskAccept(
+        request_id=request_id,
+        node_id=node_id,
+        task_id=task_id,
+        timestamp_ms=timestamp_ms,
+        status_code=status_code,
+    )
+
+
+def _encode_task_accept(payload: TaskAccept) -> bytes:
+    return b"".join(
+        [
+            _encode_string_field(1, payload.request_id),
+            _encode_string_field(2, payload.node_id),
+            _encode_string_field(3, payload.task_id),
+            _encode_uint_field(4, payload.timestamp_ms),
+            _encode_uint_field(5, payload.status_code),
+        ]
+    )
+
+
+def _parse_task_fail(payload: bytes) -> TaskFail:
+    request_id = ""
+    node_id = ""
+    task_id = ""
+    timestamp_ms = 0
+    status_code = 0
+    error_message = ""
+
+    for field_number, wire_type, value in _parse_fields(payload):
+        if field_number == 1:
+            request_id = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
+        elif field_number == 2:
+            node_id = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
+        elif field_number == 3:
+            task_id = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
+        elif field_number == 4:
+            timestamp_ms = _require_varint(wire_type, value)
+        elif field_number == 5:
+            status_code = _require_varint(wire_type, value)
+        elif field_number == 6:
+            error_message = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
+
+    return TaskFail(
+        request_id=request_id,
+        node_id=node_id,
+        task_id=task_id,
+        timestamp_ms=timestamp_ms,
+        status_code=status_code,
+        error_message=error_message,
+    )
+
+
+def _encode_task_fail(payload: TaskFail) -> bytes:
+    return b"".join(
+        [
+            _encode_string_field(1, payload.request_id),
+            _encode_string_field(2, payload.node_id),
+            _encode_string_field(3, payload.task_id),
+            _encode_uint_field(4, payload.timestamp_ms),
+            _encode_uint_field(5, payload.status_code),
+            _encode_string_field(6, payload.error_message),
+        ]
+    )
+
+
+def _parse_task_result(payload: bytes) -> TaskResult:
+    request_id = ""
+    node_id = ""
+    task_id = ""
+    timestamp_ms = 0
+    status_code = 0
+    row_start = 0
+    row_end = 0
+    output_length = 0
+    output_vector = b""
+
+    for field_number, wire_type, value in _parse_fields(payload):
+        if field_number == 1:
+            request_id = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
+        elif field_number == 2:
+            node_id = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
+        elif field_number == 3:
+            task_id = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
+        elif field_number == 4:
+            timestamp_ms = _require_varint(wire_type, value)
+        elif field_number == 5:
+            status_code = _require_varint(wire_type, value)
+        elif field_number == 6:
+            row_start = _require_varint(wire_type, value)
+        elif field_number == 7:
+            row_end = _require_varint(wire_type, value)
+        elif field_number == 8:
+            output_length = _require_varint(wire_type, value)
+        elif field_number == 9:
+            output_vector = _require_bytes(wire_type, value)
+
+    return TaskResult(
+        request_id=request_id,
+        node_id=node_id,
+        task_id=task_id,
+        timestamp_ms=timestamp_ms,
+        status_code=status_code,
+        row_start=row_start,
+        row_end=row_end,
+        output_length=output_length,
+        output_vector=output_vector,
+    )
+
+
+def _encode_task_result(payload: TaskResult) -> bytes:
+    return b"".join(
+        [
+            _encode_string_field(1, payload.request_id),
+            _encode_string_field(2, payload.node_id),
+            _encode_string_field(3, payload.task_id),
+            _encode_uint_field(4, payload.timestamp_ms),
+            _encode_uint_field(5, payload.status_code),
+            _encode_uint_field(6, payload.row_start),
+            _encode_uint_field(7, payload.row_end),
+            _encode_uint_field(8, payload.output_length),
+            _encode_bytes_field(9, payload.output_vector),
         ]
     )
 
@@ -551,6 +896,22 @@ def encode_envelope(message: RuntimeEnvelope) -> bytes:
         if message.client_response is None:
             raise ValueError("CLIENT_RESPONSE envelope missing payload")
         parts.append(_encode_message_field(8, _encode_client_response(message.client_response)))
+    elif message.kind == MessageKind.TASK_ASSIGN:
+        if message.task_assign is None:
+            raise ValueError("TASK_ASSIGN envelope missing payload")
+        parts.append(_encode_message_field(9, _encode_task_assign(message.task_assign)))
+    elif message.kind == MessageKind.TASK_ACCEPT:
+        if message.task_accept is None:
+            raise ValueError("TASK_ACCEPT envelope missing payload")
+        parts.append(_encode_message_field(10, _encode_task_accept(message.task_accept)))
+    elif message.kind == MessageKind.TASK_FAIL:
+        if message.task_fail is None:
+            raise ValueError("TASK_FAIL envelope missing payload")
+        parts.append(_encode_message_field(11, _encode_task_fail(message.task_fail)))
+    elif message.kind == MessageKind.TASK_RESULT:
+        if message.task_result is None:
+            raise ValueError("TASK_RESULT envelope missing payload")
+        parts.append(_encode_message_field(12, _encode_task_result(message.task_result)))
 
     return b"".join(parts)
 
@@ -567,6 +928,10 @@ def parse_envelope(payload: bytes) -> RuntimeEnvelope:
     client_join = None
     client_request = None
     client_response = None
+    task_assign = None
+    task_accept = None
+    task_fail = None
+    task_result = None
 
     for field_number, wire_type, value in _parse_fields(payload):
         if field_number == 1:
@@ -585,6 +950,14 @@ def parse_envelope(payload: bytes) -> RuntimeEnvelope:
             client_request = _parse_client_request(_require_bytes(wire_type, value))
         elif field_number == 8:
             client_response = _parse_client_response(_require_bytes(wire_type, value))
+        elif field_number == 9:
+            task_assign = _parse_task_assign(_require_bytes(wire_type, value))
+        elif field_number == 10:
+            task_accept = _parse_task_accept(_require_bytes(wire_type, value))
+        elif field_number == 11:
+            task_fail = _parse_task_fail(_require_bytes(wire_type, value))
+        elif field_number == 12:
+            task_result = _parse_task_result(_require_bytes(wire_type, value))
 
     return RuntimeEnvelope(
         kind=kind,
@@ -595,6 +968,10 @@ def parse_envelope(payload: bytes) -> RuntimeEnvelope:
         client_join=client_join,
         client_request=client_request,
         client_response=client_response,
+        task_assign=task_assign,
+        task_accept=task_accept,
+        task_fail=task_fail,
+        task_result=task_result,
     )
 
 
@@ -707,35 +1084,203 @@ def build_client_join(client_name: str = SUPERWEB_CLIENT_NAME) -> RuntimeEnvelop
 
 
 @trace_function
-def build_client_request(client_name: str, request_id: str, command: str, payload: str = "") -> RuntimeEnvelope:
+def build_client_request(
+    client_name: str,
+    request_id: str,
+    method: str,
+    vector_data: bytes,
+    *,
+    object_id: str = "",
+    stream_id: str = "",
+    timestamp_ms: int | None = None,
+    vector_length: int | None = None,
+) -> RuntimeEnvelope:
     """Create a client request message."""
+
+    if timestamp_ms is None:
+        timestamp_ms = int(time.time() * 1000)
+    if vector_length is None:
+        vector_length = len(vector_data) // 4
 
     return RuntimeEnvelope(
         kind=MessageKind.CLIENT_REQUEST,
-        client_request=ClientRequest(client_name=client_name, request_id=request_id, command=command, payload=payload),
+        client_request=ClientRequest(
+            request_id=request_id,
+            client_name=client_name,
+            method=method,
+            object_id=object_id,
+            stream_id=stream_id,
+            timestamp_ms=timestamp_ms,
+            vector_length=vector_length,
+            vector_data=vector_data,
+        ),
     )
 
 
 @trace_function
 def build_client_response(
     request_id: str,
-    ok: bool,
-    message: str,
-    payload: str = "",
+    status_code: int,
+    *,
+    method: str = "",
+    object_id: str = "",
+    stream_id: str = "",
+    error_message: str = "",
+    output_vector: bytes = b"",
+    timestamp_ms: int | None = None,
+    output_length: int | None = None,
     worker_count: int = 0,
     client_count: int = 0,
 ) -> RuntimeEnvelope:
     """Create a main-node response to a client join or request."""
 
+    if timestamp_ms is None:
+        timestamp_ms = int(time.time() * 1000)
+    if output_length is None:
+        output_length = len(output_vector) // 4
+
     return RuntimeEnvelope(
         kind=MessageKind.CLIENT_RESPONSE,
         client_response=ClientResponse(
             request_id=request_id,
-            ok=ok,
-            message=message,
-            payload=payload,
+            method=method,
+            object_id=object_id,
+            stream_id=stream_id,
+            timestamp_ms=timestamp_ms,
+            status_code=status_code,
+            error_message=error_message,
+            output_length=output_length,
+            output_vector=output_vector,
             worker_count=worker_count,
             client_count=client_count,
+        ),
+    )
+
+
+@trace_function
+def build_task_assign(
+    request_id: str,
+    node_id: str,
+    task_id: str,
+    method: str,
+    row_start: int,
+    row_end: int,
+    vector_data: bytes,
+    *,
+    object_id: str = "",
+    stream_id: str = "",
+    timestamp_ms: int | None = None,
+    vector_length: int | None = None,
+) -> RuntimeEnvelope:
+    """Create one task assignment message for a worker."""
+
+    if timestamp_ms is None:
+        timestamp_ms = int(time.time() * 1000)
+    if vector_length is None:
+        vector_length = len(vector_data) // 4
+
+    return RuntimeEnvelope(
+        kind=MessageKind.TASK_ASSIGN,
+        task_assign=TaskAssign(
+            request_id=request_id,
+            node_id=node_id,
+            task_id=task_id,
+            method=method,
+            object_id=object_id,
+            stream_id=stream_id,
+            timestamp_ms=timestamp_ms,
+            row_start=row_start,
+            row_end=row_end,
+            vector_length=vector_length,
+            vector_data=vector_data,
+        ),
+    )
+
+
+@trace_function
+def build_task_accept(
+    request_id: str,
+    node_id: str,
+    task_id: str,
+    status_code: int,
+    *,
+    timestamp_ms: int | None = None,
+) -> RuntimeEnvelope:
+    """Create a task-accept acknowledgement from a worker."""
+
+    if timestamp_ms is None:
+        timestamp_ms = int(time.time() * 1000)
+    return RuntimeEnvelope(
+        kind=MessageKind.TASK_ACCEPT,
+        task_accept=TaskAccept(
+            request_id=request_id,
+            node_id=node_id,
+            task_id=task_id,
+            timestamp_ms=timestamp_ms,
+            status_code=status_code,
+        ),
+    )
+
+
+@trace_function
+def build_task_fail(
+    request_id: str,
+    node_id: str,
+    task_id: str,
+    status_code: int,
+    error_message: str,
+    *,
+    timestamp_ms: int | None = None,
+) -> RuntimeEnvelope:
+    """Create a task-failure message from a worker."""
+
+    if timestamp_ms is None:
+        timestamp_ms = int(time.time() * 1000)
+    return RuntimeEnvelope(
+        kind=MessageKind.TASK_FAIL,
+        task_fail=TaskFail(
+            request_id=request_id,
+            node_id=node_id,
+            task_id=task_id,
+            timestamp_ms=timestamp_ms,
+            status_code=status_code,
+            error_message=error_message,
+        ),
+    )
+
+
+@trace_function
+def build_task_result(
+    request_id: str,
+    node_id: str,
+    task_id: str,
+    status_code: int,
+    row_start: int,
+    row_end: int,
+    output_vector: bytes,
+    *,
+    timestamp_ms: int | None = None,
+    output_length: int | None = None,
+) -> RuntimeEnvelope:
+    """Create a task-result message from a worker."""
+
+    if timestamp_ms is None:
+        timestamp_ms = int(time.time() * 1000)
+    if output_length is None:
+        output_length = len(output_vector) // 4
+
+    return RuntimeEnvelope(
+        kind=MessageKind.TASK_RESULT,
+        task_result=TaskResult(
+            request_id=request_id,
+            node_id=node_id,
+            task_id=task_id,
+            timestamp_ms=timestamp_ms,
+            status_code=status_code,
+            row_start=row_start,
+            row_end=row_end,
+            output_length=output_length,
+            output_vector=output_vector,
         ),
     )
 
@@ -757,4 +1302,13 @@ def describe_message_kind(kind: MessageKind) -> str:
         return RUNTIME_MSG_CLIENT_REQUEST
     if kind == MessageKind.CLIENT_RESPONSE:
         return RUNTIME_MSG_CLIENT_RESPONSE
+    if kind == MessageKind.TASK_ASSIGN:
+        return RUNTIME_MSG_TASK_ASSIGN
+    if kind == MessageKind.TASK_ACCEPT:
+        return RUNTIME_MSG_TASK_ACCEPT
+    if kind == MessageKind.TASK_FAIL:
+        return RUNTIME_MSG_TASK_FAIL
+    if kind == MessageKind.TASK_RESULT:
+        return RUNTIME_MSG_TASK_RESULT
     return kind.name
+

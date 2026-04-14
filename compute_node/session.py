@@ -1,13 +1,13 @@
-"""TCP session helpers for compute-node runtime traffic."""
+﻿"""TCP session helpers for compute-node runtime traffic."""
 
 from __future__ import annotations
 
 import socket
 
 from common.types import ComputePerformanceSummary, HardwareProfile
-from constants import RUNTIME_MSG_REGISTER_OK
-from runtime_protocol import MessageKind, RegisterOk, RuntimeEnvelope, build_register_worker, recv_message, send_message
-from trace_utils import trace_function
+from app.constants import RUNTIME_MSG_REGISTER_OK
+from wire.runtime import MessageKind, RegisterOk, RuntimeEnvelope, build_register_worker, recv_message, send_message
+from app.trace_utils import trace_function
 
 
 class WorkerSession:
@@ -75,3 +75,5 @@ class WorkerSession:
             pass
         finally:
             self.sock = None
+
+

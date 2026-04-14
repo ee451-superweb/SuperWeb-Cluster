@@ -1,4 +1,4 @@
-"""Main-node runtime loop for superweb-cluster Sprint 1."""
+﻿"""Main-node runtime loop for superweb-cluster Sprint 1."""
 
 from __future__ import annotations
 
@@ -6,32 +6,46 @@ import logging
 import socket
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable
 
 from adapters import network
 from common.types import DiscoveryResult
-from config import AppConfig
-from constants import (
+from compute_node.input_matrix import build_input_matrix_spec
+from app.config import AppConfig
+from app.constants import (
     MAIN_NODE_NAME,
+    METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
     RUNTIME_MSG_CLIENT_JOIN,
     RUNTIME_MSG_CLIENT_REQUEST,
     RUNTIME_MSG_CLIENT_RESPONSE,
     RUNTIME_MSG_HEARTBEAT,
     RUNTIME_MSG_HEARTBEAT_OK,
     RUNTIME_MSG_REGISTER_WORKER,
+    RUNTIME_MSG_TASK_ACCEPT,
+    RUNTIME_MSG_TASK_ASSIGN,
+    RUNTIME_MSG_TASK_FAIL,
+    RUNTIME_MSG_TASK_RESULT,
+    STATUS_BAD_REQUEST,
+    STATUS_INTERNAL_ERROR,
+    STATUS_NOT_FOUND,
+    STATUS_OK,
 )
 from discovery import multicast
+from main_node.aggregator import ResultAggregator
+from main_node.dispatcher import TaskDispatcher, WorkerTaskSlice
 from main_node.registry import ClusterRegistry, RuntimePeerConnection
-from runtime_protocol import (
+from wire.runtime import (
     MessageKind,
     build_client_response,
     build_heartbeat,
     build_register_ok,
+    build_task_assign,
     describe_message_kind,
     recv_message,
     send_message,
 )
-from trace_utils import trace_function
+from app.trace_utils import trace_function
 
 
 class MainNodeRuntime:
@@ -48,6 +62,9 @@ class MainNodeRuntime:
         self.logger = logger
         self.should_stop = should_stop or (lambda: False)
         self.registry = ClusterRegistry()
+        self.dispatcher = TaskDispatcher()
+        self.aggregator = ResultAggregator()
+        self.fixed_matvec_spec = build_input_matrix_spec()
         self._stop_event = threading.Event()
 
     @trace_function
@@ -157,9 +174,7 @@ class MainNodeRuntime:
             client_sock,
             build_client_response(
                 request_id="join",
-                ok=True,
-                message=f"Client {connection.node_name} joined the main node.",
-                payload="joined",
+                status_code=STATUS_OK,
                 worker_count=worker_count,
                 client_count=client_count,
             ),
@@ -221,15 +236,170 @@ class MainNodeRuntime:
                 network.safe_close(client_sock)
 
     @trace_function
-    def _build_client_response_for_request(self, request) -> object:
-        return build_client_response(
-            request_id=request.request_id or request.command,
-            ok=True,
-            message="",
-            payload="",
-            worker_count=0,
-            client_count=0,
+    def _remove_worker_connection(self, connection: RuntimePeerConnection, reason: str) -> None:
+        removed = self.registry.remove_worker(connection.peer_id)
+        if removed is not None:
+            network.safe_close(removed.sock)
+        print(
+            f"Removed compute node {connection.node_name} at {connection.peer_address}:{connection.peer_port}: {reason}",
+            flush=True,
         )
+        self._print_cluster_compute_capacity()
+
+    @trace_function
+    def _run_worker_task_slice(self, request, assignment: WorkerTaskSlice):
+        exchange_timeout = max(self.config.runtime_socket_timeout, 30.0)
+        sock = assignment.connection.sock
+        previous_timeout = sock.gettimeout()
+        task_assign = build_task_assign(
+            request_id=request.request_id,
+            node_id=assignment.connection.node_name,
+            task_id=assignment.task_id,
+            method=request.method,
+            object_id=request.object_id,
+            stream_id=request.stream_id,
+            row_start=assignment.row_start,
+            row_end=assignment.row_end,
+            vector_data=request.vector_data,
+            vector_length=request.vector_length,
+        )
+
+        try:
+            with assignment.connection.io_lock:
+                sock.settimeout(exchange_timeout)
+                send_message(sock, task_assign)
+                print(
+                    f"{RUNTIME_MSG_TASK_ASSIGN} to {assignment.connection.node_name} "
+                    f"task_id={assignment.task_id} rows={assignment.row_start}:{assignment.row_end}",
+                    flush=True,
+                )
+
+                accept_message = recv_message(sock, max_size=self.config.max_message_size)
+                if accept_message is None:
+                    raise ConnectionError("worker closed the TCP session before TASK_ACCEPT")
+                if accept_message.kind != MessageKind.TASK_ACCEPT or accept_message.task_accept is None:
+                    raise ValueError(
+                        f"expected {RUNTIME_MSG_TASK_ACCEPT}, got {describe_message_kind(accept_message.kind)}"
+                    )
+                task_accept = accept_message.task_accept
+                if task_accept.request_id != request.request_id or task_accept.task_id != assignment.task_id:
+                    raise ValueError("received TASK_ACCEPT for the wrong request or task id")
+
+                result_message = recv_message(sock, max_size=self.config.max_message_size)
+                if result_message is None:
+                    raise ConnectionError("worker closed the TCP session before TASK_RESULT")
+                if result_message.kind == MessageKind.TASK_FAIL and result_message.task_fail is not None:
+                    task_fail = result_message.task_fail
+                    raise RuntimeError(task_fail.error_message or "worker reported TASK_FAIL")
+                if result_message.kind != MessageKind.TASK_RESULT or result_message.task_result is None:
+                    raise ValueError(
+                        f"expected {RUNTIME_MSG_TASK_RESULT}, got {describe_message_kind(result_message.kind)}"
+                    )
+                task_result = result_message.task_result
+                if task_result.request_id != request.request_id or task_result.task_id != assignment.task_id:
+                    raise ValueError("received TASK_RESULT for the wrong request or task id")
+                return task_result
+        except (OSError, ValueError, ConnectionError, RuntimeError) as exc:
+            self._remove_worker_connection(assignment.connection, str(exc))
+            raise
+        finally:
+            try:
+                sock.settimeout(previous_timeout)
+            except OSError:
+                pass
+
+    @trace_function
+    def _build_client_response_for_request(self, request):
+        worker_count, client_count = self._cluster_counts()
+
+        if request.method != METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION:
+            return build_client_response(
+                request_id=request.request_id,
+                status_code=STATUS_BAD_REQUEST,
+                method=request.method,
+                object_id=request.object_id,
+                stream_id=request.stream_id,
+                error_message=f"unsupported method: {request.method}",
+                worker_count=worker_count,
+                client_count=client_count,
+            )
+
+        if request.vector_length != self.fixed_matvec_spec.cols:
+            return build_client_response(
+                request_id=request.request_id,
+                status_code=STATUS_BAD_REQUEST,
+                method=request.method,
+                object_id=request.object_id,
+                stream_id=request.stream_id,
+                error_message=(
+                    f"vector_length={request.vector_length} does not match "
+                    f"expected {self.fixed_matvec_spec.cols}"
+                ),
+                worker_count=worker_count,
+                client_count=client_count,
+            )
+
+        if len(request.vector_data) != request.vector_length * 4:
+            return build_client_response(
+                request_id=request.request_id,
+                status_code=STATUS_BAD_REQUEST,
+                method=request.method,
+                object_id=request.object_id,
+                stream_id=request.stream_id,
+                error_message="vector_data byte length does not match vector_length",
+                worker_count=worker_count,
+                client_count=client_count,
+            )
+
+        assignments = self.dispatcher.dispatch_fixed_matrix_vector_multiplication(
+            request_id=request.request_id,
+            rows=self.fixed_matvec_spec.rows,
+            workers=self.registry.list_workers(),
+            worker_hardware=self.registry.list_worker_hardware(),
+        )
+        if not assignments:
+            return build_client_response(
+                request_id=request.request_id,
+                status_code=STATUS_NOT_FOUND,
+                method=request.method,
+                object_id=request.object_id,
+                stream_id=request.stream_id,
+                error_message="no registered compute workers are currently available",
+                worker_count=worker_count,
+                client_count=client_count,
+            )
+
+        try:
+            with ThreadPoolExecutor(max_workers=len(assignments), thread_name_prefix="task-dispatch") as executor:
+                task_results = list(executor.map(lambda item: self._run_worker_task_slice(request, item), assignments))
+            output_vector = self.aggregator.collect_fixed_matrix_vector_result(
+                rows=self.fixed_matvec_spec.rows,
+                results=task_results,
+            )
+            worker_count, client_count = self._cluster_counts()
+            return build_client_response(
+                request_id=request.request_id,
+                status_code=STATUS_OK,
+                method=request.method,
+                object_id=request.object_id,
+                stream_id=request.stream_id,
+                output_vector=output_vector,
+                output_length=self.fixed_matvec_spec.rows,
+                worker_count=worker_count,
+                client_count=client_count,
+            )
+        except (OSError, ValueError, ConnectionError, RuntimeError) as exc:
+            worker_count, client_count = self._cluster_counts()
+            return build_client_response(
+                request_id=request.request_id,
+                status_code=STATUS_INTERNAL_ERROR,
+                method=request.method,
+                object_id=request.object_id,
+                stream_id=request.stream_id,
+                error_message=str(exc),
+                worker_count=worker_count,
+                client_count=client_count,
+            )
 
     @trace_function
     def _remove_client_connection(self, connection: RuntimePeerConnection, reason: str) -> None:
@@ -270,14 +440,15 @@ class MainNodeRuntime:
             self.registry.mark_client_request(connection.peer_id)
             print(
                 f"{RUNTIME_MSG_CLIENT_REQUEST} from {request.client_name} "
-                f"request_id={request.request_id} command={request.command} payload={request.payload!r}",
+                f"request_id={request.request_id} method={request.method} "
+                f"vector_length={request.vector_length}",
                 flush=True,
             )
             response = self._build_client_response_for_request(request)
             send_message(connection.sock, response)
             print(
                 f"{RUNTIME_MSG_CLIENT_RESPONSE} to {request.client_name} "
-                f"request_id={request.request_id or request.command}",
+                f"request_id={request.request_id} status_code={response.client_response.status_code}",
                 flush=True,
             )
 
@@ -318,13 +489,14 @@ class MainNodeRuntime:
             heartbeat_unix_time_ms = heartbeat.heartbeat.unix_time_ms
 
             try:
-                send_message(connection.sock, heartbeat)
-                print(
-                    f"{RUNTIME_MSG_HEARTBEAT} to {connection.node_name} "
-                    f"at {connection.peer_address}:{connection.peer_port} attempt={attempt}/{total_attempts}",
-                    flush=True,
-                )
-                self._await_heartbeat_ok(connection, heartbeat_unix_time_ms)
+                with connection.io_lock:
+                    send_message(connection.sock, heartbeat)
+                    print(
+                        f"{RUNTIME_MSG_HEARTBEAT} to {connection.node_name} "
+                        f"at {connection.peer_address}:{connection.peer_port} attempt={attempt}/{total_attempts}",
+                        flush=True,
+                    )
+                    self._await_heartbeat_ok(connection, heartbeat_unix_time_ms)
                 return
             except (socket.timeout, OSError, ConnectionError, ValueError) as exc:
                 last_error = exc
@@ -335,15 +507,7 @@ class MainNodeRuntime:
                         flush=True,
                     )
 
-        removed = self.registry.remove_worker(connection.peer_id)
-        if removed is not None:
-            network.safe_close(removed.sock)
-        print(
-            f"Removed compute node {connection.node_name} at {connection.peer_address}:{connection.peer_port} "
-            f"after heartbeat timeout: {last_error}",
-            flush=True,
-        )
-        self._print_cluster_compute_capacity()
+        self._remove_worker_connection(connection, f"after heartbeat timeout: {last_error}")
 
     @trace_function
     def _send_heartbeat_once(self) -> None:
@@ -452,3 +616,5 @@ class MainNodeRuntime:
                 network.safe_close(runtime_sock)
             self._close_runtime_connections()
             multicast.close(endpoint)
+
+

@@ -20,11 +20,17 @@ struct Options {
     std::string output_path;
     int rows = 0;
     int cols = 0;
+    int row_start = 0;
+    int row_end = 0;
     std::vector<int> transpose_modes;
     std::vector<int> block_sizes;
     std::vector<int> tile_sizes;
+    int fixed_transpose = -1;
+    int fixed_block_size = 0;
+    int fixed_tile_size = 0;
     int autotune_repeats = 1;
     int measurement_repeats = 1;
+    bool task_mode = false;
 };
 
 struct PhaseMetrics {
@@ -84,12 +90,22 @@ Options parse_args(int argc, char** argv) {
             options.rows = std::stoi(value);
         } else if (key == "--cols") {
             options.cols = std::stoi(value);
+        } else if (key == "--row-start") {
+            options.row_start = std::stoi(value);
+        } else if (key == "--row-end") {
+            options.row_end = std::stoi(value);
         } else if (key == "--transpose-modes") {
             options.transpose_modes = parse_int_list(value);
         } else if (key == "--block-sizes") {
             options.block_sizes = parse_int_list(value);
         } else if (key == "--tile-sizes") {
             options.tile_sizes = parse_int_list(value);
+        } else if (key == "--fixed-transpose") {
+            options.fixed_transpose = std::stoi(value);
+        } else if (key == "--fixed-block-size") {
+            options.fixed_block_size = std::stoi(value);
+        } else if (key == "--fixed-tile-size") {
+            options.fixed_tile_size = std::stoi(value);
         } else if (key == "--autotune-repeats") {
             options.autotune_repeats = std::stoi(value);
         } else if (key == "--measurement-repeats") {
@@ -105,11 +121,34 @@ Options parse_args(int argc, char** argv) {
     if (options.rows <= 0 || options.cols <= 0) {
         throw std::runtime_error("rows and cols must be positive");
     }
-    if (options.transpose_modes.empty() || options.block_sizes.empty() || options.tile_sizes.empty()) {
-        throw std::runtime_error("transpose/block/tile candidate lists are required");
+    if (options.row_end == 0) {
+        options.row_end = options.rows;
     }
-    if (options.autotune_repeats <= 0 || options.measurement_repeats <= 0) {
-        throw std::runtime_error("autotune and measurement repeats must be positive");
+    if (options.row_start < 0 || options.row_end <= options.row_start || options.row_end > options.rows) {
+        throw std::runtime_error("row range is invalid");
+    }
+    if (options.measurement_repeats <= 0) {
+        throw std::runtime_error("measurement repeats must be positive");
+    }
+
+    const bool has_fixed_transpose = options.fixed_transpose >= 0;
+    const bool has_fixed_block_size = options.fixed_block_size > 0;
+    const bool has_fixed_tile_size = options.fixed_tile_size > 0;
+    if ((has_fixed_transpose || has_fixed_block_size || has_fixed_tile_size) &&
+        !(has_fixed_transpose && has_fixed_block_size && has_fixed_tile_size)) {
+        throw std::runtime_error(
+            "task mode requires fixed-transpose, fixed-block-size, and fixed-tile-size together"
+        );
+    }
+    options.task_mode = has_fixed_transpose && has_fixed_block_size && has_fixed_tile_size;
+
+    if (!options.task_mode) {
+        if (options.transpose_modes.empty() || options.block_sizes.empty() || options.tile_sizes.empty()) {
+            throw std::runtime_error("transpose/block/tile candidate lists are required");
+        }
+        if (options.autotune_repeats <= 0) {
+            throw std::runtime_error("autotune repeats must be positive");
+        }
     }
     return options;
 }
@@ -152,16 +191,17 @@ __global__ void fmvm_row_major_kernel(
     const float* vector,
     float* output,
     int rows,
-    int cols
+    int cols,
+    int row_start,
+    int row_count
 ) {
-    const int row = blockIdx.x;
+    const int output_row = blockIdx.x;
     const int thread_id = threadIdx.x;
-    if (row >= rows) {
+    if (output_row >= row_count) {
         return;
     }
 
-    // Keep the CUDA path in FP32 to match the benchmark's intended arithmetic
-    // model and to avoid paying the throughput cost of FP64 on consumer GPUs.
+    const int row = row_start + output_row;
     extern __shared__ float partial[];
     float local_sum = 0.0f;
     const int row_base = row * cols;
@@ -188,7 +228,7 @@ __global__ void fmvm_row_major_kernel(
     }
 
     if (thread_id == 0) {
-        output[row] = partial[0];
+        output[output_row] = partial[0];
     }
 }
 
@@ -198,16 +238,17 @@ __global__ void fmvm_transposed_kernel(
     const float* vector,
     float* output,
     int rows,
-    int cols
+    int cols,
+    int row_start,
+    int row_count
 ) {
-    const int row = blockIdx.x;
+    const int output_row = blockIdx.x;
     const int thread_id = threadIdx.x;
-    if (row >= rows) {
+    if (output_row >= row_count) {
         return;
     }
 
-    // Keep the transposed path on the same FP32 arithmetic scheme as the
-    // row-major path.
+    const int row = row_start + output_row;
     extern __shared__ float partial[];
     float local_sum = 0.0f;
     const int stride = blockDim.x * TileSize;
@@ -233,7 +274,7 @@ __global__ void fmvm_transposed_kernel(
     }
 
     if (thread_id == 0) {
-        output[row] = partial[0];
+        output[output_row] = partial[0];
     }
 }
 
@@ -269,20 +310,22 @@ void launch_row_major_kernel(
     const float* vector,
     float* output,
     int rows,
-    int cols
+    int cols,
+    int row_start,
+    int row_count
 ) {
     switch (tile_size) {
         case 1:
-            fmvm_row_major_kernel<1><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols);
+            fmvm_row_major_kernel<1><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols, row_start, row_count);
             break;
         case 2:
-            fmvm_row_major_kernel<2><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols);
+            fmvm_row_major_kernel<2><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols, row_start, row_count);
             break;
         case 4:
-            fmvm_row_major_kernel<4><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols);
+            fmvm_row_major_kernel<4><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols, row_start, row_count);
             break;
         case 8:
-            fmvm_row_major_kernel<8><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols);
+            fmvm_row_major_kernel<8><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols, row_start, row_count);
             break;
         default:
             throw std::runtime_error("unsupported tile size");
@@ -298,20 +341,22 @@ void launch_transposed_kernel(
     const float* vector,
     float* output,
     int rows,
-    int cols
+    int cols,
+    int row_start,
+    int row_count
 ) {
     switch (tile_size) {
         case 1:
-            fmvm_transposed_kernel<1><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols);
+            fmvm_transposed_kernel<1><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols, row_start, row_count);
             break;
         case 2:
-            fmvm_transposed_kernel<2><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols);
+            fmvm_transposed_kernel<2><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols, row_start, row_count);
             break;
         case 4:
-            fmvm_transposed_kernel<4><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols);
+            fmvm_transposed_kernel<4><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols, row_start, row_count);
             break;
         case 8:
-            fmvm_transposed_kernel<8><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols);
+            fmvm_transposed_kernel<8><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols, row_start, row_count);
             break;
         default:
             throw std::runtime_error("unsupported tile size");
@@ -360,6 +405,7 @@ int main(int argc, char** argv) {
             throw std::runtime_error("vector size does not match cols");
         }
 
+        const int row_count = options.row_end - options.row_start;
         int device_index = 0;
         cudaDeviceProp device_props{};
         cuda_check(cudaGetDevice(&device_index), "cudaGetDevice");
@@ -371,14 +417,16 @@ int main(int argc, char** argv) {
         float* device_output = nullptr;
         cuda_check(cudaMalloc(&device_row_major, matrix_values.size() * sizeof(float)), "cudaMalloc row-major");
         cuda_check(cudaMalloc(&device_vector, vector_values.size() * sizeof(float)), "cudaMalloc vector");
-        cuda_check(cudaMalloc(&device_output, static_cast<size_t>(options.rows) * sizeof(float)), "cudaMalloc output");
+        cuda_check(cudaMalloc(&device_output, static_cast<size_t>(row_count) * sizeof(float)), "cudaMalloc output");
 
         cuda_check(
             cudaMemcpy(device_row_major, matrix_values.data(), matrix_values.size() * sizeof(float), cudaMemcpyHostToDevice),
-            "cudaMemcpy row-major");
+            "cudaMemcpy row-major"
+        );
         cuda_check(
             cudaMemcpy(device_vector, vector_values.data(), vector_values.size() * sizeof(float), cudaMemcpyHostToDevice),
-            "cudaMemcpy vector");
+            "cudaMemcpy vector"
+        );
 
         auto ensure_transposed_matrix = [&]() {
             if (device_transposed != nullptr) {
@@ -388,18 +436,15 @@ int main(int argc, char** argv) {
             const dim3 block(32, 32);
             const dim3 grid(
                 static_cast<unsigned int>((options.cols + block.x - 1) / block.x),
-                static_cast<unsigned int>((options.rows + block.y - 1) / block.y));
+                static_cast<unsigned int>((options.rows + block.y - 1) / block.y)
+            );
             transpose_matrix_kernel<<<grid, block>>>(device_row_major, device_transposed, options.rows, options.cols);
             cuda_check(cudaGetLastError(), "transpose_matrix_kernel");
             cuda_check(cudaDeviceSynchronize(), "cudaDeviceSynchronize transpose");
         };
 
-        const dim3 grid(options.rows);
-        TrialMetrics best_metrics;
-        bool have_best_trial = false;
-        std::vector<float> host_output(static_cast<size_t>(options.rows), 0.0f);
-        std::vector<float> best_output_values(static_cast<size_t>(options.rows), 0.0f);
-        int trials_run = 0;
+        std::vector<float> host_output(static_cast<size_t>(row_count), 0.0f);
+        std::vector<float> best_output_values(static_cast<size_t>(row_count), 0.0f);
 
         auto measure_config = [&](
             int transpose_mode,
@@ -408,7 +453,8 @@ int main(int argc, char** argv) {
             const float* matrix_pointer,
             int repeats
         ) -> PhaseMetrics {
-            const dim3 block(block_size);
+            const dim3 grid(static_cast<unsigned int>(row_count));
+            const dim3 block(static_cast<unsigned int>(block_size));
             const size_t shared_bytes = static_cast<size_t>(block_size) * sizeof(float);
 
             if (transpose_mode != 0) {
@@ -421,7 +467,10 @@ int main(int argc, char** argv) {
                     device_vector,
                     device_output,
                     options.rows,
-                    options.cols);
+                    options.cols,
+                    options.row_start,
+                    row_count
+                );
             } else {
                 launch_row_major_kernel(
                     tile_size,
@@ -432,7 +481,10 @@ int main(int argc, char** argv) {
                     device_vector,
                     device_output,
                     options.rows,
-                    options.cols);
+                    options.cols,
+                    options.row_start,
+                    row_count
+                );
             }
             cuda_check(cudaGetLastError(), "warmup kernel launch");
             cuda_check(cudaDeviceSynchronize(), "cudaDeviceSynchronize warmup");
@@ -454,7 +506,10 @@ int main(int argc, char** argv) {
                         device_vector,
                         device_output,
                         options.rows,
-                        options.cols);
+                        options.cols,
+                        options.row_start,
+                        row_count
+                    );
                 } else {
                     launch_row_major_kernel(
                         tile_size,
@@ -465,7 +520,10 @@ int main(int argc, char** argv) {
                         device_vector,
                         device_output,
                         options.rows,
-                        options.cols);
+                        options.cols,
+                        options.row_start,
+                        row_count
+                    );
                 }
             }
 
@@ -481,7 +539,7 @@ int main(int argc, char** argv) {
             const double total_seconds = static_cast<double>(elapsed_ms) / 1000.0;
             const double latency_seconds = total_seconds / static_cast<double>(repeats);
             const double effective_gflops =
-                (2.0 * static_cast<double>(options.rows) * static_cast<double>(options.cols))
+                (2.0 * static_cast<double>(row_count) * static_cast<double>(options.cols))
                 / std::max(latency_seconds, 1e-12) / 1.0e9;
 
             cuda_check(
@@ -489,8 +547,10 @@ int main(int argc, char** argv) {
                     host_output.data(),
                     device_output,
                     host_output.size() * sizeof(float),
-                    cudaMemcpyDeviceToHost),
-                "cudaMemcpy output");
+                    cudaMemcpyDeviceToHost
+                ),
+                "cudaMemcpy output"
+            );
 
             PhaseMetrics metrics;
             metrics.repeats = repeats;
@@ -499,6 +559,58 @@ int main(int argc, char** argv) {
             metrics.checksum = fnv1a64_checksum(host_output);
             return metrics;
         };
+
+        if (options.task_mode) {
+            const float* matrix_pointer = device_row_major;
+            if (options.fixed_transpose != 0) {
+                ensure_transposed_matrix();
+                matrix_pointer = device_transposed;
+            }
+
+            const PhaseMetrics metrics = measure_config(
+                options.fixed_transpose,
+                options.fixed_block_size,
+                options.fixed_tile_size,
+                matrix_pointer,
+                options.measurement_repeats
+            );
+            best_output_values = host_output;
+
+            if (!options.output_path.empty()) {
+                write_float32_file(options.output_path, best_output_values);
+            }
+
+            cudaFree(device_row_major);
+            if (device_transposed != nullptr) {
+                cudaFree(device_transposed);
+            }
+            cudaFree(device_vector);
+            cudaFree(device_output);
+
+            std::cout << "{"
+                      << "\"backend\":\"cuda\","
+                      << "\"mode\":\"task\","
+                      << "\"device_name\":\"" << escape_json(device_props.name) << "\","
+                      << "\"compute_capability\":\"" << device_props.major << device_props.minor << "\","
+                      << "\"transpose\":" << options.fixed_transpose << ","
+                      << "\"block_size\":" << options.fixed_block_size << ","
+                      << "\"tile_size\":" << options.fixed_tile_size << ","
+                      << "\"row_start\":" << options.row_start << ","
+                      << "\"row_end\":" << options.row_end << ","
+                      << "\"measurement_repeats\":" << metrics.repeats << ","
+                      << "\"wall_clock_latency_seconds\":" << std::fixed << std::setprecision(9)
+                      << metrics.wall_clock_latency_seconds << ","
+                      << "\"effective_gflops\":" << std::fixed << std::setprecision(9)
+                      << metrics.effective_gflops << ","
+                      << "\"checksum\":\"" << metrics.checksum << "\""
+                      << "}" << std::endl;
+            return 0;
+        }
+
+        const dim3 benchmark_grid(static_cast<unsigned int>(options.rows));
+        TrialMetrics best_metrics;
+        bool have_best_trial = false;
+        int trials_run = 0;
 
         for (const int transpose_mode : options.transpose_modes) {
             const float* matrix_pointer = device_row_major;
@@ -523,7 +635,10 @@ int main(int argc, char** argv) {
                         options.autotune_repeats
                     );
 
-                    if (!have_best_trial || autotune_metrics.wall_clock_latency_seconds < best_metrics.autotune.wall_clock_latency_seconds) {
+                    if (
+                        !have_best_trial ||
+                        autotune_metrics.wall_clock_latency_seconds < best_metrics.autotune.wall_clock_latency_seconds
+                    ) {
                         have_best_trial = true;
                         best_metrics.transpose = transpose_mode;
                         best_metrics.block_size = block_size;

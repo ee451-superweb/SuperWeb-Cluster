@@ -1,4 +1,4 @@
-"""Firewall adapter dispatch tests."""
+﻿"""Firewall adapter dispatch tests."""
 
 import unittest
 from subprocess import CompletedProcess
@@ -7,7 +7,7 @@ from unittest import mock
 from adapters.firewall import cleanup_rules, ensure_rules
 from adapters.firewall import windows as windows_firewall
 from common.types import PlatformInfo
-from constants import DEFAULT_DISCOVERY_PORT, WINDOWS_FIREWALL_RULE_NAME
+from app.constants import DEFAULT_DISCOVERY_PORT, WINDOWS_FIREWALL_RULE_NAME
 
 
 class FirewallTests(unittest.TestCase):
@@ -81,3 +81,4 @@ class FirewallTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

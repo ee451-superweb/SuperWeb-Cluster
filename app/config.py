@@ -1,8 +1,8 @@
-"""Kickoff configuration defaults."""
+﻿"""Kickoff configuration defaults."""
 
 from dataclasses import dataclass
 
-from constants import (
+from app.constants import (
     DEFAULT_BUFFER_SIZE,
     DEFAULT_DISCOVERY_ATTEMPTS,
     DEFAULT_DISCOVERY_PORT,

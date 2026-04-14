@@ -1,8 +1,8 @@
-"""Linux firewall skeleton for the kickoff version."""
+﻿"""Linux firewall skeleton for the kickoff version."""
 
 from common.types import FirewallStatus
-from constants import MSG_NOT_IMPLEMENTED
-from trace_utils import trace_function
+from app.constants import MSG_NOT_IMPLEMENTED
+from app.trace_utils import trace_function
 
 
 @trace_function
@@ -31,3 +31,4 @@ def cleanup_rules(discovery_port: int, is_admin_user: bool) -> FirewallStatus:
         backend="linux",
         message=MSG_NOT_IMPLEMENTED,
     )
+
