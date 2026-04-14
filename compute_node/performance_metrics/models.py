@@ -19,6 +19,8 @@ from typing import Any
 
 DEFAULT_AUTOTUNE_REPEATS = 3
 DEFAULT_MEASUREMENT_REPEATS = 20
+DEFAULT_ACCUMULATION_PRECISION = "fp32"
+SUPPORTED_ACCUMULATION_PRECISIONS = ("fp32", "fp64_accumulate")
 
 
 @dataclass(slots=True)
@@ -37,6 +39,7 @@ class BenchmarkSpec:
     cols: int
     ideal_seconds: float
     zero_score_seconds: float
+    accumulation_precision: str
 
     @property
     def matrix_bytes(self) -> int:

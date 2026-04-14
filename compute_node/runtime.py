@@ -70,6 +70,7 @@ class ComputeNodeRuntime:
     @trace_function
     def run(self) -> DiscoveryResult:
         session = self._build_session()
+        task_executor = None
         try:
             hardware = collect_hardware_profile(self.main_node_host, self.main_node_port)
             runtime_inventory = load_runtime_processor_inventory()
@@ -206,6 +207,8 @@ class ComputeNodeRuntime:
                 message=f"Unable to join main-node TCP runtime: {exc}.",
             )
         finally:
+            if task_executor is not None and hasattr(task_executor, "close"):
+                task_executor.close()
             session.close()
 
 

@@ -34,6 +34,7 @@ class TaskExecutorCommandTests(unittest.TestCase):
         self.assertIn("--iteration-count", command)
         self.assertNotIn("--measurement-repeats", command)
         self.assertEqual(command[command.index("--iteration-count") + 1], "7")
+        self.assertEqual(command[command.index("--accumulation-precision") + 1], "fp32")
 
     def test_cuda_task_command_uses_iteration_count_flag(self) -> None:
         inventory = RuntimeProcessorInventory(
@@ -57,6 +58,31 @@ class TaskExecutorCommandTests(unittest.TestCase):
         self.assertIn("--iteration-count", command)
         self.assertNotIn("--measurement-repeats", command)
         self.assertEqual(command[command.index("--iteration-count") + 1], "9")
+        self.assertEqual(command[command.index("--accumulation-precision") + 1], "fp32")
+
+    def test_dx12_task_command_uses_iteration_count_flag(self) -> None:
+        inventory = RuntimeProcessorInventory(
+            processors=(
+                RuntimeProcessorProfile(
+                    hardware_type="dx12",
+                    effective_gflops=42.0,
+                    rank=1,
+                    best_config={"thread_group_size": 128, "rows_per_thread": 4},
+                ),
+            )
+        )
+        executor = FixedMatrixVectorTaskExecutor(inventory, dataset_root=Path("C:/tmp/generated"))
+        command = executor._build_runtime_command(
+            ProcessorTaskSlice(processor=inventory.processors[0], row_start=8, row_end=12),
+            11,
+            Path("C:/tmp/x.bin"),
+            Path("C:/tmp/y.bin"),
+        )
+
+        self.assertIn("--iteration-count", command)
+        self.assertEqual(command[command.index("--iteration-count") + 1], "11")
+        self.assertEqual(command[command.index("--fixed-thread-group-size") + 1], "128")
+        self.assertEqual(command[command.index("--fixed-rows-per-thread") + 1], "4")
 
 
 if __name__ == "__main__":

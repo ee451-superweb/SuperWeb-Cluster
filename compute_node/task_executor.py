@@ -2,14 +2,24 @@
 
 from __future__ import annotations
 
+import atexit
+import json
 import subprocess
 import sys
 import tempfile
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
 from common.work_partition import partition_contiguous_range
+from compute_node.compute_methods.fixed_matrix_vector_multiplication import (
+    CPU_MACOS_EXECUTABLE_PATH,
+    CPU_WINDOWS_EXECUTABLE_PATH,
+    CUDA_EXECUTABLE_PATH,
+    DX12_EXECUTABLE_PATH,
+    FMVM_METHOD_DIR,
+)
 from compute_node.input_matrix import build_dataset_layout, build_input_matrix_spec, dataset_is_generated
 from compute_node.performance_summary import RuntimeProcessorInventory, RuntimeProcessorProfile, load_runtime_processor_inventory
 from app.constants import METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION
@@ -17,30 +27,6 @@ from wire.runtime import TaskAssign, TaskResult
 
 ROOT_DIR = Path(__file__).resolve().parent
 INPUT_MATRIX_GENERATED_DIR = ROOT_DIR / "input_matrix" / "generated"
-PERFORMANCE_METRICS_DIR = ROOT_DIR / "performance_metrics"
-CPU_WINDOWS_EXECUTABLE = (
-    PERFORMANCE_METRICS_DIR
-    / "fixed_matrix_vector_multiplication"
-    / "cpu"
-    / "windows"
-    / "build"
-    / "fmvm_cpu_windows.exe"
-)
-CPU_MACOS_EXECUTABLE = (
-    PERFORMANCE_METRICS_DIR
-    / "fixed_matrix_vector_multiplication"
-    / "cpu"
-    / "macos"
-    / "build"
-    / "fmvm_cpu_macos"
-)
-CUDA_EXECUTABLE = (
-    PERFORMANCE_METRICS_DIR
-    / "fixed_matrix_vector_multiplication"
-    / "cuda"
-    / "build"
-    / ("fmvm_cuda_runner.exe" if sys.platform == "win32" else "fmvm_cuda_runner")
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +36,115 @@ class ProcessorTaskSlice:
     processor: RuntimeProcessorProfile
     row_start: int
     row_end: int
+
+
+class _Dx12ResidentRunner:
+    """Keep the DX12 matrix resident for the full compute-node process lifetime."""
+
+    def __init__(self, dataset_layout, spec, processors: tuple[RuntimeProcessorProfile, ...]) -> None:
+        thread_group_sizes = sorted(
+            {
+                int(processor.best_config.get("thread_group_size") or 256)
+                for processor in processors
+                if processor.hardware_type == "dx12"
+            }
+        )
+        if not thread_group_sizes:
+            raise ValueError("DX12 resident runner requires at least one dx12 processor profile")
+
+        self._lock = threading.Lock()
+        self._process = subprocess.Popen(
+            [
+                str(DX12_EXECUTABLE_PATH),
+                "--server",
+                "1",
+                "--matrix",
+                str(dataset_layout.matrix_path),
+                "--rows",
+                str(spec.rows),
+                "--cols",
+                str(spec.cols),
+                "--thread-group-sizes",
+                ",".join(str(value) for value in thread_group_sizes),
+            ],
+            cwd=FMVM_METHOD_DIR,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            bufsize=1,
+        )
+        ready_line = self._read_response_line()
+        if not ready_line.startswith("READY\t"):
+            stderr = self._process.stderr.read().strip() if self._process.stderr is not None else ""
+            raise RuntimeError(f"DX12 resident runner failed to start: {ready_line or stderr or 'unknown error'}")
+        atexit.register(self.close)
+
+    def run_slice(
+        self,
+        *,
+        vector_path: Path,
+        output_path: Path,
+        row_start: int,
+        row_end: int,
+        thread_group_size: int,
+        rows_per_thread: int,
+        iteration_count: int,
+    ) -> dict[str, object]:
+        with self._lock:
+            self._ensure_running()
+            command = "\t".join(
+                [
+                    "RUN",
+                    str(vector_path),
+                    str(output_path),
+                    str(row_start),
+                    str(row_end),
+                    str(thread_group_size),
+                    str(rows_per_thread),
+                    str(iteration_count),
+                ]
+            )
+            assert self._process.stdin is not None
+            self._process.stdin.write(command + "\n")
+            self._process.stdin.flush()
+            response_line = self._read_response_line()
+            if response_line.startswith("OK\t"):
+                return json.loads(response_line.split("\t", 1)[1])
+            if response_line.startswith("ERR\t"):
+                raise RuntimeError(response_line.split("\t", 1)[1])
+            raise RuntimeError(f"unexpected DX12 resident runner response: {response_line}")
+
+    def close(self) -> None:
+        process = getattr(self, "_process", None)
+        if process is None:
+            return
+        if process.poll() is None:
+            try:
+                if process.stdin is not None:
+                    process.stdin.write("QUIT\n")
+                    process.stdin.flush()
+            except OSError:
+                pass
+            try:
+                process.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        self._process = None
+
+    def _ensure_running(self) -> None:
+        if self._process.poll() is not None:
+            stderr = self._process.stderr.read().strip() if self._process.stderr is not None else ""
+            raise RuntimeError(f"DX12 resident runner exited unexpectedly: {stderr or self._process.returncode}")
+
+    def _read_response_line(self) -> str:
+        assert self._process.stdout is not None
+        line = self._process.stdout.readline()
+        if not line:
+            stderr = self._process.stderr.read().strip() if self._process.stderr is not None else ""
+            raise RuntimeError(f"DX12 resident runner closed its pipe unexpectedly: {stderr or 'no output'}")
+        return line.rstrip("\r\n")
 
 
 class FixedMatrixVectorTaskExecutor:
@@ -65,6 +160,12 @@ class FixedMatrixVectorTaskExecutor:
         self.spec = build_input_matrix_spec()
         self.dataset_root = INPUT_MATRIX_GENERATED_DIR if dataset_root is None else Path(dataset_root)
         self.dataset_layout = build_dataset_layout(self.dataset_root)
+        self._dx12_runner = self._build_dx12_resident_runner()
+
+    def close(self) -> None:
+        if self._dx12_runner is not None:
+            self._dx12_runner.close()
+            self._dx12_runner = None
 
     def execute_task(self, task: TaskAssign) -> TaskResult:
         """Run one assigned row slice and return its output bytes."""
@@ -149,21 +250,32 @@ class FixedMatrixVectorTaskExecutor:
         output_path = temp_root / (
             f"{processor_slice.processor.hardware_type}_{processor_slice.row_start}_{processor_slice.row_end}.bin"
         )
-        command = self._build_runtime_command(processor_slice, iteration_count, vector_path, output_path)
-        completed = subprocess.run(
-            command,
-            check=True,
-            capture_output=True,
-            text=True,
-            cwd=PERFORMANCE_METRICS_DIR,
-            timeout=300.0,
-        )
-        if not output_path.exists():
-            stdout = (completed.stdout or "").strip()
-            raise RuntimeError(
-                f"{processor_slice.processor.hardware_type} runtime executable completed without writing {output_path.name}: "
-                f"{stdout}"
+        if processor_slice.processor.hardware_type == "dx12" and self._dx12_runner is not None:
+            self._dx12_runner.run_slice(
+                vector_path=vector_path,
+                output_path=output_path,
+                row_start=processor_slice.row_start,
+                row_end=processor_slice.row_end,
+                thread_group_size=int(processor_slice.processor.best_config.get("thread_group_size") or 256),
+                rows_per_thread=int(processor_slice.processor.best_config.get("rows_per_thread") or 1),
+                iteration_count=iteration_count,
             )
+        else:
+            command = self._build_runtime_command(processor_slice, iteration_count, vector_path, output_path)
+            completed = subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+                cwd=FMVM_METHOD_DIR,
+                timeout=300.0,
+            )
+            if not output_path.exists():
+                stdout = (completed.stdout or "").strip()
+                raise RuntimeError(
+                    f"{processor_slice.processor.hardware_type} runtime executable completed without writing {output_path.name}: "
+                    f"{stdout}"
+                )
         raw = output_path.read_bytes()
         expected_bytes = (processor_slice.row_end - processor_slice.row_start) * 4
         if len(raw) != expected_bytes:
@@ -171,6 +283,16 @@ class FixedMatrixVectorTaskExecutor:
                 f"{processor_slice.processor.hardware_type} runtime output has {len(raw)} bytes, expected {expected_bytes}"
             )
         return raw
+
+    def _build_dx12_resident_runner(self) -> _Dx12ResidentRunner | None:
+        dx12_processors = tuple(
+            processor for processor in self.inventory.processors if processor.hardware_type == "dx12"
+        )
+        if not dx12_processors or sys.platform != "win32":
+            return None
+        if not dataset_is_generated(self.dataset_layout, self.spec):
+            return None
+        return _Dx12ResidentRunner(self.dataset_layout, self.spec, dx12_processors)
 
     def _build_runtime_command(
         self,
@@ -181,9 +303,10 @@ class FixedMatrixVectorTaskExecutor:
     ) -> list[str]:
         processor = processor_slice.processor
         if processor.hardware_type == "cpu":
-            executable_path = CPU_WINDOWS_EXECUTABLE if sys.platform == "win32" else CPU_MACOS_EXECUTABLE
+            executable_path = CPU_WINDOWS_EXECUTABLE_PATH if sys.platform == "win32" else CPU_MACOS_EXECUTABLE_PATH
             workers = int(processor.best_config.get("workers") or processor.best_config.get("requested_workers") or 1)
             tile_size = int(processor.best_config.get("tile_size") or self.spec.cols)
+            accumulation_precision = str(processor.best_config.get("accumulation_precision") or "fp32")
             return [
                 str(executable_path),
                 "--matrix",
@@ -196,6 +319,8 @@ class FixedMatrixVectorTaskExecutor:
                 str(self.spec.rows),
                 "--cols",
                 str(self.spec.cols),
+                "--accumulation-precision",
+                accumulation_precision,
                 "--row-start",
                 str(processor_slice.row_start),
                 "--row-end",
@@ -211,10 +336,45 @@ class FixedMatrixVectorTaskExecutor:
             ]
 
         if processor.hardware_type == "cuda":
-            executable_path = CUDA_EXECUTABLE
+            executable_path = CUDA_EXECUTABLE_PATH
             transpose = 1 if bool(processor.best_config.get("transpose")) else 0
             block_size = int(processor.best_config.get("block_size") or 256)
             tile_size = int(processor.best_config.get("tile_size") or 1)
+            accumulation_precision = str(processor.best_config.get("accumulation_precision") or "fp32")
+            return [
+                str(executable_path),
+                "--matrix",
+                str(self.dataset_layout.matrix_path),
+                "--vector",
+                str(vector_path),
+                "--output",
+                str(output_path),
+                "--rows",
+                str(self.spec.rows),
+                "--cols",
+                str(self.spec.cols),
+                "--accumulation-precision",
+                accumulation_precision,
+                "--row-start",
+                str(processor_slice.row_start),
+                "--row-end",
+                str(processor_slice.row_end),
+                "--fixed-transpose",
+                str(transpose),
+                "--fixed-block-size",
+                str(block_size),
+                "--fixed-tile-size",
+                str(tile_size),
+                # Task mode uses iteration_count to repeat the same math locally
+                # without resending the client request through the cluster.
+                "--iteration-count",
+                str(iteration_count),
+            ]
+
+        if processor.hardware_type == "dx12":
+            executable_path = DX12_EXECUTABLE_PATH
+            thread_group_size = int(processor.best_config.get("thread_group_size") or 128)
+            rows_per_thread = int(processor.best_config.get("rows_per_thread") or 1)
             return [
                 str(executable_path),
                 "--matrix",
@@ -231,12 +391,10 @@ class FixedMatrixVectorTaskExecutor:
                 str(processor_slice.row_start),
                 "--row-end",
                 str(processor_slice.row_end),
-                "--fixed-transpose",
-                str(transpose),
-                "--fixed-block-size",
-                str(block_size),
-                "--fixed-tile-size",
-                str(tile_size),
+                "--fixed-thread-group-size",
+                str(thread_group_size),
+                "--fixed-rows-per-thread",
+                str(rows_per_thread),
                 # Task mode uses iteration_count to repeat the same math locally
                 # without resending the client request through the cluster.
                 "--iteration-count",

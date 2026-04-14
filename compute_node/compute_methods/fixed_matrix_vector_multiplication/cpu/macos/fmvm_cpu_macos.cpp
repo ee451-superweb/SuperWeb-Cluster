@@ -27,6 +27,7 @@ struct Options {
     int fixed_tile_size = 0;
     int autotune_repeats = 1;
     int measurement_repeats = 1;
+    std::string accumulation_precision = "fp32";
     bool task_mode = false;
 };
 
@@ -45,6 +46,10 @@ struct TrialMetrics {
     PhaseMetrics autotune;
     PhaseMetrics measurement;
 };
+
+bool is_supported_accumulation_precision(const std::string& value) {
+    return value == "fp32" || value == "fp64_accumulate";
+}
 
 std::vector<int> parse_int_list(const std::string& text) {
     std::vector<int> values;
@@ -99,6 +104,8 @@ Options parse_args(int argc, char** argv) {
             // Task execution reuses the measurement loop but exposes the more
             // domain-specific name iteration-count to the runtime layer.
             options.measurement_repeats = std::stoi(value);
+        } else if (key == "--accumulation-precision") {
+            options.accumulation_precision = value;
         } else {
             throw std::runtime_error("unknown flag: " + key);
         }
@@ -118,6 +125,9 @@ Options parse_args(int argc, char** argv) {
     }
     if (options.measurement_repeats <= 0) {
         throw std::runtime_error("measurement repeats must be positive");
+    }
+    if (!is_supported_accumulation_precision(options.accumulation_precision)) {
+        throw std::runtime_error("unsupported accumulation precision: " + options.accumulation_precision);
     }
 
     const bool has_fixed_workers = options.fixed_workers > 0;
@@ -177,7 +187,7 @@ void write_float32_file(const std::string& path, const std::vector<float>& value
     }
 }
 
-float dot_product_tiled(const float* matrix_row, const std::vector<float>& vector_values, int cols, int tile_size) {
+float dot_product_tiled_fp32(const float* matrix_row, const std::vector<float>& vector_values, int cols, int tile_size) {
     float accumulator = 0.0f;
     for (int tile_start = 0; tile_start < cols; tile_start += tile_size) {
         const int tile_end = std::min(cols, tile_start + tile_size);
@@ -188,6 +198,22 @@ float dot_product_tiled(const float* matrix_row, const std::vector<float>& vecto
     return accumulator;
 }
 
+float dot_product_tiled_fp64_accumulate(
+    const float* matrix_row,
+    const std::vector<float>& vector_values,
+    int cols,
+    int tile_size
+) {
+    double accumulator = 0.0;
+    for (int tile_start = 0; tile_start < cols; tile_start += tile_size) {
+        const int tile_end = std::min(cols, tile_start + tile_size);
+        for (int col = tile_start; col < tile_end; ++col) {
+            accumulator += static_cast<double>(matrix_row[col]) * static_cast<double>(vector_values[static_cast<size_t>(col)]);
+        }
+    }
+    return static_cast<float>(accumulator);
+}
+
 void compute_row_range(
     const std::vector<float>& matrix_values,
     const std::vector<float>& vector_values,
@@ -196,17 +222,27 @@ void compute_row_range(
     int row_start,
     int row_end,
     int tile_size,
-    int output_row_offset
+    int output_row_offset,
+    const std::string& accumulation_precision
 ) {
     for (int row = row_start; row < row_end; ++row) {
         const size_t row_base = static_cast<size_t>(row) * static_cast<size_t>(cols);
         const float* matrix_row = matrix_values.data() + row_base;
-        output_values[static_cast<size_t>(row - output_row_offset)] = dot_product_tiled(
-            matrix_row,
-            vector_values,
-            cols,
-            tile_size
-        );
+        if (accumulation_precision == "fp64_accumulate") {
+            output_values[static_cast<size_t>(row - output_row_offset)] = dot_product_tiled_fp64_accumulate(
+                matrix_row,
+                vector_values,
+                cols,
+                tile_size
+            );
+        } else {
+            output_values[static_cast<size_t>(row - output_row_offset)] = dot_product_tiled_fp32(
+                matrix_row,
+                vector_values,
+                cols,
+                tile_size
+            );
+        }
     }
 }
 
@@ -218,12 +254,23 @@ int run_once(
     int row_start,
     int row_end,
     int requested_workers,
-    int tile_size
+    int tile_size,
+    const std::string& accumulation_precision
 ) {
     const int task_rows = row_end - row_start;
     const int actual_workers = std::max(1, std::min({requested_workers, task_rows}));
     if (actual_workers == 1) {
-        compute_row_range(matrix_values, vector_values, output_values, cols, row_start, row_end, tile_size, row_start);
+        compute_row_range(
+            matrix_values,
+            vector_values,
+            output_values,
+            cols,
+            row_start,
+            row_end,
+            tile_size,
+            row_start,
+            accumulation_precision
+        );
         return actual_workers;
     }
 
@@ -241,7 +288,8 @@ int run_once(
             partition_start,
             partition_end,
             tile_size,
-            row_start
+            row_start,
+            std::cref(accumulation_precision)
         );
     }
 
@@ -262,7 +310,8 @@ PhaseMetrics measure_config(
     int row_end,
     int requested_workers,
     int tile_size,
-    int repeats
+    int repeats,
+    const std::string& accumulation_precision
 ) {
     const int task_rows = row_end - row_start;
     const int warmup_workers = run_once(
@@ -273,7 +322,8 @@ PhaseMetrics measure_config(
         row_start,
         row_end,
         requested_workers,
-        tile_size
+        tile_size,
+        accumulation_precision
     );
 
     const auto started = std::chrono::steady_clock::now();
@@ -287,7 +337,8 @@ PhaseMetrics measure_config(
             row_start,
             row_end,
             requested_workers,
-            tile_size
+            tile_size,
+            accumulation_precision
         );
     }
     const auto finished = std::chrono::steady_clock::now();
@@ -362,7 +413,8 @@ int main(int argc, char** argv) {
                 options.row_end,
                 options.fixed_workers,
                 options.fixed_tile_size,
-                options.measurement_repeats
+                options.measurement_repeats,
+                options.accumulation_precision
             );
 
             if (!options.output_path.empty()) {
@@ -375,6 +427,7 @@ int main(int argc, char** argv) {
                       << "\"requested_workers\":" << options.fixed_workers << ","
                       << "\"actual_workers\":" << metrics.actual_workers << ","
                       << "\"tile_size\":" << options.fixed_tile_size << ","
+                      << "\"accumulation_precision\":\"" << options.accumulation_precision << "\","
                       << "\"row_start\":" << options.row_start << ","
                       << "\"row_end\":" << options.row_end << ","
                       << "\"iteration_count\":" << metrics.repeats << ","
@@ -402,11 +455,12 @@ int main(int argc, char** argv) {
                     output_values,
                     options.cols,
                     options.row_start,
-                    options.row_end,
-                    requested_workers,
-                    tile_size,
-                    options.autotune_repeats
-                );
+                        options.row_end,
+                        requested_workers,
+                        tile_size,
+                        options.autotune_repeats,
+                        options.accumulation_precision
+                    );
 
                 if (
                     !have_best_trial ||
@@ -430,7 +484,8 @@ int main(int argc, char** argv) {
             options.row_end,
             best_metrics.requested_workers,
             best_metrics.tile_size,
-            options.measurement_repeats
+            options.measurement_repeats,
+            options.accumulation_precision
         );
         best_metrics.actual_workers = best_metrics.measurement.actual_workers;
         best_output_values = output_values;
@@ -449,6 +504,7 @@ int main(int argc, char** argv) {
                   << "\"requested_workers\":" << best_metrics.requested_workers << ","
                   << "\"actual_workers\":" << best_metrics.actual_workers << ","
                   << "\"tile_size\":" << best_metrics.tile_size << ","
+                  << "\"accumulation_precision\":\"" << options.accumulation_precision << "\","
                   << "\"autotune_repeats\":" << best_metrics.autotune.repeats << ","
                   << "\"measurement_repeats\":" << best_metrics.measurement.repeats << ","
                   << "\"trials_run\":" << trials_run << ","

@@ -21,7 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from compute_node.input_matrix import DEFAULT_COLS, DEFAULT_ROWS
-from models import BenchmarkSpec
+from models import BenchmarkSpec, DEFAULT_ACCUMULATION_PRECISION, SUPPORTED_ACCUMULATION_PRECISIONS
 
 # These scoring constants keep the score linear while still leaving room for
 # slower CPUs and future accelerators to spread out meaningfully.
@@ -35,6 +35,7 @@ def build_benchmark_spec(
     cols: int | None = None,
     ideal_seconds: float = DEFAULT_IDEAL_SECONDS,
     zero_score_seconds: float = DEFAULT_ZERO_SCORE_SECONDS,
+    accumulation_precision: str = DEFAULT_ACCUMULATION_PRECISION,
 ) -> BenchmarkSpec:
     """Return the benchmark shape.
 
@@ -52,6 +53,10 @@ def build_benchmark_spec(
         raise ValueError("ideal_seconds must be positive")
     if zero_score_seconds <= ideal_seconds:
         raise ValueError("zero_score_seconds must be greater than ideal_seconds")
+    if accumulation_precision not in SUPPORTED_ACCUMULATION_PRECISIONS:
+        raise ValueError(
+            f"accumulation_precision must be one of {', '.join(SUPPORTED_ACCUMULATION_PRECISIONS)}"
+        )
 
     return BenchmarkSpec(
         name=f"fixed-fmvm-{resolved_rows}x{resolved_cols}",
@@ -59,4 +64,5 @@ def build_benchmark_spec(
         cols=resolved_cols,
         ideal_seconds=ideal_seconds,
         zero_score_seconds=zero_score_seconds,
+        accumulation_precision=accumulation_precision,
     )

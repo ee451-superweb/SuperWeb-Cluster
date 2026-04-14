@@ -12,15 +12,22 @@ Each backend object is responsible for one compute target, for example:
 - Metal
 - OpenCL
 
-Today the automatic benchmark flow wires in CPU, CUDA, and Metal, and this
+Today the automatic benchmark flow wires in CPU, CUDA, DX12, and Metal, and this
 folder is where future hardware-specific runners should be added.
 """
 
 from __future__ import annotations
 
+import os
+
 from backends.cpu_backend import CpuBackend
 from backends.cuda_backend import CudaBackend
+from backends.dx12_backend import Dx12Backend
 from backends.metal_backend import MetalBackend
+from backends.windows_gpu_inventory import (
+    detect_non_nvidia_windows_adapter,
+    detect_nvidia_windows_adapter,
+)
 
 
 def _known_backend_factories() -> dict[str, type[object]]:
@@ -29,6 +36,7 @@ def _known_backend_factories() -> dict[str, type[object]]:
     return {
         "cpu": CpuBackend,
         "cuda": CudaBackend,
+        "dx12": Dx12Backend,
         "metal": MetalBackend,
     }
 
@@ -36,12 +44,28 @@ def _known_backend_factories() -> dict[str, type[object]]:
 def _default_backend_names() -> list[str]:
     """Pick the backends that should run automatically.
 
-    The benchmark should try every backend we currently know how to orchestrate.
-    Availability checks happen inside the backend objects themselves, so it is
-    safe to include CUDA here even on machines without a CUDA toolchain.
+    On Windows we route GPU work by the display-adapter inventory:
+
+    - NVIDIA adapters prefer CUDA
+    - non-NVIDIA adapters prefer DX12
+
+    This keeps the default flow aligned with what the machine can realistically
+    execute instead of probing every GPU backend blindly.
     """
 
-    return ["cpu", "cuda", "metal"]
+    names = ["cpu"]
+
+    if os.name == "nt":
+        nvidia_adapter_name, _ = detect_nvidia_windows_adapter()
+        non_nvidia_adapter_name, _ = detect_non_nvidia_windows_adapter()
+        if nvidia_adapter_name is not None:
+            names.append("cuda")
+        if non_nvidia_adapter_name is not None:
+            names.append("dx12")
+        return names
+
+    names.extend(["cuda", "metal"])
+    return names
 
 
 def build_backends(names: list[str] | None = None) -> list[object]:

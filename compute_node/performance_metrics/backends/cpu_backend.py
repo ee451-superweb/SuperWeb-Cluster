@@ -4,7 +4,7 @@ This file exists to bridge two worlds:
 
 - Python orchestration in `benchmark.py`
 - the hardware-specific C++ runners in
-  `fixed_matrix_vector_multiplication/cpu/<platform>/`
+  `compute_node/compute_methods/fixed_matrix_vector_multiplication/cpu/<platform>/`
 
 The important design choice is that the C++ program reads `A.bin` and `x.bin`
 only once, then searches multiple worker/tile configurations internally. That
@@ -22,6 +22,14 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from compute_node.compute_methods.fixed_matrix_vector_multiplication import (
+    CPU_MACOS_BUILD_DIR,
+    CPU_MACOS_EXECUTABLE_PATH,
+    CPU_MACOS_SOURCE_PATH,
+    CPU_WINDOWS_BUILD_DIR,
+    CPU_WINDOWS_EXECUTABLE_PATH,
+    CPU_WINDOWS_SOURCE_PATH,
+)
 from models import (
     DEFAULT_AUTOTUNE_REPEATS,
     DEFAULT_MEASUREMENT_REPEATS,
@@ -34,7 +42,6 @@ from path_utils import sanitize_text, to_relative_cli_path, to_relative_string
 from scoring import linear_time_score
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-CPU_ROOT_DIR = ROOT_DIR / "fixed_matrix_vector_multiplication" / "cpu"
 WINDOWS_SELF_CONTAINED_NOTE = (
     "Windows CPU runner is built as a self-contained executable with the static MSVC runtime "
     "(`/MT`), so runtime does not require Visual Studio or the VC++ redistributable."
@@ -56,25 +63,21 @@ def _cpu_artifacts_for_platform(platform: str) -> CpuArtifacts | None:
     """Resolve the CPU runner paths for one supported Python platform tag."""
 
     if platform == "win32":
-        platform_dir = CPU_ROOT_DIR / "windows"
-        build_dir = platform_dir / "build"
         return CpuArtifacts(
             platform_key="windows",
             platform_label="Windows",
-            source_path=platform_dir / "fmvm_cpu_windows.cpp",
-            build_dir=build_dir,
-            executable_path=build_dir / "fmvm_cpu_windows.exe",
+            source_path=CPU_WINDOWS_SOURCE_PATH,
+            build_dir=CPU_WINDOWS_BUILD_DIR,
+            executable_path=CPU_WINDOWS_EXECUTABLE_PATH,
         )
 
     if platform == "darwin":
-        platform_dir = CPU_ROOT_DIR / "macos"
-        build_dir = platform_dir / "build"
         return CpuArtifacts(
             platform_key="macos",
             platform_label="macOS",
-            source_path=platform_dir / "fmvm_cpu_macos.cpp",
-            build_dir=build_dir,
-            executable_path=build_dir / "fmvm_cpu_macos",
+            source_path=CPU_MACOS_SOURCE_PATH,
+            build_dir=CPU_MACOS_BUILD_DIR,
+            executable_path=CPU_MACOS_EXECUTABLE_PATH,
         )
 
     return None
@@ -305,6 +308,8 @@ class CpuBackend:
             str(spec.rows),
             "--cols",
             str(spec.cols),
+            "--accumulation-precision",
+            spec.accumulation_precision,
             "--workers",
             ",".join(str(value) for value in worker_candidates),
             "--tile-sizes",
@@ -368,10 +373,12 @@ class CpuBackend:
             "workers": int(metrics["actual_workers"]),
             "requested_workers": int(metrics["requested_workers"]),
             "tile_size": int(metrics["tile_size"]),
+            "accumulation_precision": str(metrics.get("accumulation_precision") or spec.accumulation_precision),
             "autotune_repeats": int(metrics["autotune_repeats"]),
             "measurement_repeats": int(metrics["measurement_repeats"]),
             "trials_run": int(metrics["trials_run"]),
         }
+        trial_notes = [f"accumulation_precision={config['accumulation_precision']}"]
         autotune_trial = TrialRecord(
             backend=self.name,
             config=config,
@@ -379,7 +386,7 @@ class CpuBackend:
             effective_gflops=float(metrics["autotune_effective_gflops"]),
             checksum=str(metrics["autotune_checksum"]),
             score=autotune_score,
-            notes=[],
+            notes=trial_notes,
         )
         trial = TrialRecord(
             backend=self.name,
@@ -388,7 +395,7 @@ class CpuBackend:
             effective_gflops=float(metrics["measurement_effective_gflops"]),
             checksum=str(metrics["measurement_checksum"]),
             score=measurement_score,
-            notes=[],
+            notes=trial_notes,
         )
         return BackendResult(
             backend=self.name,

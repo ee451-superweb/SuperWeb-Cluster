@@ -6,7 +6,7 @@ import platform
 import sys
 import time
 
-from models import DEFAULT_AUTOTUNE_REPEATS, DEFAULT_MEASUREMENT_REPEATS
+from models import DEFAULT_ACCUMULATION_PRECISION, DEFAULT_AUTOTUNE_REPEATS, DEFAULT_MEASUREMENT_REPEATS
 
 
 def trial_sort_key(result) -> tuple[float, float]:
@@ -105,6 +105,10 @@ def build_report(
             "selection_metric": "autotune_average_latency",
             "reported_metric": "measurement_average_latency",
             "force_rebuild": force_rebuild,
+            "input_dtype": "fp32",
+            "output_dtype": "fp32",
+            "accumulation_precision": spec.accumulation_precision or DEFAULT_ACCUMULATION_PRECISION,
+            "cross_backend_validation": "fp32_tolerance",
         },
         "host": {
             "platform": sys.platform,

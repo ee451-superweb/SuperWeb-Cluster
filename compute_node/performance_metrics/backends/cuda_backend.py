@@ -16,9 +16,14 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
+from compute_node.compute_methods.fixed_matrix_vector_multiplication import (
+    CUDA_BUILD_DIR,
+    CUDA_DIR,
+    CUDA_EXECUTABLE_PATH,
+    CUDA_SOURCE_PATH,
+)
 from models import (
     DEFAULT_AUTOTUNE_REPEATS,
     DEFAULT_MEASUREMENT_REPEATS,
@@ -27,15 +32,12 @@ from models import (
     DatasetLayout,
     TrialRecord,
 )
+from backends.windows_gpu_inventory import detect_nvidia_windows_adapter
 from path_utils import sanitize_text, to_relative_cli_path, to_relative_string
 from scoring import linear_time_score
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-CUDA_DIR = ROOT_DIR / "fixed_matrix_vector_multiplication" / "cuda"
-CUDA_SOURCE_PATH = CUDA_DIR / "fmvm_cuda_runner.cu"
-CUDA_BUILD_DIR = CUDA_DIR / "build"
-CUDA_EXECUTABLE_PATH = CUDA_BUILD_DIR / ("fmvm_cuda_runner.exe" if os.name == "nt" else "fmvm_cuda_runner")
-WINDOWS_PREBUILT_SMS = ("75", "80", "86", "89", "90")
+WINDOWS_PREBUILT_SMS = ("75", "80", "86", "89", "90", "120")
 WINDOWS_CUDA_SELF_CONTAINED_NOTE = (
     "Windows CUDA runner is packaged as a self-contained executable: it statically links cudart and the MSVC runtime, "
     "so runtime needs only a compatible NVIDIA driver that provides nvcuda.dll."
@@ -73,10 +75,11 @@ def _binary_is_stale(binary_path: Path, inputs: list[Path]) -> bool:
     return False
 
 
-def _format_windows_sm_targets() -> str:
+def _format_windows_sm_targets(targets: tuple[str, ...] | list[str] | None = None) -> str:
     """Render the baked-in Windows CUDA architectures for human-readable notes."""
 
-    return ", ".join(f"sm_{value}" for value in WINDOWS_PREBUILT_SMS)
+    resolved_targets = WINDOWS_PREBUILT_SMS if targets is None else targets
+    return ", ".join(f"sm_{value}" for value in resolved_targets)
 
 
 def _supports_windows_prebuilt_capability(capability: str | None) -> bool:
@@ -88,14 +91,58 @@ def _supports_windows_prebuilt_capability(capability: str | None) -> bool:
 def _windows_gencode_args(capability: str | None) -> list[str]:
     """Return the fat-binary architecture list for the shipped Windows runner."""
 
-    target_sms: list[str] = list(WINDOWS_PREBUILT_SMS)
-    if capability is not None and capability not in target_sms:
-        target_sms.append(capability)
+    target_sms = _windows_compile_sm_targets(capability)
 
     args: list[str] = []
     for sm in target_sms:
         args.append(f"-gencode=arch=compute_{sm},code=sm_{sm}")
     return args
+
+
+def _detect_nvcc_supported_sms() -> set[str] | None:
+    """Ask nvcc which `sm_XX` codes it can compile for on this machine."""
+
+    if shutil.which("nvcc") is None:
+        return None
+
+    completed = subprocess.run(
+        ["nvcc", "--list-gpu-code"],
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        return None
+
+    supported: set[str] = set()
+    for line in completed.stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("sm_"):
+            digits = stripped.removeprefix("sm_")
+            if digits.isdigit():
+                supported.add(digits)
+    return supported or None
+
+
+def _windows_compile_sm_targets(capability: str | None) -> list[str]:
+    """Return the Windows SM targets that this machine should compile today.
+
+    We want the checked-in runner to cover a broad set of GPUs, including
+    `sm_120`, but we also do not want rebuilds to fail on an older local CUDA
+    toolchain that cannot emit every requested architecture.
+    """
+
+    target_sms: list[str] = list(WINDOWS_PREBUILT_SMS)
+    if capability is not None and capability not in target_sms:
+        target_sms.append(capability)
+
+    supported_sms = _detect_nvcc_supported_sms()
+    if supported_sms is None:
+        return target_sms
+
+    filtered_targets = [sm for sm in target_sms if sm in supported_sms]
+    if capability is not None and capability in supported_sms and capability not in filtered_targets:
+        filtered_targets.append(capability)
+    return filtered_targets or target_sms
 
 
 def _windows_vsdevcmd_setup_lines() -> list[str]:
@@ -182,6 +229,12 @@ class CudaBackend:
         if not CUDA_SOURCE_PATH.exists():
             return False, f"missing CUDA runner source at {_relative_project_path(CUDA_SOURCE_PATH)}"
 
+        nvidia_adapter_name: str | None = None
+        if os.name == "nt":
+            nvidia_adapter_name, nvidia_adapter_message = detect_nvidia_windows_adapter()
+            if nvidia_adapter_name is None:
+                return False, nvidia_adapter_message
+
         capability = _detect_compute_capability()
         build_inputs = [CUDA_SOURCE_PATH, Path(__file__)]
         toolchain_available, toolchain_message = self._toolchain_status()
@@ -215,7 +268,8 @@ class CudaBackend:
                         True,
                         f"CUDA backend available via self-contained Windows runner at "
                         f"{_relative_project_path(CUDA_EXECUTABLE_PATH)}. Detected GPU is sm_{capability}; the runner "
-                        f"targets {_format_windows_sm_targets()} and needs only the NVIDIA driver at runtime.",
+                        f"targets {_format_windows_sm_targets()} and needs only the NVIDIA driver at runtime. "
+                        f"Matched display adapter {nvidia_adapter_name!r}.",
                     )
 
                 if capability is None:
@@ -337,6 +391,8 @@ class CudaBackend:
             str(spec.rows),
             "--cols",
             str(spec.cols),
+            "--accumulation-precision",
+            spec.accumulation_precision,
             "--transpose-modes",
             ",".join(str(value) for value in transpose_modes),
             "--block-sizes",
@@ -405,11 +461,12 @@ class CudaBackend:
             "transpose": bool(metrics["transpose"]),
             "block_size": int(metrics["block_size"]),
             "tile_size": int(metrics["tile_size"]),
+            "accumulation_precision": str(metrics.get("accumulation_precision") or spec.accumulation_precision),
             "autotune_repeats": int(metrics["autotune_repeats"]),
             "measurement_repeats": int(metrics["measurement_repeats"]),
             "trials_run": int(metrics["trials_run"]),
         }
-        trial_notes: list[str] = []
+        trial_notes: list[str] = [f"accumulation_precision={config['accumulation_precision']}"]
         if "device_name" in metrics:
             trial_notes.append(f"device={metrics['device_name']}")
         if "compute_capability" in metrics:
@@ -500,7 +557,7 @@ class CudaBackend:
         if not toolchain_available:
             raise FileNotFoundError(toolchain_message)
 
-        self._compile_runner(capability)
+        compiled_targets = self._compile_runner(capability)
 
         if not CUDA_EXECUTABLE_PATH.exists():
             raise FileNotFoundError(
@@ -512,13 +569,13 @@ class CudaBackend:
                 return (
                     CUDA_EXECUTABLE_PATH,
                     f"compiled self-contained Windows CUDA runner from {_relative_project_path(CUDA_SOURCE_PATH)} "
-                    f"targeting {_format_windows_sm_targets()}"
+                    f"targeting {_format_windows_sm_targets(compiled_targets)}"
                     + (" because rebuild was explicitly requested" if force_rebuild else ""),
                 )
             return (
                 CUDA_EXECUTABLE_PATH,
                 f"compiled self-contained Windows CUDA runner from {_relative_project_path(CUDA_SOURCE_PATH)} "
-                f"targeting {_format_windows_sm_targets()} and detected GPU sm_{capability}"
+                f"targeting {_format_windows_sm_targets(compiled_targets)} and detected GPU sm_{capability}"
                 + (" because rebuild was explicitly requested" if force_rebuild else ""),
             )
 
@@ -534,7 +591,7 @@ class CudaBackend:
             + (" because rebuild was explicitly requested" if force_rebuild else ""),
         )
 
-    def _compile_runner(self, capability: str | None) -> None:
+    def _compile_runner(self, capability: str | None) -> list[str]:
         """Build the CUDA runner for the current platform."""
 
         if shutil.which("nvcc") is None:
@@ -545,6 +602,7 @@ class CudaBackend:
             if vsdevcmd_path is None:
                 raise FileNotFoundError("VsDevCmd.bat was not found for CUDA compilation")
 
+            compile_targets = _windows_compile_sm_targets(capability)
             command_parts = [
                 "nvcc",
                 "..\\fmvm_cuda_runner.cu",
@@ -590,6 +648,7 @@ class CudaBackend:
                 text=True,
             )
         else:
+            compile_targets = [capability] if capability is not None else []
             command = [
                 "nvcc",
                 "../fmvm_cuda_runner.cu",
@@ -610,6 +669,7 @@ class CudaBackend:
                 output=completed.stdout,
                 stderr=completed.stderr,
             )
+        return compile_targets
 
     def _toolchain_status(self) -> tuple[bool, str]:
         """Report whether the local CUDA build toolchain is usable."""

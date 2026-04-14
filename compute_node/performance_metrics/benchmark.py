@@ -65,6 +65,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Force backend executables to rebuild instead of reusing checked-in or cached binaries.",
     )
+    parser.add_argument(
+        "--accumulation-precision",
+        choices=("fp32", "fp64_accumulate"),
+        default="fp32",
+        help="Numeric accumulation mode. Default: fp32. fp64_accumulate is slower but can reduce tiny cross-backend drift.",
+    )
     parser.add_argument("--rows", type=int, help="Optional test-only override for the matrix row count.")
     parser.add_argument("--cols", type=int, help="Optional test-only override for the matrix column count.")
     return parser
@@ -82,7 +88,12 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
         if bool((hardware_inventory.get(backend.name) or {}).get("probe_available"))
     ]
 
-    spec = build_benchmark_spec(rows=args.rows, cols=args.cols)
+    accumulation_precision = getattr(args, "accumulation_precision", "fp32")
+    spec = build_benchmark_spec(
+        rows=args.rows,
+        cols=args.cols,
+        accumulation_precision=accumulation_precision,
+    )
     dataset_dir = resolve_dataset_dir(args, spec, default_dataset_dir=DEFAULT_DATASET_DIR)
     dataset = build_dataset_layout(dataset_dir)
     dataset_was_generated = False

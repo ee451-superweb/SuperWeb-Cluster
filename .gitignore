@@ -10,18 +10,20 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
-!compute_node/performance_metrics/fixed_matrix_vector_multiplication/cpu/macos/build/
-compute_node/performance_metrics/fixed_matrix_vector_multiplication/cpu/macos/build/*
-!compute_node/performance_metrics/fixed_matrix_vector_multiplication/cpu/macos/build/fmvm_cpu_macos
-!compute_node/performance_metrics/fixed_matrix_vector_multiplication/cpu/windows/build/
-compute_node/performance_metrics/fixed_matrix_vector_multiplication/cpu/windows/build/*
-!compute_node/performance_metrics/fixed_matrix_vector_multiplication/cpu/windows/build/fmvm_cpu_windows.exe
-!compute_node/performance_metrics/fixed_matrix_vector_multiplication/cuda/build/
-compute_node/performance_metrics/fixed_matrix_vector_multiplication/cuda/build/*
-!compute_node/performance_metrics/fixed_matrix_vector_multiplication/cuda/build/fmvm_cuda_runner.exe
-!compute_node/performance_metrics/fixed_matrix_vector_multiplication/metal/build/
-compute_node/performance_metrics/fixed_matrix_vector_multiplication/metal/build/*
-!compute_node/performance_metrics/fixed_matrix_vector_multiplication/metal/build/fmvm_metal_runner
+!compute_node/compute_methods/fixed_matrix_vector_multiplication/cpu/macos/build/
+compute_node/compute_methods/fixed_matrix_vector_multiplication/cpu/macos/build/*
+!compute_node/compute_methods/fixed_matrix_vector_multiplication/cpu/macos/build/fmvm_cpu_macos
+!compute_node/compute_methods/fixed_matrix_vector_multiplication/cpu/windows/build/
+compute_node/compute_methods/fixed_matrix_vector_multiplication/cpu/windows/build/*
+!compute_node/compute_methods/fixed_matrix_vector_multiplication/cpu/windows/build/fmvm_cpu_windows.exe
+!compute_node/compute_methods/fixed_matrix_vector_multiplication/cuda/build/
+compute_node/compute_methods/fixed_matrix_vector_multiplication/cuda/build/*
+!compute_node/compute_methods/fixed_matrix_vector_multiplication/cuda/build/fmvm_cuda_runner.exe
+!compute_node/compute_methods/fixed_matrix_vector_multiplication/dx12/build/
+compute_node/compute_methods/fixed_matrix_vector_multiplication/dx12/build/*
+!compute_node/compute_methods/fixed_matrix_vector_multiplication/metal/build/
+compute_node/compute_methods/fixed_matrix_vector_multiplication/metal/build/*
+!compute_node/compute_methods/fixed_matrix_vector_multiplication/metal/build/fmvm_metal_runner
 develop-eggs/
 dist/
 downloads/
@@ -229,11 +231,13 @@ __marimo__/
 /compute_node/performance_metrics/result.json
 /compute_node/input_matrix/generated/
 
-# Local build artifacts from performance_metrics
-/compute_node/performance_metrics/**/*.obj
-/compute_node/performance_metrics/**/*.ilk
-/compute_node/performance_metrics/**/*.pdb
-/compute_node/performance_metrics/**/*.lib
-/compute_node/performance_metrics/**/*.exp
-/compute_node/performance_metrics/**/fmvm_cpu_output.bin
-/compute_node/performance_metrics/**/fmvm_cuda_output.bin
+# Local build artifacts from compute methods
+/compute_node/compute_methods/**/*.obj
+/compute_node/compute_methods/**/*.ilk
+/compute_node/compute_methods/**/*.pdb
+/compute_node/compute_methods/**/*.lib
+/compute_node/compute_methods/**/*.exp
+/compute_node/compute_methods/**/build_fmvm_*.cmd
+/compute_node/compute_methods/**/fmvm_cpu_output.bin
+/compute_node/compute_methods/**/fmvm_cuda_output.bin
+/compute_node/compute_methods/**/fmvm_dx12_output.bin

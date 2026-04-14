@@ -20,6 +20,7 @@ if str(PERF_DIR) not in sys.path:
     sys.path.insert(0, str(PERF_DIR))
 
 import benchmark
+import backends as backend_registry
 from backends.cpu_backend import (
     CpuArtifacts,
     CpuBackend,
@@ -33,6 +34,12 @@ from backends.cuda_backend import (
     _candidate_tile_sizes as cuda_candidate_tile_sizes,
     _candidate_transpose_modes as cuda_candidate_transpose_modes,
     _windows_gencode_args,
+)
+from backends.dx12_backend import (
+    Dx12Backend,
+    _detect_non_nvidia_windows_adapter,
+    _candidate_rows_per_thread as dx12_candidate_rows_per_thread,
+    _candidate_thread_group_sizes as dx12_candidate_thread_group_sizes,
 )
 from backends.metal_backend import (
     MetalBackend,
@@ -65,6 +72,20 @@ class PerformanceMatricsTests(unittest.TestCase):
     def test_benchmark_parser_accepts_rebuild_flag(self) -> None:
         args = benchmark.build_parser().parse_args(["--rebuild"])
         self.assertTrue(args.rebuild)
+
+    def test_benchmark_parser_accepts_accumulation_precision(self) -> None:
+        args = benchmark.build_parser().parse_args(["--accumulation-precision", "fp64_accumulate"])
+        self.assertEqual(args.accumulation_precision, "fp64_accumulate")
+
+    def test_windows_default_backend_order_routes_gpu_by_display_adapter(self) -> None:
+        with (
+            mock.patch("backends.os.name", "nt"),
+            mock.patch("backends.detect_nvidia_windows_adapter", return_value=("NVIDIA GeForce RTX 4060 Laptop GPU", "")),
+            mock.patch("backends.detect_non_nvidia_windows_adapter", return_value=("AMD Radeon 780M Graphics", "")),
+        ):
+            names = [backend.name for backend in backend_registry.build_backends()]
+
+        self.assertEqual(names, ["cpu", "cuda", "dx12"])
 
     def test_cpu_artifacts_follow_platform(self) -> None:
         windows_artifacts = _cpu_artifacts_for_platform("win32")
@@ -185,6 +206,7 @@ class PerformanceMatricsTests(unittest.TestCase):
                 dataset_dir=default_dataset_dir,
                 output=temp_root / "result.json",
                 time_budget=30.0,
+                accumulation_precision="fp32",
                 rows=8,
                 cols=16,
             )
@@ -206,6 +228,7 @@ class PerformanceMatricsTests(unittest.TestCase):
                 dataset_dir=Path(temp_dir),
                 output=Path(temp_dir) / "result.json",
                 time_budget=30.0,
+                accumulation_precision="fp32",
                 rows=8,
                 cols=16,
             )
@@ -232,6 +255,9 @@ class PerformanceMatricsTests(unittest.TestCase):
         self.assertIn("cpu", report["usable_backends"])
         self.assertEqual(report["workload"]["autotune_repeats"], DEFAULT_AUTOTUNE_REPEATS)
         self.assertEqual(report["workload"]["measurement_repeats"], DEFAULT_MEASUREMENT_REPEATS)
+        self.assertEqual(report["workload"]["accumulation_precision"], "fp32")
+        self.assertEqual(report["workload"]["input_dtype"], "fp32")
+        self.assertEqual(report["workload"]["output_dtype"], "fp32")
         cpu_result = report["backend_results"]["cpu"]
         self.assertTrue(cpu_result["available"])
         self.assertEqual(cpu_result["rank"], 1)
@@ -245,6 +271,7 @@ class PerformanceMatricsTests(unittest.TestCase):
         self.assertFalse(any(drive_pattern.search(note or "") for note in cpu_result["notes"]))
         self.assertGreater(int(cpu_result["best_config"]["workers"]), 0)
         self.assertGreater(int(cpu_result["best_config"]["tile_size"]), 0)
+        self.assertEqual(str(cpu_result["best_config"]["accumulation_precision"]), "fp32")
         self.assertEqual(int(cpu_result["best_config"]["autotune_repeats"]), DEFAULT_AUTOTUNE_REPEATS)
         self.assertEqual(int(cpu_result["best_config"]["measurement_repeats"]), DEFAULT_MEASUREMENT_REPEATS)
         self.assertTrue(str(cpu_result["autotune_result"]["checksum"]).startswith("fnv1a64:"))
@@ -268,6 +295,11 @@ class PerformanceMatricsTests(unittest.TestCase):
         self.assertIn("-gencode=arch=compute_86,code=sm_86", args)
         self.assertIn("-gencode=arch=compute_89,code=sm_89", args)
         self.assertIn("-gencode=arch=compute_90,code=sm_90", args)
+        self.assertIn("-gencode=arch=compute_120,code=sm_120", args)
+
+    def test_dx12_candidate_search_spaces_are_short(self) -> None:
+        self.assertEqual(dx12_candidate_thread_group_sizes(), [256, 512])
+        self.assertEqual(dx12_candidate_rows_per_thread(), [1, 2])
 
     def test_cuda_backend_probe_accepts_prebuilt_windows_runner_without_nvcc(self) -> None:
         backend = CudaBackend()
@@ -306,6 +338,55 @@ class PerformanceMatricsTests(unittest.TestCase):
             ):
                 with self.assertRaises(FileNotFoundError):
                     backend._resolve_executable_path(force_rebuild=True)
+
+    def test_dx12_backend_probe_returns_status(self) -> None:
+        backend = Dx12Backend()
+        available, message = backend.probe()
+        self.assertIsInstance(available, bool)
+        self.assertTrue(message)
+
+    def test_detect_non_nvidia_windows_adapter_prefers_amd_or_intel(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=["powershell"],
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {"Name": "NVIDIA GeForce RTX 4060 Laptop GPU", "AdapterCompatibility": "NVIDIA", "PNPDeviceID": "PCI\\VEN_10DE"},
+                    {"Name": "AMD Radeon 780M Graphics", "AdapterCompatibility": "Advanced Micro Devices, Inc.", "PNPDeviceID": "PCI\\VEN_1002"},
+                ]
+            ),
+            stderr="",
+        )
+        with mock.patch("backends.dx12_backend.subprocess.run", return_value=completed):
+            adapter_name, message = _detect_non_nvidia_windows_adapter()
+
+        self.assertEqual(adapter_name, "AMD Radeon 780M Graphics")
+        self.assertEqual(message, "")
+
+    def test_dx12_backend_probe_rejects_nvidia_only_hosts(self) -> None:
+        backend = Dx12Backend()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_path = Path(temp_dir) / "fmvm_dx12_runner.cpp"
+            source_path.write_text("// dx12 placeholder\n", encoding="utf-8")
+            with (
+                mock.patch("backends.dx12_backend.os.name", "nt"),
+                mock.patch("backends.dx12_backend.DX12_SOURCE_PATH", source_path),
+                mock.patch("backends.dx12_backend._detect_non_nvidia_windows_adapter", return_value=(None, "no AMD or Intel adapter")),
+            ):
+                available, message = backend.probe()
+
+        self.assertFalse(available)
+        self.assertIn("no AMD or Intel adapter", message)
+
+    def test_dx12_backend_rejects_fp64_accumulate(self) -> None:
+        backend = Dx12Backend()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            layout = build_dataset_layout(Path(temp_dir))
+            spec = build_benchmark_spec(rows=8, cols=16, accumulation_precision="fp64_accumulate")
+            result = backend.run(spec, layout, time_budget_seconds=1.0)
+
+        self.assertFalse(result.available)
+        self.assertIn("only fp32 accumulation", result.notes[0])
 
     def test_metal_backend_probe_returns_status(self) -> None:
         backend = MetalBackend()

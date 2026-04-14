@@ -18,6 +18,7 @@ Sprint 1 delivered:
 - compute-node performance summary upload during worker registration
 - main-node tracking of total reported cluster GFLOPS
 - fixed-matrix-vector task distribution and result aggregation
+- Windows DX12 compute benchmarking for non-CUDA GPU paths
 
 Sprint 2 will build on that with broader workload scheduling and more methods.
 
@@ -82,10 +83,13 @@ The repository is now organized by responsibility:
   - scheduler-side registry, dispatch, aggregation, heartbeat, and runtime loop
 - `compute_node/`
   - worker-side runtime session, benchmark summary loading, and task execution
+- `compute_node/compute_methods/`
+  - shared method implementations and hardware-specific runners
+  - used by both runtime task execution and local benchmarking
 - `compute_node/input_matrix/`
   - shared deterministic dataset generator and local dataset cache
 - `compute_node/performance_metrics/`
-  - local CPU/CUDA/Metal benchmark workspace
+  - local benchmark orchestration, ranking, and result reporting
 - `experiments/networking/`
   - standalone networking experiments kept outside the main runtime path
 - `docs/`
@@ -217,6 +221,15 @@ python "compute_node/input_matrix/generate.py"
 - Generated datasets under `compute_node/input_matrix/generated/` and benchmark
   reports such as `compute_node/performance_metrics/result.json` are local
   machine artifacts and stay git-ignored.
+- Shared compute-method implementations now live under
+  `compute_node/compute_methods/`, so runtime executors and benchmark backends
+  no longer hide method source trees inside `performance_metrics/`.
+- The FMVM compute method now has four native backend families in-tree:
+  CPU, CUDA, DX12, and Metal.
+- On Windows, automatic GPU backend selection now inspects display adapters:
+  NVIDIA adapters route to CUDA, and non-NVIDIA adapters route to DX12.
+  You can still force DX12 explicitly with
+  `compute_node/performance_metrics/benchmark.py --backend dx12`.
 - The fixed FMVM benchmark uses a two-phase workload:
   autotune each candidate config with `3` repeats, then measure the winning
   config with `20` repeats for the reported result.

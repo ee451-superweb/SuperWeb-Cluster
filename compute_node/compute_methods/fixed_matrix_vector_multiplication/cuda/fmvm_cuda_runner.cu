@@ -30,6 +30,7 @@ struct Options {
     int fixed_tile_size = 0;
     int autotune_repeats = 1;
     int measurement_repeats = 1;
+    std::string accumulation_precision = "fp32";
     bool task_mode = false;
 };
 
@@ -47,6 +48,10 @@ struct TrialMetrics {
     PhaseMetrics autotune;
     PhaseMetrics measurement;
 };
+
+bool is_supported_accumulation_precision(const std::string& value) {
+    return value == "fp32" || value == "fp64_accumulate";
+}
 
 inline void cuda_check(cudaError_t status, const char* message) {
     if (status != cudaSuccess) {
@@ -112,6 +117,8 @@ Options parse_args(int argc, char** argv) {
             // Task execution reuses the measurement loop but exposes the more
             // domain-specific name iteration-count to the runtime layer.
             options.measurement_repeats = std::stoi(value);
+        } else if (key == "--accumulation-precision") {
+            options.accumulation_precision = value;
         } else {
             throw std::runtime_error("unknown flag: " + key);
         }
@@ -131,6 +138,9 @@ Options parse_args(int argc, char** argv) {
     }
     if (options.measurement_repeats <= 0) {
         throw std::runtime_error("measurement repeats must be positive");
+    }
+    if (!is_supported_accumulation_precision(options.accumulation_precision)) {
+        throw std::runtime_error("unsupported accumulation precision: " + options.accumulation_precision);
     }
 
     const bool has_fixed_transpose = options.fixed_transpose >= 0;
@@ -187,7 +197,13 @@ void write_float32_file(const std::string& path, const std::vector<float>& value
     }
 }
 
-template <int TileSize>
+template <typename Accumulator>
+__device__ Accumulator* shared_partial_buffer() {
+    extern __shared__ __align__(sizeof(double)) unsigned char partial_raw[];
+    return reinterpret_cast<Accumulator*>(partial_raw);
+}
+
+template <int TileSize, typename Accumulator>
 __global__ void fmvm_row_major_kernel(
     const float* matrix,
     const float* vector,
@@ -204,8 +220,8 @@ __global__ void fmvm_row_major_kernel(
     }
 
     const int row = row_start + output_row;
-    extern __shared__ float partial[];
-    float local_sum = 0.0f;
+    Accumulator* partial = shared_partial_buffer<Accumulator>();
+    Accumulator local_sum = static_cast<Accumulator>(0.0);
     const int row_base = row * cols;
     const int stride = blockDim.x * TileSize;
 
@@ -214,7 +230,9 @@ __global__ void fmvm_row_major_kernel(
         for (int tile = 0; tile < TileSize; ++tile) {
             const int column = column_base + tile * blockDim.x;
             if (column < cols) {
-                local_sum += matrix[row_base + column] * vector[column];
+                local_sum +=
+                    static_cast<Accumulator>(matrix[row_base + column]) *
+                    static_cast<Accumulator>(vector[column]);
             }
         }
     }
@@ -230,11 +248,11 @@ __global__ void fmvm_row_major_kernel(
     }
 
     if (thread_id == 0) {
-        output[output_row] = partial[0];
+        output[output_row] = static_cast<float>(partial[0]);
     }
 }
 
-template <int TileSize>
+template <int TileSize, typename Accumulator>
 __global__ void fmvm_transposed_kernel(
     const float* matrix_t,
     const float* vector,
@@ -251,8 +269,8 @@ __global__ void fmvm_transposed_kernel(
     }
 
     const int row = row_start + output_row;
-    extern __shared__ float partial[];
-    float local_sum = 0.0f;
+    Accumulator* partial = shared_partial_buffer<Accumulator>();
+    Accumulator local_sum = static_cast<Accumulator>(0.0);
     const int stride = blockDim.x * TileSize;
 
     for (int column_base = thread_id; column_base < cols; column_base += stride) {
@@ -260,7 +278,9 @@ __global__ void fmvm_transposed_kernel(
         for (int tile = 0; tile < TileSize; ++tile) {
             const int column = column_base + tile * blockDim.x;
             if (column < cols) {
-                local_sum += matrix_t[column * rows + row] * vector[column];
+                local_sum +=
+                    static_cast<Accumulator>(matrix_t[column * rows + row]) *
+                    static_cast<Accumulator>(vector[column]);
             }
         }
     }
@@ -276,7 +296,7 @@ __global__ void fmvm_transposed_kernel(
     }
 
     if (thread_id == 0) {
-        output[output_row] = partial[0];
+        output[output_row] = static_cast<float>(partial[0]);
     }
 }
 
@@ -305,6 +325,7 @@ __global__ void transpose_matrix_kernel(
 
 void launch_row_major_kernel(
     int tile_size,
+    bool use_fp64_accumulate,
     dim3 grid,
     dim3 block,
     size_t shared_bytes,
@@ -318,16 +339,32 @@ void launch_row_major_kernel(
 ) {
     switch (tile_size) {
         case 1:
-            fmvm_row_major_kernel<1><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols, row_start, row_count);
+            if (use_fp64_accumulate) {
+                fmvm_row_major_kernel<1, double><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols, row_start, row_count);
+            } else {
+                fmvm_row_major_kernel<1, float><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols, row_start, row_count);
+            }
             break;
         case 2:
-            fmvm_row_major_kernel<2><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols, row_start, row_count);
+            if (use_fp64_accumulate) {
+                fmvm_row_major_kernel<2, double><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols, row_start, row_count);
+            } else {
+                fmvm_row_major_kernel<2, float><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols, row_start, row_count);
+            }
             break;
         case 4:
-            fmvm_row_major_kernel<4><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols, row_start, row_count);
+            if (use_fp64_accumulate) {
+                fmvm_row_major_kernel<4, double><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols, row_start, row_count);
+            } else {
+                fmvm_row_major_kernel<4, float><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols, row_start, row_count);
+            }
             break;
         case 8:
-            fmvm_row_major_kernel<8><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols, row_start, row_count);
+            if (use_fp64_accumulate) {
+                fmvm_row_major_kernel<8, double><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols, row_start, row_count);
+            } else {
+                fmvm_row_major_kernel<8, float><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols, row_start, row_count);
+            }
             break;
         default:
             throw std::runtime_error("unsupported tile size");
@@ -336,6 +373,7 @@ void launch_row_major_kernel(
 
 void launch_transposed_kernel(
     int tile_size,
+    bool use_fp64_accumulate,
     dim3 grid,
     dim3 block,
     size_t shared_bytes,
@@ -349,16 +387,32 @@ void launch_transposed_kernel(
 ) {
     switch (tile_size) {
         case 1:
-            fmvm_transposed_kernel<1><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols, row_start, row_count);
+            if (use_fp64_accumulate) {
+                fmvm_transposed_kernel<1, double><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols, row_start, row_count);
+            } else {
+                fmvm_transposed_kernel<1, float><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols, row_start, row_count);
+            }
             break;
         case 2:
-            fmvm_transposed_kernel<2><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols, row_start, row_count);
+            if (use_fp64_accumulate) {
+                fmvm_transposed_kernel<2, double><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols, row_start, row_count);
+            } else {
+                fmvm_transposed_kernel<2, float><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols, row_start, row_count);
+            }
             break;
         case 4:
-            fmvm_transposed_kernel<4><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols, row_start, row_count);
+            if (use_fp64_accumulate) {
+                fmvm_transposed_kernel<4, double><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols, row_start, row_count);
+            } else {
+                fmvm_transposed_kernel<4, float><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols, row_start, row_count);
+            }
             break;
         case 8:
-            fmvm_transposed_kernel<8><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols, row_start, row_count);
+            if (use_fp64_accumulate) {
+                fmvm_transposed_kernel<8, double><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols, row_start, row_count);
+            } else {
+                fmvm_transposed_kernel<8, float><<<grid, block, shared_bytes>>>(matrix, vector, output, rows, cols, row_start, row_count);
+            }
             break;
         default:
             throw std::runtime_error("unsupported tile size");
@@ -457,11 +511,13 @@ int main(int argc, char** argv) {
         ) -> PhaseMetrics {
             const dim3 grid(static_cast<unsigned int>(row_count));
             const dim3 block(static_cast<unsigned int>(block_size));
-            const size_t shared_bytes = static_cast<size_t>(block_size) * sizeof(float);
+            const bool use_fp64_accumulate = options.accumulation_precision == "fp64_accumulate";
+            const size_t shared_bytes = static_cast<size_t>(block_size) * (use_fp64_accumulate ? sizeof(double) : sizeof(float));
 
             if (transpose_mode != 0) {
                 launch_transposed_kernel(
                     tile_size,
+                    use_fp64_accumulate,
                     grid,
                     block,
                     shared_bytes,
@@ -476,6 +532,7 @@ int main(int argc, char** argv) {
             } else {
                 launch_row_major_kernel(
                     tile_size,
+                    use_fp64_accumulate,
                     grid,
                     block,
                     shared_bytes,
@@ -501,6 +558,7 @@ int main(int argc, char** argv) {
                 if (transpose_mode != 0) {
                     launch_transposed_kernel(
                         tile_size,
+                        use_fp64_accumulate,
                         grid,
                         block,
                         shared_bytes,
@@ -515,6 +573,7 @@ int main(int argc, char** argv) {
                 } else {
                     launch_row_major_kernel(
                         tile_size,
+                        use_fp64_accumulate,
                         grid,
                         block,
                         shared_bytes,
@@ -597,6 +656,7 @@ int main(int argc, char** argv) {
                       << "\"transpose\":" << options.fixed_transpose << ","
                       << "\"block_size\":" << options.fixed_block_size << ","
                       << "\"tile_size\":" << options.fixed_tile_size << ","
+                      << "\"accumulation_precision\":\"" << options.accumulation_precision << "\","
                       << "\"row_start\":" << options.row_start << ","
                       << "\"row_end\":" << options.row_end << ","
                       << "\"iteration_count\":" << metrics.repeats << ","
@@ -687,6 +747,7 @@ int main(int argc, char** argv) {
                   << "\"transpose\":" << best_metrics.transpose << ","
                   << "\"block_size\":" << best_metrics.block_size << ","
                   << "\"tile_size\":" << best_metrics.tile_size << ","
+                  << "\"accumulation_precision\":\"" << options.accumulation_precision << "\","
                   << "\"autotune_repeats\":" << best_metrics.autotune.repeats << ","
                   << "\"measurement_repeats\":" << best_metrics.measurement.repeats << ","
                   << "\"trials_run\":" << trials_run << ","

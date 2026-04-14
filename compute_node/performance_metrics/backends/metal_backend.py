@@ -17,6 +17,15 @@ import subprocess
 import sys
 from pathlib import Path
 
+from compute_node.compute_methods.fixed_matrix_vector_multiplication import (
+    METAL_AIR_PATH,
+    METAL_BUILD_DIR,
+    METAL_DIR,
+    METAL_EXECUTABLE_PATH,
+    METAL_HOST_SOURCE_PATH,
+    METAL_KERNEL_SOURCE_PATH,
+    METAL_LIBRARY_PATH,
+)
 from models import (
     DEFAULT_AUTOTUNE_REPEATS,
     DEFAULT_MEASUREMENT_REPEATS,
@@ -29,13 +38,6 @@ from path_utils import sanitize_text, to_relative_cli_path, to_relative_string
 from scoring import linear_time_score
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-METAL_DIR = ROOT_DIR / "fixed_matrix_vector_multiplication" / "metal"
-METAL_HOST_SOURCE_PATH = METAL_DIR / "fmvm_metal_runner.mm"
-METAL_KERNEL_SOURCE_PATH = METAL_DIR / "fmvm_metal_kernels.metal"
-METAL_BUILD_DIR = METAL_DIR / "build"
-METAL_EXECUTABLE_PATH = METAL_BUILD_DIR / "fmvm_metal_runner"
-METAL_AIR_PATH = METAL_BUILD_DIR / "fmvm_metal_kernels.air"
-METAL_LIBRARY_PATH = METAL_BUILD_DIR / "fmvm_metal_kernels.metallib"
 
 
 def _relative_project_path(path: Path) -> str:
@@ -176,6 +178,19 @@ class MetalBackend:
         force_rebuild: bool = False,
     ) -> BackendResult:
         """Run the Metal executable once and return the best configuration it found."""
+
+        if spec.accumulation_precision != "fp32":
+            return BackendResult(
+                backend=self.name,
+                available=False,
+                selected_config=None,
+                autotune_trial=None,
+                best_trial=None,
+                trials=[],
+                notes=[
+                    f"Metal backend currently supports only fp32 accumulation; requested {spec.accumulation_precision}."
+                ],
+            )
 
         available, message = self.probe()
         notes = [message]
