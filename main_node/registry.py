@@ -7,8 +7,8 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-from common.types import ComputePerformanceSummary, HardwareProfile
-from app.constants import RUNTIME_ROLE_CLIENT, RUNTIME_ROLE_WORKER
+from common.types import ComputePerformanceSummary, HardwareProfile, MethodPerformanceSummary
+from app.constants import METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION, RUNTIME_ROLE_CLIENT, RUNTIME_ROLE_WORKER
 from app.trace_utils import trace_function
 
 
@@ -40,6 +40,7 @@ class WorkerHardwareCapability:
     worker_peer_id: str
     worker_runtime_id: str
     worker_node_name: str
+    method: str
     hardware_type: str
     effective_gflops: float
     rank: int
@@ -85,21 +86,33 @@ class ClusterRegistry:
                 sock=sock,
             )
             self._workers[peer_id] = connection
-            for reported_hardware in performance.ranked_hardware:
-                hardware_id = f"hardware:{self._next_hardware_id}"
-                self._next_hardware_id += 1
-                worker_hardware = WorkerHardwareCapability(
-                    hardware_id=hardware_id,
-                    worker_peer_id=peer_id,
-                    worker_runtime_id=runtime_id,
-                    worker_node_name=node_name,
-                    hardware_type=reported_hardware.hardware_type,
-                    effective_gflops=reported_hardware.effective_gflops,
-                    rank=reported_hardware.rank,
-                )
-                self._worker_hardware[hardware_id] = worker_hardware
-                connection.hardware_ids.append(hardware_id)
-                self._total_effective_gflops += reported_hardware.effective_gflops
+            method_summaries = list(performance.method_summaries)
+            if not method_summaries and performance.ranked_hardware:
+                method_summaries = [
+                    MethodPerformanceSummary(
+                        method=METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
+                        hardware_count=performance.hardware_count,
+                        ranked_hardware=list(performance.ranked_hardware),
+                    )
+                ]
+
+            for method_summary in method_summaries:
+                for reported_hardware in method_summary.ranked_hardware:
+                    hardware_id = f"hardware:{self._next_hardware_id}"
+                    self._next_hardware_id += 1
+                    worker_hardware = WorkerHardwareCapability(
+                        hardware_id=hardware_id,
+                        worker_peer_id=peer_id,
+                        worker_runtime_id=runtime_id,
+                        worker_node_name=node_name,
+                        method=method_summary.method,
+                        hardware_type=reported_hardware.hardware_type,
+                        effective_gflops=reported_hardware.effective_gflops,
+                        rank=reported_hardware.rank,
+                    )
+                    self._worker_hardware[hardware_id] = worker_hardware
+                    connection.hardware_ids.append(hardware_id)
+                    self._total_effective_gflops += reported_hardware.effective_gflops
         return connection
 
     @trace_function
@@ -215,9 +228,12 @@ class ClusterRegistry:
             return len(self._workers) + len(self._clients)
 
     @trace_function
-    def list_worker_hardware(self) -> list[WorkerHardwareCapability]:
+    def list_worker_hardware(self, method: str | None = None) -> list[WorkerHardwareCapability]:
         with self._lock:
-            return list(self._worker_hardware.values())
+            items = list(self._worker_hardware.values())
+        if method is None:
+            return items
+        return [item for item in items if item.method == method]
 
     @trace_function
     def count_registered_hardware(self) -> int:

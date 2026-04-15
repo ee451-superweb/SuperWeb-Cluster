@@ -20,13 +20,18 @@ from compute_node.compute_methods.fixed_matrix_vector_multiplication import (
     DX12_EXECUTABLE_PATH,
     FMVM_METHOD_DIR,
 )
-from compute_node.input_matrix import build_dataset_layout, build_input_matrix_spec, dataset_is_generated
+from compute_node.input_matrix.fixed_matrix_vector_multiplication import (
+    build_dataset_layout,
+    build_input_matrix_spec,
+    dataset_is_generated,
+)
+from compute_node.performance_metrics.fixed_matrix_vector_multiplication.config import DATASET_DIR as FMVM_DATASET_DIR
 from compute_node.performance_summary import RuntimeProcessorInventory, RuntimeProcessorProfile, load_runtime_processor_inventory
 from app.constants import METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION
 from wire.runtime import TaskAssign, TaskResult
 
 ROOT_DIR = Path(__file__).resolve().parent
-INPUT_MATRIX_GENERATED_DIR = ROOT_DIR / "input_matrix" / "generated"
+INPUT_MATRIX_GENERATED_DIR = FMVM_DATASET_DIR
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,9 +162,9 @@ class FixedMatrixVectorTaskExecutor:
         dataset_root: Path | None = None,
     ) -> None:
         self.inventory = inventory or load_runtime_processor_inventory()
-        self.spec = build_input_matrix_spec()
+        self.spec = build_input_matrix_spec(default_variant="runtime")
         self.dataset_root = INPUT_MATRIX_GENERATED_DIR if dataset_root is None else Path(dataset_root)
-        self.dataset_layout = build_dataset_layout(self.dataset_root)
+        self.dataset_layout = build_dataset_layout(self.dataset_root, prefix="runtime_")
         self._dx12_runner = self._build_dx12_resident_runner()
 
     def close(self) -> None:

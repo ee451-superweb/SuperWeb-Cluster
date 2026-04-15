@@ -1,18 +1,26 @@
 # Performance Metrics
 
 This workspace is the local compute-characterization stage for
-`superweb-cluster` Sprint 1.
+`superweb-cluster` Sprint 3.
 
 Its job is to answer:
 
 - what hardware backends are available on this machine
-- what their best measured GFLOPS are for the fixed workload
+- what their best measured GFLOPS are for each supported compute method
 - how those backends should be ranked for later scheduling decisions
 
-This workspace does not own the input-file format. It consumes the shared
-matrix/vector dataset described in `../input_matrix/README.md`.
-It also does not own the method implementations themselves. Shared CPU/CUDA/
-DX12/Metal runners live under `../compute_methods/`.
+This workspace now uses a method-scoped layout:
+
+- `performance_metrics/fixed_matrix_vector_multiplication/`
+  - FMVM-specific benchmark result/config workspace
+- `performance_metrics/spatial_convolution/`
+  - Conv2D-specific benchmark result/config workspace
+- top-level `performance_metrics/benchmark.py`
+  - multi-method orchestrator that can run one method or both
+
+The benchmark consumes method-scoped datasets from `../input_matrix/README.md`.
+It also does not own the low-level method implementations themselves. Shared
+CPU/CUDA/DX12/Metal runners live under `../compute_methods/`.
 
 `bootstrap.py` is still the top-level project entrypoint. In normal use, this
 benchmark workspace is invoked automatically when
@@ -32,19 +40,25 @@ The current flow is:
 5. The main node stores those reported backends as worker-hardware capability objects.
 6. Sprint 2 scheduling will use that capability inventory to distribute load.
 
-## Fixed Workload
+## Supported Methods
 
-The benchmark currently measures one method:
+The benchmark currently measures two methods:
 
 - `fixed_matrix_vector_multiplication`
+- `spatial_convolution`
 
-The default fixed problem is:
+The default FMVM problem is:
 
 - `A`: `16384 x 32768` float32, exactly `2 GiB`
 - `x`: `32768` float32
 - operation: `y = A x`
 
-The production benchmark keeps this shape fixed so different machines compare
+The default Conv2D problem uses:
+
+- autotune workload: `256 x 256`, `32 -> 64`, `k=3`, `pad=1`, `stride=1`
+- runtime workload: `2048 x 2048`, `128 -> 256`, `k=3`, `pad=1`, `stride=1`
+
+The production benchmark keeps these shapes fixed so different machines compare
 the same work.
 
 The fixed FMVM workload now runs in two stages:
@@ -67,15 +81,16 @@ same order.
 
 ## Control Flow
 
-`benchmark.py` acts as the orchestrator:
+Top-level `benchmark.py` acts as the orchestrator:
 
-1. resolve the benchmark shape
-2. check whether the shared `A.bin` and `x.bin` already exist
-3. call `../input_matrix/generate.py` only if the dataset is missing or mismatched
-4. run all enabled backend adapters
-5. autotune each backend config with the short repeat count
-6. rerun the winning config with the long repeat count
-7. rank backends and write `result.json`
+1. select one method or all methods
+2. resolve each method's dataset workspace
+3. call the matching method-local generator only if the dataset is missing or mismatched
+4. run all enabled backend adapters for that method
+5. autotune each backend config
+6. rerun the winning config with the final measurement policy
+7. normalize the output into one shared `result.json` schema
+8. write both the aggregate report and the per-method `result.json` files
 
 On Windows, the default GPU routing is intentionally simple:
 
@@ -168,55 +183,35 @@ On Windows, the default GPU routing is intentionally simple:
 
 ## Output Schema
 
-`result.json` stores:
+`result.json` now uses one shared schema for every method:
 
-- `schema_version`
-  - current benchmark result schema version
-- `host`
-  - local platform metadata such as `system`, `release`, and `machine`
-- `workload`
-  - the fixed repeat policy used by every backend
-- `hardware_inventory`
-  - one probe result per backend
-  - records whether each backend looked usable before running workloads
-- `detected_backends`
-  - backends whose probe step succeeded on this machine
-- `usable_backends`
-  - backends that completed the benchmark successfully
-- `backend_results`
-  - one best entry per backend such as `cpu` or `cuda`
+- top level
+  - `device_overview`
+    - host CPU name, GPU list, and memory configuration
+  - `methods`
+    - one entry per compute method
+
+Each method entry stores:
+
+- `dataset`
+- `workload.autotune_plan`
+- `workload.measurement_plan`
 - `ranking`
-  - fastest to slowest among successful backends
 - `best_backend`
-  - the first item in `ranking`
+- `backends`
 
-Each `hardware_inventory` entry stores:
+Each backend entry stores:
 
-- `probe_available`
-  - whether that backend looked runnable during hardware detection
-- `probe_message`
-  - short human-readable probe detail
-
-Each `backend_results` entry stores:
-
-- `available`
-  - whether that backend finished the benchmark successfully
+- `device_name`
 - `rank`
-  - placement among successful backends
-- `best_config`
-  - the autotuned config that won for that backend
+- `autotune_plan`
 - `autotune_result`
-  - average latency and GFLOPS from the short autotune phase used for selection
+- `best_config`
 - `best_result`
-  - average latency, GFLOPS, checksum, and score from the `20`-repeat
-    measurement phase
-- `notes`
-  - backend-level notes such as compile or probe details
-- `trial_notes`
-  - device-specific notes for the best trial
+- concise `notes`
 
-That file is also the source for the compact runtime registration summary sent
-by compute nodes to the main node.
+That aggregate file is also the source for the compact runtime registration
+summary sent by compute nodes to the main node.
 
 ## Usage
 
@@ -272,10 +267,10 @@ compute_node\compute_methods\fixed_matrix_vector_multiplication\dx12\build\fmvm_
   --iteration-count 1
 ```
 
-Generate the shared dataset without running the benchmark:
+Generate the FMVM dataset without running the benchmark:
 
 ```bash
-python "compute_node/input_matrix/generate.py"
+python "compute_node/input_matrix/fixed_matrix_vector_multiplication/generate.py"
 ```
 
 Manually tune the generator for a faster one-time dataset build:

@@ -8,12 +8,14 @@ from collections.abc import Callable
 
 from common.hardware import collect_hardware_profile
 from common.types import DiscoveryResult
-from compute_node.performance_summary import load_runtime_processor_inventory
+from compute_node.executor import TaskExecutionRouter
+from compute_node.handlers import build_default_method_handlers
+from compute_node.performance_summary import load_compute_performance_summary, load_runtime_processor_inventory
 from compute_node.heartbeat import WorkerHeartbeat
 from compute_node.session import WorkerSession
-from compute_node.task_executor import FixedMatrixVectorTaskExecutor
 from app.config import AppConfig
 from app.constants import (
+    METHOD_SPATIAL_CONVOLUTION,
     RUNTIME_MSG_HEARTBEAT,
     RUNTIME_MSG_HEARTBEAT_OK,
     RUNTIME_MSG_TASK_ACCEPT,
@@ -46,7 +48,7 @@ class ComputeNodeRuntime:
         logger: logging.Logger,
         should_stop: Callable[[], bool] | None = None,
         session_factory: Callable[..., WorkerSession] | None = None,
-        task_executor_factory: Callable[..., FixedMatrixVectorTaskExecutor] | None = None,
+        task_executor_factory: Callable[..., TaskExecutionRouter] | None = None,
     ) -> None:
         self.config = config
         self.main_node_host = main_node_host
@@ -55,7 +57,7 @@ class ComputeNodeRuntime:
         self.should_stop = should_stop or (lambda: False)
         self.heartbeat_state = WorkerHeartbeat()
         self._session_factory = session_factory or WorkerSession
-        self._task_executor_factory = task_executor_factory or FixedMatrixVectorTaskExecutor
+        self._task_executor_factory = task_executor_factory or (lambda: TaskExecutionRouter(build_default_method_handlers()))
 
     @trace_function
     def _build_session(self) -> WorkerSession:
@@ -73,9 +75,17 @@ class ComputeNodeRuntime:
         task_executor = None
         try:
             hardware = collect_hardware_profile(self.main_node_host, self.main_node_port)
-            runtime_inventory = load_runtime_processor_inventory()
-            performance = runtime_inventory.to_summary()
-            task_executor = self._task_executor_factory(runtime_inventory)
+            legacy_inventory = load_runtime_processor_inventory()
+            performance = legacy_inventory.to_legacy_summary()
+            multi_method_summary = load_compute_performance_summary()
+            if multi_method_summary.method_summaries:
+                performance = multi_method_summary
+            try:
+                task_executor = self._task_executor_factory()
+            except TypeError:
+                # Backward compatibility for older tests/factories that still
+                # expect one inventory-like constructor argument.
+                task_executor = self._task_executor_factory(None)
             session.connect()
             register_ok = session.register(self.config.node_name, hardware, performance)
             assigned_node_id = register_ok.node_id or self.config.node_name
@@ -92,9 +102,9 @@ class ComputeNodeRuntime:
                 flush=True,
             )
             print(
-                "Reported compute backends "
-                f"count={performance.hardware_count} "
-                f"ranking={[f'{item.hardware_type}:{item.effective_gflops:.3f}' for item in performance.ranked_hardware]}",
+                "Reported compute methods "
+                f"count={len(performance.method_summaries) or 1} "
+                f"methods={[summary.method for summary in performance.method_summaries] or ['fixed_matrix_vector_multiplication']}",
                 flush=True,
             )
 
@@ -146,7 +156,10 @@ class ComputeNodeRuntime:
                     print(
                         f"{RUNTIME_MSG_TASK_ACCEPT} from {self.config.node_name} "
                         f"id={assigned_node_id} task_id={task.task_id} "
-                        f"rows={task.row_start}:{task.row_end} iteration_count={task.iteration_count}",
+                        f"method={task.method} "
+                        f"rows={task.row_start}:{task.row_end} "
+                        f"oc={task.start_oc}:{task.end_oc} "
+                        f"iteration_count={task.iteration_count}",
                         flush=True,
                     )
                     try:
@@ -178,12 +191,22 @@ class ComputeNodeRuntime:
                             row_end=task_result.row_end,
                             output_vector=task_result.output_vector,
                             iteration_count=task_result.iteration_count,
+                            start_oc=task_result.start_oc,
+                            end_oc=task_result.end_oc,
+                            output_h=task_result.output_h,
+                            output_w=task_result.output_w,
+                            result_artifact_id=task_result.result_artifact_id,
                         )
+                    )
+                    result_scope = (
+                        f"oc={task_result.start_oc}:{task_result.end_oc}"
+                        if task.method == METHOD_SPATIAL_CONVOLUTION
+                        else f"rows={task_result.row_start}:{task_result.row_end}"
                     )
                     print(
                         f"{RUNTIME_MSG_TASK_RESULT} from {self.config.node_name} "
                         f"id={assigned_node_id} task_id={task.task_id} "
-                        f"rows={task_result.row_start}:{task_result.row_end} "
+                        f"method={task.method} {result_scope} "
                         f"iteration_count={task_result.iteration_count}",
                         flush=True,
                     )

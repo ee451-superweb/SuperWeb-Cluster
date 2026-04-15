@@ -1,4 +1,4 @@
-"""Streaming dataset generation helpers for `compute_node/input_matrix/`."""
+"""Shared streaming float32 generation helpers for `compute_node/input_matrix/`."""
 
 from __future__ import annotations
 
@@ -127,7 +127,7 @@ def _write_float32_file_parallel(
         raise
 
 
-def _write_float32_file(
+def write_float32_file(
     path: Path,
     total_values: int,
     seed: int,
@@ -194,7 +194,7 @@ def generate_dataset(
     layout.root_dir.mkdir(parents=True, exist_ok=True)
     chunk_values = max(chunk_values or DEFAULT_CHUNK_VALUES, spec.cols)
 
-    matrix_sha256 = _write_float32_file(
+    matrix_sha256 = write_float32_file(
         layout.matrix_path,
         total_values=spec.rows * spec.cols,
         seed=DEFAULT_MATRIX_SEED,
@@ -203,7 +203,7 @@ def generate_dataset(
         progress=progress,
         worker_count=generator_workers,
     )
-    vector_sha256 = _write_float32_file(
+    vector_sha256 = write_float32_file(
         layout.vector_path,
         total_values=spec.cols,
         seed=DEFAULT_VECTOR_SEED,
@@ -242,3 +242,9 @@ def generate_dataset(
         },
     }
     layout.meta_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+
+
+__all__ = [
+    "generate_dataset",
+    "write_float32_file",
+]

@@ -20,11 +20,11 @@ from __future__ import annotations
 
 import os
 
-from backends.cpu_backend import CpuBackend
-from backends.cuda_backend import CudaBackend
-from backends.dx12_backend import Dx12Backend
-from backends.metal_backend import MetalBackend
-from backends.windows_gpu_inventory import (
+from .cpu_backend import CpuBackend
+from .cuda_backend import CudaBackend
+from .dx12_backend import Dx12Backend
+from .metal_backend import MetalBackend
+from .windows_gpu_inventory import (
     detect_non_nvidia_windows_adapter,
     detect_nvidia_windows_adapter,
 )

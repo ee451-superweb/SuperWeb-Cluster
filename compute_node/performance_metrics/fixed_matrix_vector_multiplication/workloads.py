@@ -20,8 +20,17 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from compute_node.input_matrix import DEFAULT_COLS, DEFAULT_ROWS
-from models import BenchmarkSpec, DEFAULT_ACCUMULATION_PRECISION, SUPPORTED_ACCUMULATION_PRECISIONS
+from compute_node.input_matrix.fixed_matrix_vector_multiplication import (
+    DEFAULT_COLS,
+    DEFAULT_ROWS,
+    TEST_COLS,
+    TEST_ROWS,
+)
+from compute_node.performance_metrics.fixed_matrix_vector_multiplication.models import (
+    BenchmarkSpec,
+    DEFAULT_ACCUMULATION_PRECISION,
+    SUPPORTED_ACCUMULATION_PRECISIONS,
+)
 
 # These scoring constants keep the score linear while still leaving room for
 # slower CPUs and future accelerators to spread out meaningfully.
@@ -33,6 +42,7 @@ def build_benchmark_spec(
     *,
     rows: int | None = None,
     cols: int | None = None,
+    default_variant: str = "runtime",
     ideal_seconds: float = DEFAULT_IDEAL_SECONDS,
     zero_score_seconds: float = DEFAULT_ZERO_SCORE_SECONDS,
     accumulation_precision: str = DEFAULT_ACCUMULATION_PRECISION,
@@ -44,8 +54,14 @@ def build_benchmark_spec(
     full production-sized matrix.
     """
 
-    resolved_rows = DEFAULT_ROWS if rows is None else rows
-    resolved_cols = DEFAULT_COLS if cols is None else cols
+    if rows is None:
+        resolved_rows = TEST_ROWS if default_variant == "test" else DEFAULT_ROWS
+    else:
+        resolved_rows = rows
+    if cols is None:
+        resolved_cols = TEST_COLS if default_variant == "test" else DEFAULT_COLS
+    else:
+        resolved_cols = cols
 
     if resolved_rows <= 0 or resolved_cols <= 0:
         raise ValueError("rows and cols must be positive")

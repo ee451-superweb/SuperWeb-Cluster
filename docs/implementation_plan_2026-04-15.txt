@@ -1,0 +1,373 @@
+SuperWeb-Cluster 多计算方法集成实施计划
+时间戳: 2026-04-15
+
+背景:
+
+- 当前 `SuperWeb-Cluster` 的 runtime、调度器、聚合器、task 协议和性能摘要默认都只面向
+  `fixed_matrix_vector_multiplication`。
+- `SuperWeb-LZ` 已经实现了以 `Conv2D` 为核心的新计算路径，并且该路径不是单纯替换 kernel，
+  而是连带改变了任务切分方式、数据布局和结果聚合方式。
+- 本轮目标不是替换现有 `fmvm`，而是在不破坏现有架构的前提下，把 `conv2d` 作为第二种 method
+  并列接入。
+
+本轮目标:
+
+1. 保留现有 `fixed_matrix_vector_multiplication` 完整可用。
+2. 新增 `spatial_convolution` method，并支持与 `fmvm` 并列存在。
+3. 让 compute node 在注册时同时上报两种 method 的 benchmark 结果。
+4. 让 main node 根据 client request 的 `method` 自动选择对应的调度和分片比例。
+5. 将 compute-node 主循环从 method-specific 执行细节中解耦出去。
+
+明确不在本轮实现范围:
+
+1. 不实现最终大结果文件回传给 client 的 side-channel。
+2. 不在本轮解决 `worker -> main` / `main -> client` 的大文件传输协议。
+3. 不追求跨版本 runtime 协议兼容；允许 main/worker 同步升级。
+
+核心设计结论:
+
+1. 方法维度必须成为一等公民。
+   - 仅靠在当前 `TaskAssign` 上继续追加零散字段，会让 `fmvm` 和 `conv2d` 互相污染。
+   - 应该把 method-specific payload 和 method-specific performance summary 明确建模。
+
+2. `compute_node/runtime.py` 应该只保留:
+   - session 收发
+   - heartbeat 响应
+   - task accept / fail / result 的通用控制流
+   - method handler 查找与调用
+
+3. `compute_node` 需要 method handler 层。
+   - handler 负责某一种 method 的任务校验、执行和结果封装。
+   - runtime 主循环不再直接依赖 `FixedMatrixVectorTaskExecutor`。
+
+4. `performance_metrics` 需要按 method 分目录。
+   - 每个 method 独立 benchmark、独立 result.json、独立 dataset/spec。
+   - 顶层 `benchmark.py` 只负责命令行分发和汇总。
+
+5. task decomposition 应该由 method 自己定义。
+   - `fmvm` 继续按行切分。
+   - `spatial_convolution` 采用 `SuperWeb-LZ` 的思路，按连续 `output channel` 区间切分。
+   - 切分比例由该 method 对应的 GFLOPS 决定，而不是复用另一种 method 的性能数据。
+
+6. main node 不必把“自己参与计算”硬编码进 runtime 主链路。
+   - 如果后期需要 main 也参与计算，优先把它建模成一个本地 compute-node 进程。
+   - 这样可以复用统一注册、调度、协议和监控逻辑，避免在 main runtime 里长期保留特殊分支。
+
+推荐目录调整:
+
+1. `compute_node/compute_methods/fixed_matrix_vector_multiplication/`
+   - 保留现有 fmvm 代码
+   - 新增 `handler.py`
+
+2. `compute_node/compute_methods/spatial_convolution/`
+   - 迁入 `SuperWeb-LZ` 的 conv2d runners / dataset helpers / method-specific runtime logic
+   - 新增 `handler.py`
+
+3. `compute_node/performance_metrics/`
+   - 改成:
+     - `fixed_matrix_vector_multiplication/`
+     - `spatial_convolution/`
+     - 顶层 `benchmark.py`
+     - 顶层汇总工具
+
+4. `compute_node` 顶层推荐重命名:
+   - `handlers.py` -> `method_handlers.py`
+   - `executor.py` -> `task_router.py`
+
+说明:
+
+- 以上重命名是为了让文件职责更直接。
+- 如果希望减少路径 churn，可以先保留原文件名，把它们实现成:
+  - `handlers.py`: handler registry / factory
+  - `executor.py`: 通用 task router
+- 但从长期可读性看，`method_handlers.py` 和 `task_router.py` 更清晰。
+
+建议的 handler 抽象:
+
+1. 每个 method 提供一个 handler 类，至少实现:
+   - `method_name`
+   - `build_registration_summary()`
+   - `validate_task(task)`
+   - `execute_task(task)`
+   - `close()`
+
+2. 顶层 registry 提供:
+   - `register_handler(handler)`
+   - `get_handler(method_name)`
+   - `build_registration_payload()`
+   - `close_all()`
+
+3. `runtime.py` 负责:
+   - 收到 `TASK_ASSIGN`
+   - 读取 `task.method`
+   - 找到对应 handler
+   - 发送 `TASK_ACCEPT`
+   - 调用 handler 执行
+   - 将 method-specific 结果包装成通用 `TASK_RESULT`
+
+协议层改造建议:
+
+1. 新增 method-aware performance summary
+
+当前问题:
+- `ComputePerformanceSummary` 只有一组 `ranked_hardware`，默认隐含它是 `fmvm` 的结果。
+- 如果直接把 `conv2d` 的结果也塞进去，main node 无法知道这组 GFLOPS 属于哪个 method。
+
+建议结构:
+
+- 新增 `MethodPerformanceSummary`
+  - `method`
+  - `hardware_count`
+  - `ranked_hardware`
+
+- `RegisterWorker`
+  - 从单个 `ComputePerformanceSummary performance`
+  - 改为 `repeated MethodPerformanceSummary method_performance`
+
+2. 新增 method-specific task payload
+
+建议新增:
+
+- `MatvecTaskSpec`
+- `Conv2dTaskSpec`
+- `MatvecTaskResult`
+- `Conv2dTaskResult`
+
+建议语义:
+
+- `MatvecTaskSpec`
+  - `row_start`
+  - `row_end`
+  - `vector_length`
+  - `vector_data`
+  - `iteration_count`
+
+- `Conv2dTaskSpec`
+  - `h`
+  - `w`
+  - `c_in`
+  - `c_out`
+  - `k`
+  - `pad`
+  - `stride`
+  - `start_oc`
+  - `end_oc`
+  - `input_object_id` 或 `dataset_id`
+  - `weight_slice`
+
+- `Conv2dTaskResult`
+  - `start_oc`
+  - `end_oc`
+  - `out_h`
+  - `out_w`
+  - `output_tensor` 或 `artifact_id`
+
+3. `TaskAssign` / `TaskResult` 的组织方式
+
+推荐做法:
+- 保留通用头部:
+  - `request_id`
+  - `node_id`
+  - `task_id`
+  - `method`
+  - `object_id`
+  - `stream_id`
+  - `timestamp_ms`
+- 再挂 method-specific payload
+
+进一步建议:
+- 不要把 method payload 再包成一层裸 `bytes` 让上层自己二次反序列化。
+- 更推荐用 protobuf 的 typed 子消息:
+  - `TaskAssignControl` + `oneof task_payload`
+  - `TaskResultControl` + `oneof result_payload`
+  - `ClientRequestControl` + `oneof request_payload`
+- 第一层负责控制信息和路由:
+  - `method`
+  - `request_id`
+  - `task_id`
+  - `client_id` / `worker_id`
+  - `timestamp_ms`
+  - `iteration_count`
+- 第二层负责 method-specific 语义:
+  - `fmvm` 的 `row range`、`vector`
+  - `conv2d` 的 `oc range`、尺寸、权重 slice、dataset/object 引用
+
+原因:
+- 这样可以把“控制面状态机”和“计算方法语义”解耦。
+- 后续即使把大数据搬到独立 TCP 数据面，控制层也不用再大改。
+- 相比继续扩展 flat 字段，typed payload 更容易验证、测试和演进。
+
+不推荐:
+- 继续给现在的 flat `TaskAssign` 和 `TaskResult` 追加更多 `row_start/start_oc/vector/weight`
+  混合字段
+
+实现提醒:
+- 仓库里虽然保留了 `.proto`，但当前 Python 侧仍有手写编解码器。
+- 因此协议调整需要同步更新:
+  - `wire/proto/superweb_cluster_runtime.proto`
+  - `wire/runtime.py`
+- 两边必须一起演进，不能只改 schema 文件。
+
+compute node 重构计划:
+
+Phase 1. 引入 method handler 框架
+- 新建 handler registry
+- 将 `runtime.py` 改成“主循环 + registry 调用”
+- 把 `FixedMatrixVectorTaskExecutor` 的 method-specific 部分搬进
+  `compute_methods/fixed_matrix_vector_multiplication/handler.py`
+- `compute_node/task_executor.py` 暂时保留为兼容层，待主链路稳定后再删
+
+Phase 2. 接入 `spatial_convolution`
+- 新建 `compute_methods/spatial_convolution/`
+- 迁入 `SuperWeb-LZ` 的 CPU/CUDA/Metal runners
+- 增加 conv2d dataset/spec/layout helpers
+- 编写 `spatial_convolution/handler.py`
+- 本地执行先以“各节点预生成 runtime dataset”为前提
+
+Phase 3. worker registration 支持多 method
+- `performance_summary.py` 由“单 method 汇总”改成“按 method 汇总”
+- worker 注册时上报:
+  - `fmvm` benchmark summary
+  - `spatial_convolution` benchmark summary
+- main node registry 记录:
+  - worker
+  - method
+  - hardware_type
+  - effective_gflops
+  的三维关系
+
+main node 重构计划:
+
+Phase 4. method-aware request handling
+- `main_node/runtime.py` 不再只检查 `METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION`
+- 改成:
+  - 识别 request.method
+  - 选择对应 dispatcher
+  - 选择对应 aggregator
+  - 选择对应 task builder
+
+Phase 5. method-aware dispatch ratio
+- `dispatch_fixed_matrix_vector_multiplication()` 保留
+- 新增 `dispatch_spatial_convolution()`
+- 按 method 过滤 worker 的 GFLOPS:
+  - client 请求 `fmvm` 时只看 `fmvm` GFLOPS
+  - client 请求 `spatial_convolution` 时只看 `conv2d` GFLOPS
+
+Phase 5a. method-specific task decomposition
+- `fmvm`
+  - 继续按连续 `row` 区间切分
+- `spatial_convolution`
+  - 参照 `SuperWeb-LZ`，按连续 `output channel` 区间切分
+  - 每个 worker 获得 `[start_oc, end_oc)` 的连续范围
+  - 默认按该 method 的 GFLOPS 比例分片
+  - 如有消息大小约束，再在一个 worker 的通道区间内部继续拆成多个子任务
+- main node 本地参与计算不作为当前架构必选项
+  - 如果未来需要，优先通过“本地拉起 compute node”实现，而不是在 main runtime 里内建特殊执行路径
+
+Phase 6. method-aware aggregation
+- 保留现有 fmvm 向量聚合器
+- 新增 conv2d 通道切片聚合器
+- main node 根据 method 选择聚合器
+
+benchmark 重构计划:
+
+Phase 7. `performance_metrics` 多方法化
+- 目录拆分:
+  - `performance_metrics/fixed_matrix_vector_multiplication/`
+  - `performance_metrics/spatial_convolution/`
+- 顶层 `benchmark.py` 支持:
+  - `--method fmvm`
+  - `--method spatial_convolution`
+  - `--method all`
+
+Phase 7a. benchmark / dataset 入口对称化
+- `performance_metrics/benchmark.py` 和 `input_matrix/generate.py` 的 method 入口保持一致
+- 两边都支持:
+  - 单独跑 `fmvm`
+  - 单独跑 `spatial_convolution`
+  - 顺序跑两个 method
+- 顶层 benchmark 默认值不应长期偏向某一个 method
+  - 可以统一改成 `all`
+  - 或在文档中明确一个项目级默认，并让 benchmark / dataset generator 保持一致
+- 目标是让使用者在“生成数据”和“跑 benchmark”时，看到完全对称的 CLI 体验
+
+Phase 8. benchmark 输出格式
+- 每个 method 生成自己的 `result.json`
+- 顶层汇总器生成一个 method-indexed summary，供 worker 注册使用
+
+建议的 summary 形状:
+- `method_results["fixed_matrix_vector_multiplication"]`
+- `method_results["spatial_convolution"]`
+
+大文件传输问题的处理策略:
+
+当前事实:
+- 现有 protobuf frame 上限是 `4 MB`
+- `Conv2D` runtime 输出远大于 `4 MB`
+- 因此即使 conv2d 逻辑接入完成，`TaskResult.output_vector` 也不足以承载大输出
+
+本轮策略:
+- 不在本轮解决
+- 先让协议支持:
+  - `output_tensor` 小结果
+  - 或 `artifact_id`
+
+后续专门做一轮:
+- worker -> main 的 artifact/data channel
+- main -> client 的 artifact/data channel
+- protobuf 只负责协商 `artifact_id`、元数据和状态
+
+测试计划:
+
+1. 协议测试
+   - worker 注册双 method summary 编码解码
+   - `TaskAssign` / `TaskResult` 的 fmvm 和 conv2d payload 编码解码
+
+2. compute node 测试
+   - runtime 收到不同 method 时，能正确路由到对应 handler
+   - 不支持的 method 返回 `TASK_FAIL`
+
+3. main node 测试
+   - `fmvm` 请求只使用 `fmvm` GFLOPS 分配
+   - `conv2d` 请求只使用 `conv2d` GFLOPS 分配
+
+4. benchmark 测试
+   - `--method fmvm`
+   - `--method spatial_convolution`
+   - `--method all`
+   三种模式都能正确落盘并被注册流程读取
+
+实施顺序建议:
+
+1. 写入 method-aware 文档与协议草案
+2. 先重构 compute node handler 框架
+3. 再重构 performance summary 为多 method
+4. 再改 main node 的 registry / dispatch / aggregation
+5. 最后接入 `spatial_convolution`
+6. 大文件 side-channel 放到下一阶段
+
+本计划对应的第一批落地文件:
+
+1. `compute_node/method_handlers.py` 或保留 `compute_node/handlers.py`
+2. `compute_node/task_router.py` 或保留 `compute_node/executor.py`
+3. `compute_node/compute_methods/fixed_matrix_vector_multiplication/handler.py`
+4. `compute_node/compute_methods/spatial_convolution/handler.py`
+5. `compute_node/performance_summary.py`
+6. `compute_node/performance_metrics/benchmark.py`
+7. `main_node/runtime.py`
+8. `main_node/dispatcher.py`
+9. `main_node/aggregator.py`
+10. `main_node/registry.py`
+11. `wire/proto/superweb_cluster_runtime.proto`
+12. `wire/runtime.py`
+
+检查口径:
+
+- 如果 reviewer 认为“应该最小化文件重命名”，则保留 `handlers.py` / `executor.py` 原名。
+- 如果 reviewer 认为“应该优先提高长期可读性”，则在第一阶段就完成重命名。
+- 无论是否重命名，最重要的是把:
+  - method registry
+  - method handler
+  - method-aware performance summary
+  - method-aware task payload
+  四层明确建立起来。

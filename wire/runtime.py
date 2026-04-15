@@ -8,7 +8,7 @@ import struct
 import time
 from dataclasses import dataclass
 
-from common.types import ComputeHardwarePerformance, ComputePerformanceSummary, HardwareProfile
+from common.types import ComputeHardwarePerformance, ComputePerformanceSummary, HardwareProfile, MethodPerformanceSummary
 from app.constants import (
     MAIN_NODE_NAME,
     RUNTIME_MSG_CLIENT_JOIN,
@@ -125,6 +125,7 @@ class ClientResponse:
     client_count: int
     client_id: str
     iteration_count: int
+    result_artifact_id: str = ""
 
 
 @dataclass(slots=True)
@@ -161,6 +162,16 @@ class TaskAssign:
     vector_length: int
     vector_data: bytes
     iteration_count: int
+    start_oc: int = 0
+    end_oc: int = 0
+    tensor_h: int = 0
+    tensor_w: int = 0
+    channels_in: int = 0
+    channels_out: int = 0
+    kernel_size: int = 0
+    padding: int = 0
+    stride: int = 1
+    weight_data: bytes = b""
 
 
 @dataclass(slots=True)
@@ -200,6 +211,11 @@ class TaskResult:
     output_length: int
     output_vector: bytes
     iteration_count: int
+    start_oc: int = 0
+    end_oc: int = 0
+    output_h: int = 0
+    output_w: int = 0
+    result_artifact_id: str = ""
 
 
 def _encode_varint(value: int) -> bytes:
@@ -384,17 +400,56 @@ def _encode_compute_hardware_performance(payload: ComputeHardwarePerformance) ->
     )
 
 
+def _parse_method_performance_summary(payload: bytes) -> MethodPerformanceSummary:
+    method = ""
+    hardware_count = 0
+    ranked_hardware: list[ComputeHardwarePerformance] = []
+
+    for field_number, wire_type, value in _parse_fields(payload):
+        if field_number == 1:
+            method = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
+        elif field_number == 2:
+            hardware_count = _require_varint(wire_type, value)
+        elif field_number == 3:
+            ranked_hardware.append(_parse_compute_hardware_performance(_require_bytes(wire_type, value)))
+
+    return MethodPerformanceSummary(
+        method=method,
+        hardware_count=hardware_count,
+        ranked_hardware=ranked_hardware,
+    )
+
+
+def _encode_method_performance_summary(payload: MethodPerformanceSummary) -> bytes:
+    parts = [
+        _encode_string_field(1, payload.method),
+        _encode_uint_field(2, payload.hardware_count),
+    ]
+    parts.extend(
+        _encode_message_field(3, _encode_compute_hardware_performance(hardware))
+        for hardware in payload.ranked_hardware
+    )
+    return b"".join(parts)
+
+
 def _parse_compute_performance_summary(payload: bytes) -> ComputePerformanceSummary:
     hardware_count = 0
     ranked_hardware: list[ComputeHardwarePerformance] = []
+    method_summaries: list[MethodPerformanceSummary] = []
 
     for field_number, wire_type, value in _parse_fields(payload):
         if field_number == 1:
             hardware_count = _require_varint(wire_type, value)
         elif field_number == 2:
             ranked_hardware.append(_parse_compute_hardware_performance(_require_bytes(wire_type, value)))
+        elif field_number == 3:
+            method_summaries.append(_parse_method_performance_summary(_require_bytes(wire_type, value)))
 
-    return ComputePerformanceSummary(hardware_count=hardware_count, ranked_hardware=ranked_hardware)
+    return ComputePerformanceSummary(
+        hardware_count=hardware_count,
+        ranked_hardware=ranked_hardware,
+        method_summaries=method_summaries,
+    )
 
 
 def _encode_compute_performance_summary(payload: ComputePerformanceSummary) -> bytes:
@@ -402,6 +457,10 @@ def _encode_compute_performance_summary(payload: ComputePerformanceSummary) -> b
     parts.extend(
         _encode_message_field(2, _encode_compute_hardware_performance(hardware))
         for hardware in payload.ranked_hardware
+    )
+    parts.extend(
+        _encode_message_field(3, _encode_method_performance_summary(method_summary))
+        for method_summary in payload.method_summaries
     )
     return b"".join(parts)
 
@@ -607,6 +666,7 @@ def _parse_client_response(payload: bytes) -> ClientResponse:
     client_count = 0
     client_id = ""
     iteration_count = 1
+    result_artifact_id = ""
 
     for field_number, wire_type, value in _parse_fields(payload):
         if field_number == 1:
@@ -635,6 +695,8 @@ def _parse_client_response(payload: bytes) -> ClientResponse:
             client_id = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
         elif field_number == 13:
             iteration_count = _require_varint(wire_type, value)
+        elif field_number == 14:
+            result_artifact_id = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
 
     return ClientResponse(
         request_id=request_id,
@@ -650,6 +712,7 @@ def _parse_client_response(payload: bytes) -> ClientResponse:
         client_count=client_count,
         client_id=client_id,
         iteration_count=iteration_count,
+        result_artifact_id=result_artifact_id,
     )
 
 
@@ -669,6 +732,7 @@ def _encode_client_response(payload: ClientResponse) -> bytes:
             _encode_uint_field(11, payload.client_count),
             _encode_string_field(12, payload.client_id),
             _encode_uint_field(13, payload.iteration_count),
+            _encode_string_field(14, payload.result_artifact_id),
         ]
     )
 
@@ -686,6 +750,16 @@ def _parse_task_assign(payload: bytes) -> TaskAssign:
     vector_length = 0
     vector_data = b""
     iteration_count = 1
+    start_oc = 0
+    end_oc = 0
+    tensor_h = 0
+    tensor_w = 0
+    channels_in = 0
+    channels_out = 0
+    kernel_size = 0
+    padding = 0
+    stride = 1
+    weight_data = b""
 
     for field_number, wire_type, value in _parse_fields(payload):
         if field_number == 1:
@@ -712,6 +786,26 @@ def _parse_task_assign(payload: bytes) -> TaskAssign:
             vector_data = _require_bytes(wire_type, value)
         elif field_number == 12:
             iteration_count = _require_varint(wire_type, value)
+        elif field_number == 13:
+            start_oc = _require_varint(wire_type, value)
+        elif field_number == 14:
+            end_oc = _require_varint(wire_type, value)
+        elif field_number == 15:
+            tensor_h = _require_varint(wire_type, value)
+        elif field_number == 16:
+            tensor_w = _require_varint(wire_type, value)
+        elif field_number == 17:
+            channels_in = _require_varint(wire_type, value)
+        elif field_number == 18:
+            channels_out = _require_varint(wire_type, value)
+        elif field_number == 19:
+            kernel_size = _require_varint(wire_type, value)
+        elif field_number == 20:
+            padding = _require_varint(wire_type, value)
+        elif field_number == 21:
+            stride = _require_varint(wire_type, value)
+        elif field_number == 22:
+            weight_data = _require_bytes(wire_type, value)
 
     return TaskAssign(
         request_id=request_id,
@@ -726,6 +820,16 @@ def _parse_task_assign(payload: bytes) -> TaskAssign:
         vector_length=vector_length,
         vector_data=vector_data,
         iteration_count=iteration_count,
+        start_oc=start_oc,
+        end_oc=end_oc,
+        tensor_h=tensor_h,
+        tensor_w=tensor_w,
+        channels_in=channels_in,
+        channels_out=channels_out,
+        kernel_size=kernel_size,
+        padding=padding,
+        stride=stride,
+        weight_data=weight_data,
     )
 
 
@@ -744,6 +848,16 @@ def _encode_task_assign(payload: TaskAssign) -> bytes:
             _encode_uint_field(10, payload.vector_length),
             _encode_bytes_field(11, payload.vector_data),
             _encode_uint_field(12, payload.iteration_count),
+            _encode_uint_field(13, payload.start_oc),
+            _encode_uint_field(14, payload.end_oc),
+            _encode_uint_field(15, payload.tensor_h),
+            _encode_uint_field(16, payload.tensor_w),
+            _encode_uint_field(17, payload.channels_in),
+            _encode_uint_field(18, payload.channels_out),
+            _encode_uint_field(19, payload.kernel_size),
+            _encode_uint_field(20, payload.padding),
+            _encode_uint_field(21, payload.stride),
+            _encode_bytes_field(22, payload.weight_data),
         ]
     )
 
@@ -844,6 +958,11 @@ def _parse_task_result(payload: bytes) -> TaskResult:
     output_length = 0
     output_vector = b""
     iteration_count = 1
+    start_oc = 0
+    end_oc = 0
+    output_h = 0
+    output_w = 0
+    result_artifact_id = ""
 
     for field_number, wire_type, value in _parse_fields(payload):
         if field_number == 1:
@@ -866,6 +985,16 @@ def _parse_task_result(payload: bytes) -> TaskResult:
             output_vector = _require_bytes(wire_type, value)
         elif field_number == 10:
             iteration_count = _require_varint(wire_type, value)
+        elif field_number == 11:
+            start_oc = _require_varint(wire_type, value)
+        elif field_number == 12:
+            end_oc = _require_varint(wire_type, value)
+        elif field_number == 13:
+            output_h = _require_varint(wire_type, value)
+        elif field_number == 14:
+            output_w = _require_varint(wire_type, value)
+        elif field_number == 15:
+            result_artifact_id = _require_bytes(wire_type, value).decode("utf-8", errors="replace")
 
     return TaskResult(
         request_id=request_id,
@@ -878,6 +1007,11 @@ def _parse_task_result(payload: bytes) -> TaskResult:
         output_length=output_length,
         output_vector=output_vector,
         iteration_count=iteration_count,
+        start_oc=start_oc,
+        end_oc=end_oc,
+        output_h=output_h,
+        output_w=output_w,
+        result_artifact_id=result_artifact_id,
     )
 
 
@@ -894,6 +1028,11 @@ def _encode_task_result(payload: TaskResult) -> bytes:
             _encode_uint_field(8, payload.output_length),
             _encode_bytes_field(9, payload.output_vector),
             _encode_uint_field(10, payload.iteration_count),
+            _encode_uint_field(11, payload.start_oc),
+            _encode_uint_field(12, payload.end_oc),
+            _encode_uint_field(13, payload.output_h),
+            _encode_uint_field(14, payload.output_w),
+            _encode_string_field(15, payload.result_artifact_id),
         ]
     )
 
@@ -1180,6 +1319,7 @@ def build_client_response(
     client_count: int = 0,
     client_id: str = "",
     iteration_count: int = 1,
+    result_artifact_id: str = "",
 ) -> RuntimeEnvelope:
     """Create a main-node response to a client join or request."""
 
@@ -1206,6 +1346,7 @@ def build_client_response(
             client_count=client_count,
             client_id=client_id,
             iteration_count=iteration_count,
+            result_artifact_id=result_artifact_id,
         ),
     )
 
@@ -1225,6 +1366,16 @@ def build_task_assign(
     timestamp_ms: int | None = None,
     vector_length: int | None = None,
     iteration_count: int = 1,
+    start_oc: int = 0,
+    end_oc: int = 0,
+    tensor_h: int = 0,
+    tensor_w: int = 0,
+    channels_in: int = 0,
+    channels_out: int = 0,
+    kernel_size: int = 0,
+    padding: int = 0,
+    stride: int = 1,
+    weight_data: bytes = b"",
 ) -> RuntimeEnvelope:
     """Create one task assignment message for a worker."""
 
@@ -1250,6 +1401,16 @@ def build_task_assign(
             vector_length=vector_length,
             vector_data=vector_data,
             iteration_count=iteration_count,
+            start_oc=start_oc,
+            end_oc=end_oc,
+            tensor_h=tensor_h,
+            tensor_w=tensor_w,
+            channels_in=channels_in,
+            channels_out=channels_out,
+            kernel_size=kernel_size,
+            padding=padding,
+            stride=stride,
+            weight_data=weight_data,
         ),
     )
 
@@ -1319,6 +1480,11 @@ def build_task_result(
     timestamp_ms: int | None = None,
     output_length: int | None = None,
     iteration_count: int = 1,
+    start_oc: int = 0,
+    end_oc: int = 0,
+    output_h: int = 0,
+    output_w: int = 0,
+    result_artifact_id: str = "",
 ) -> RuntimeEnvelope:
     """Create a task-result message from a worker."""
 
@@ -1342,6 +1508,11 @@ def build_task_result(
             output_length=output_length,
             output_vector=output_vector,
             iteration_count=iteration_count,
+            start_oc=start_oc,
+            end_oc=end_oc,
+            output_h=output_h,
+            output_w=output_w,
+            result_artifact_id=result_artifact_id,
         ),
     )
 

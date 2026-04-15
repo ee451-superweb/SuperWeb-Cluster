@@ -1,0 +1,209 @@
+SuperWeb-Cluster Sprint 3 开发计划
+时间戳: 2026-04-15
+
+Sprint 3 总目标:
+
+- 把 `SuperWeb-Cluster` 从“只支持单一 FMVM 方法的分布式 runtime”
+  推进成“支持多种计算方法的集群计算平台”。
+- 在 runtime、benchmark、worker registration、main-node scheduling 这四层都引入
+  method-aware 设计。
+- 开发对应前端功能，不再只依赖 CLI 演示。
+- 扩大前端覆盖，优先支持 Windows 和 iOS。
+
+一、Sprint 3 范围
+
+1. 多计算方法
+   - 保留现有 `fixed_matrix_vector_multiplication`
+   - 新增至少一种新的计算方法，优先 `spatial_convolution` / `conv2d`
+   - 为后续继续增加 method 留出统一扩展点
+
+2. 前端功能
+   - 提供集群状态查看
+   - 提供 worker 硬件与 benchmark 结果查看
+   - 提供 client request 发起入口
+   - 提供 method 选择与运行结果查看
+
+3. 前端覆盖扩展
+   - 保留 CLI 作为开发/调试入口
+   - 增加 Windows 前端能力
+   - 增加 iOS 前端能力
+
+二、阶段目标拆解
+
+Phase 1. 多方法基础设施
+
+目标:
+- 在不破坏现有 FMVM 路径的前提下，为 runtime 引入 method-aware 架构。
+
+具体任务:
+
+1. 协议层支持多方法
+   - `ClientRequest` 保持 `method` 为一等字段
+   - `TaskAssign` / `TaskResult` 增加 method-specific payload 设计
+   - 避免把 `fmvm` 和 `conv2d` 的字段继续混在一个 flat 结构里
+
+2. worker registration 支持多方法 benchmark 摘要
+   - 每个 worker 同时上报:
+     - FMVM 的硬件排名和 GFLOPS
+     - Conv2D 的硬件排名和 GFLOPS
+   - main node 按 method 记录 worker 能力
+
+3. compute-node 主循环解耦
+   - 从 `compute_node/runtime.py` 中拆出 method-specific 执行逻辑
+   - 引入 method handler / task router 层
+   - 保留 heartbeat、accept/fail/result 这些通用控制流在 runtime 主循环里
+
+Phase 2. 新计算方法接入
+
+目标:
+- 把 `spatial_convolution` / `conv2d` 作为第二种 method 正式并列接入。
+
+具体任务:
+
+1. 新增 `compute_node/compute_methods/spatial_convolution/`
+   - 迁入 method-specific source tree
+   - 整理 runner、dataset、benchmark、handler
+
+2. benchmark 支持多方法
+   - `performance_metrics` 按 method 拆分目录
+   - 顶层 benchmark 增加:
+     - `--method fixed_matrix_vector_multiplication`
+     - `--method spatial_convolution`
+     - `--method all`
+
+3. main node 调度支持多方法
+   - 根据 `request.method` 选择 dispatcher
+   - 根据 method-specific GFLOPS 计算 worker 分发比例
+   - 根据 method 选择 aggregator
+
+Phase 3. 前端第一版
+
+目标:
+- 为 Sprint 3 的多方法 runtime 提供一套可演示、可观察、可操作的前端能力。
+
+第一版前端至少提供:
+
+1. 集群总览
+   - 当前 main node
+   - 在线 worker 数量
+   - 已注册 client 数量
+   - 总体 reported GFLOPS
+
+2. Worker 面板
+   - 每台 worker 的基本硬件信息
+   - 每种 method 下的 benchmark 结果
+   - 每种 method 的后端排名
+
+3. Request 面板
+   - 选择 method
+   - 填写基本请求参数
+   - 发起任务
+   - 查看 request 状态与返回结果元数据
+
+4. 调度可视化
+   - 当前请求使用了哪种 method
+   - worker 分片比例
+   - main node 如何根据 GFLOPS 做任务分配
+
+Phase 4. 前端平台扩展
+
+目标:
+- 让前端不只停留在单一 demo 页面，而是开始具备跨平台覆盖能力。
+
+优先级:
+
+1. Windows
+   - 作为课堂 demo、实验室展示、开发环境中的主力前端
+   - 优先承载较完整的操作和调试能力
+
+2. iOS
+   - 作为移动端监控与轻量控制入口
+   - 优先承载查看状态、触发请求、查看结果摘要
+
+建议策略:
+
+- 先定义稳定的前端接口层，再扩展具体平台实现
+- 前端与 runtime 之间尽量通过统一的 API / message contract 交互
+- 避免 Windows 和 iOS 各自演化出不兼容的独立逻辑
+
+三、推荐技术策略
+
+1. runtime 先 method-aware，再做前端
+   - 如果后端仍然只有 FMVM，前端很难真正展示 Sprint 3 的价值
+   - 所以前端开发应建立在多方法能力已经有稳定接口的基础上
+
+2. 前端先做“观测与控制”，再做“重数据回传”
+   - 先支持:
+     - 状态展示
+     - benchmark 展示
+     - method 选择
+     - request 发起
+     - 结果元数据展示
+   - 大体积 tensor / 文件结果回传留给后续 artifact channel
+
+3. Windows 和 iOS 共享同一套后端语义
+   - worker
+   - method
+   - benchmark summary
+   - request
+   - task status
+   - result metadata
+   这些概念必须统一
+
+四、Sprint 3 交付物建议
+
+最低交付:
+
+1. FMVM + Conv2D 两种 method 共存
+2. worker 注册时可同时上报两种 method 的性能
+3. main node 按 method 做任务分发
+4. 第一版前端可查看集群与 benchmark 信息
+5. 第一版前端可发起 method-aware request
+6. Windows 前端可用
+7. iOS 前端有最小可演示版本
+
+较完整交付:
+
+1. 多方法 benchmark CLI 与结果汇总完成
+2. compute-node handler 架构稳定
+3. main-node dispatcher / aggregator 按 method 解耦
+4. Windows 前端具备完整操作能力
+5. iOS 前端具备监控与轻量控制能力
+
+五、Sprint 3 暂不解决的问题
+
+1. 大结果文件回传
+   - worker -> main
+   - main -> client
+   当前先不在 Sprint 3 初版完成
+
+2. 全平台原生前端全覆盖
+   - 本轮优先 Windows 和 iOS
+   - 其他平台后续再扩展
+
+3. 所有 method 的统一结果可视化
+   - Sprint 3 先把基础链路打通
+   - 更复杂的 method-specific 结果展示可以分后续迭代
+
+六、建议实施顺序
+
+1. 完成多方法协议与 registration 设计
+2. 引入 compute-node method handler 架构
+3. 接入 `spatial_convolution`
+4. 改造 main node 调度与聚合为 method-aware
+5. 重构 benchmark 为多方法入口
+6. 开发第一版前端
+7. 扩展 Windows 前端
+8. 扩展 iOS 前端
+
+七、Sprint 3 成功标准
+
+1. main node 能同时管理多种 method 的 worker 性能摘要
+2. client request 的 `method` 真正影响任务调度和执行路径
+3. 新 method 可以通过统一 handler 机制接入，而不是继续往 runtime 主循环里堆逻辑
+4. 用户可以通过前端而不是只靠命令行观察和操作系统
+5. 项目在演示时能清楚展示:
+   - 集群状态
+   - 多方法支持
+   - 方法切换
+   - Windows 与 iOS 的前端覆盖

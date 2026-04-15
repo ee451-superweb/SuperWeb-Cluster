@@ -1,8 +1,18 @@
-"""Future worker executor placeholder."""
+"""Generic task router for compute-node runtime execution."""
+
+from __future__ import annotations
+
+from compute_node.handlers import MethodHandlerRegistry
 
 
-class WorkerExecutor:
-    """Placeholder worker executor."""
+class TaskExecutionRouter:
+    """Route each assigned task to the method-specific local handler."""
 
-    def execute(self) -> None:
-        raise NotImplementedError("Worker execution is not implemented in the kickoff version.")
+    def __init__(self, handler_registry: MethodHandlerRegistry) -> None:
+        self._handler_registry = handler_registry
+
+    def execute_task(self, task):
+        return self._handler_registry.get(task.method).execute_task(task)
+
+    def close(self) -> None:
+        self._handler_registry.close_all()

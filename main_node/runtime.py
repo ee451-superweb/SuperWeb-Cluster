@@ -4,18 +4,27 @@ from __future__ import annotations
 
 import logging
 import socket
+import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable
+from pathlib import Path
 
 from adapters import network
 from common.types import DiscoveryResult
+from compute_node.compute_methods.spatial_convolution import (
+    DATASET_GENERATE_SCRIPT_PATH as SPATIAL_DATASET_GENERATE_SCRIPT_PATH,
+    DEFAULT_DATASET_DIR as SPATIAL_DATASET_DIR,
+)
+from compute_node.compute_methods.spatial_convolution.executor import load_named_workload_spec
 from compute_node.input_matrix import build_input_matrix_spec
 from app.config import AppConfig
 from app.constants import (
     MAIN_NODE_NAME,
     METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
+    METHOD_SPATIAL_CONVOLUTION,
     RUNTIME_MSG_CLIENT_JOIN,
     RUNTIME_MSG_CLIENT_REQUEST,
     RUNTIME_MSG_CLIENT_RESPONSE,
@@ -65,6 +74,7 @@ class MainNodeRuntime:
         self.dispatcher = TaskDispatcher()
         self.aggregator = ResultAggregator()
         self.fixed_matvec_spec = build_input_matrix_spec()
+        self.spatial_dataset_dir = SPATIAL_DATASET_DIR
         self._stop_event = threading.Event()
 
     @trace_function
@@ -105,7 +115,15 @@ class MainNodeRuntime:
         return self.registry.count_workers(), self.registry.count_clients()
 
     def _format_reported_hardware(self, connection: RuntimePeerConnection) -> str:
-        if connection.performance is None or not connection.performance.ranked_hardware:
+        if connection.performance is None:
+            return "[]"
+        if connection.performance.method_summaries:
+            entries: list[str] = []
+            for method_summary in connection.performance.method_summaries:
+                for item in method_summary.ranked_hardware:
+                    entries.append(f"{method_summary.method}:{item.hardware_type}:{item.effective_gflops:.3f}")
+            return "[" + ", ".join(entries) + "]"
+        if not connection.performance.ranked_hardware:
             return "[]"
         return "[" + ", ".join(
             f"{item.hardware_type}:{item.effective_gflops:.3f}"
@@ -252,12 +270,49 @@ class MainNodeRuntime:
         )
         self._print_cluster_compute_capacity()
 
+    def _ensure_spatial_convolution_dataset_ready(self) -> None:
+        runtime_input = self.spatial_dataset_dir / "runtime_input.bin"
+        runtime_weight = self.spatial_dataset_dir / "runtime_weight.bin"
+        test_input = self.spatial_dataset_dir / "test_input.bin"
+        test_weight = self.spatial_dataset_dir / "test_weight.bin"
+        if runtime_input.exists() and runtime_weight.exists() and test_input.exists() and test_weight.exists():
+            return
+
+        subprocess.run(
+            [
+                sys.executable,
+                str(SPATIAL_DATASET_GENERATE_SCRIPT_PATH),
+                "--output-dir",
+                str(self.spatial_dataset_dir),
+                "--role",
+                "main",
+                "--include-runtime-weight",
+            ],
+            check=True,
+            timeout=1800.0,
+        )
+
+    def _spatial_weight_slice(self, *, variant: str, spec, start_oc: int, end_oc: int) -> bytes:
+        weight_path = self.spatial_dataset_dir / f"{variant}_weight.bin"
+        if not weight_path.exists():
+            raise FileNotFoundError(f"missing spatial_convolution weight file at {weight_path}")
+        weight_data = weight_path.read_bytes()
+        bytes_per_output_channel = spec.k * spec.k * spec.c_in * 4
+        return weight_data[start_oc * bytes_per_output_channel:end_oc * bytes_per_output_channel]
+
+    def _max_spatial_channels_per_task(self, spec) -> int:
+        bytes_per_channel = spec.output_h * spec.output_w * 4
+        if bytes_per_channel <= 0:
+            raise ValueError("spatial_convolution output channel size must be positive")
+        payload_budget = max(self.config.max_message_size - 4096, 1)
+        return max(1, payload_budget // bytes_per_channel)
+
     @trace_function
     def _run_worker_task_slice(self, request, assignment: WorkerTaskSlice):
         exchange_timeout = max(self.config.runtime_socket_timeout, 30.0)
         sock = assignment.connection.sock
         previous_timeout = sock.gettimeout()
-        task_assign = build_task_assign(
+        build_kwargs = dict(
             request_id=request.request_id,
             node_id=assignment.connection.runtime_id,
             task_id=assignment.task_id,
@@ -270,15 +325,42 @@ class MainNodeRuntime:
             vector_length=request.vector_length,
             iteration_count=request.iteration_count,
         )
+        if request.method == METHOD_SPATIAL_CONVOLUTION:
+            spec, variant = load_named_workload_spec(request.object_id)
+            build_kwargs.update(
+                start_oc=assignment.start_oc,
+                end_oc=assignment.end_oc,
+                tensor_h=spec.h,
+                tensor_w=spec.w,
+                channels_in=spec.c_in,
+                channels_out=spec.c_out,
+                kernel_size=spec.k,
+                padding=spec.pad,
+                stride=spec.stride,
+                weight_data=self._spatial_weight_slice(
+                    variant=variant,
+                    spec=spec,
+                    start_oc=assignment.start_oc,
+                    end_oc=assignment.end_oc,
+                ),
+            )
+        task_assign = build_task_assign(
+            **build_kwargs,
+        )
 
         try:
             with assignment.connection.io_lock:
                 sock.settimeout(exchange_timeout)
                 send_message(sock, task_assign)
+                task_scope = (
+                    f"oc={assignment.start_oc}:{assignment.end_oc}"
+                    if request.method == METHOD_SPATIAL_CONVOLUTION
+                    else f"rows={assignment.row_start}:{assignment.row_end}"
+                )
                 print(
                     f"{RUNTIME_MSG_TASK_ASSIGN} to {assignment.connection.node_name} "
                     f"id={assignment.connection.runtime_id} "
-                    f"task_id={assignment.task_id} rows={assignment.row_start}:{assignment.row_end} "
+                    f"task_id={assignment.task_id} method={request.method} {task_scope} "
                     f"iteration_count={request.iteration_count}",
                     flush=True,
                 )
@@ -335,7 +417,7 @@ class MainNodeRuntime:
     def _build_client_response_for_request(self, request):
         worker_count, client_count = self._cluster_counts()
 
-        if request.method != METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION:
+        if request.method not in (METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION, METHOD_SPATIAL_CONVOLUTION):
             return build_client_response(
                 request_id=request.request_id,
                 status_code=STATUS_BAD_REQUEST,
@@ -349,7 +431,7 @@ class MainNodeRuntime:
                 iteration_count=request.iteration_count,
             )
 
-        if request.vector_length != self.fixed_matvec_spec.cols:
+        if request.method == METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION and request.vector_length != self.fixed_matvec_spec.cols:
             return build_client_response(
                 request_id=request.request_id,
                 status_code=STATUS_BAD_REQUEST,
@@ -366,7 +448,7 @@ class MainNodeRuntime:
                 iteration_count=request.iteration_count,
             )
 
-        if len(request.vector_data) != request.vector_length * 4:
+        if request.method == METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION and len(request.vector_data) != request.vector_length * 4:
             return build_client_response(
                 request_id=request.request_id,
                 status_code=STATUS_BAD_REQUEST,
@@ -393,12 +475,86 @@ class MainNodeRuntime:
                 iteration_count=1,
             )
 
-        assignments = self.dispatcher.dispatch_fixed_matrix_vector_multiplication(
-            request_id=request.request_id,
-            rows=self.fixed_matvec_spec.rows,
-            workers=self.registry.list_workers(),
-            worker_hardware=self.registry.list_worker_hardware(),
-        )
+        workers = self.registry.list_workers()
+        if request.method == METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION:
+            assignments = self.dispatcher.dispatch_fixed_matrix_vector_multiplication(
+                request_id=request.request_id,
+                rows=self.fixed_matvec_spec.rows,
+                workers=workers,
+                worker_hardware=self.registry.list_worker_hardware(METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION),
+            )
+        else:
+            try:
+                spec, variant = load_named_workload_spec(request.object_id)
+            except ValueError as exc:
+                return build_client_response(
+                    request_id=request.request_id,
+                    status_code=STATUS_BAD_REQUEST,
+                    method=request.method,
+                    object_id=request.object_id,
+                    stream_id=request.stream_id,
+                    error_message=str(exc),
+                    worker_count=worker_count,
+                    client_count=client_count,
+                    client_id="",
+                    iteration_count=request.iteration_count,
+                )
+
+            max_channels_per_task = self._max_spatial_channels_per_task(spec)
+            if max_channels_per_task <= 0:
+                return build_client_response(
+                    request_id=request.request_id,
+                    status_code=STATUS_BAD_REQUEST,
+                    method=request.method,
+                    object_id=request.object_id,
+                    stream_id=request.stream_id,
+                    error_message="spatial_convolution workload is too large for in-band task transport",
+                    worker_count=worker_count,
+                    client_count=client_count,
+                    client_id="",
+                    iteration_count=request.iteration_count,
+                )
+
+            if spec.output_h * spec.output_w * 4 > self.config.max_message_size:
+                return build_client_response(
+                    request_id=request.request_id,
+                    status_code=STATUS_BAD_REQUEST,
+                    method=request.method,
+                    object_id=request.object_id,
+                    stream_id=request.stream_id,
+                    error_message=(
+                        "spatial_convolution runtime output exceeds the current per-task message limit; "
+                        "artifact side-channel support is still pending"
+                    ),
+                    worker_count=worker_count,
+                    client_count=client_count,
+                    client_id="",
+                    iteration_count=request.iteration_count,
+                )
+
+            try:
+                self._ensure_spatial_convolution_dataset_ready()
+            except (OSError, subprocess.CalledProcessError) as exc:
+                return build_client_response(
+                    request_id=request.request_id,
+                    status_code=STATUS_INTERNAL_ERROR,
+                    method=request.method,
+                    object_id=request.object_id,
+                    stream_id=request.stream_id,
+                    error_message=f"failed to prepare spatial_convolution dataset: {exc}",
+                    worker_count=worker_count,
+                    client_count=client_count,
+                    client_id="",
+                    iteration_count=request.iteration_count,
+                )
+
+            assignments = self.dispatcher.dispatch_spatial_convolution(
+                request_id=request.request_id,
+                output_channels=spec.c_out,
+                workers=workers,
+                worker_hardware=self.registry.list_worker_hardware(METHOD_SPATIAL_CONVOLUTION),
+                max_channels_per_task=max_channels_per_task,
+            )
         if not assignments:
             return build_client_response(
                 request_id=request.request_id,
@@ -416,10 +572,30 @@ class MainNodeRuntime:
         try:
             with ThreadPoolExecutor(max_workers=len(assignments), thread_name_prefix="task-dispatch") as executor:
                 task_results = list(executor.map(lambda item: self._run_worker_task_slice(request, item), assignments))
-            output_vector = self.aggregator.collect_fixed_matrix_vector_result(
-                rows=self.fixed_matvec_spec.rows,
-                results=task_results,
-            )
+            if request.method == METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION:
+                output_vector = self.aggregator.collect_fixed_matrix_vector_result(
+                    rows=self.fixed_matvec_spec.rows,
+                    results=task_results,
+                )
+                output_length = self.fixed_matvec_spec.rows
+                result_artifact_id = ""
+            else:
+                spec, _variant = load_named_workload_spec(request.object_id)
+                output_vector = self.aggregator.collect_spatial_convolution_result(
+                    out_h=spec.output_h,
+                    out_w=spec.output_w,
+                    total_cout=spec.c_out,
+                    results=task_results,
+                )
+                output_length = spec.output_h * spec.output_w * spec.c_out
+                result_artifact_id = ""
+                if len(output_vector) > self.config.max_message_size:
+                    artifact_dir = self.spatial_dataset_dir / "artifacts"
+                    artifact_dir.mkdir(parents=True, exist_ok=True)
+                    artifact_path = artifact_dir / f"{request.request_id}.bin"
+                    artifact_path.write_bytes(output_vector)
+                    output_vector = b""
+                    result_artifact_id = str(artifact_path)
             worker_count, client_count = self._cluster_counts()
             return build_client_response(
                 request_id=request.request_id,
@@ -428,11 +604,12 @@ class MainNodeRuntime:
                 object_id=request.object_id,
                 stream_id=request.stream_id,
                 output_vector=output_vector,
-                output_length=self.fixed_matvec_spec.rows,
+                output_length=output_length,
                 worker_count=worker_count,
                 client_count=client_count,
                 client_id="",
                 iteration_count=request.iteration_count,
+                result_artifact_id=result_artifact_id,
             )
         except (OSError, ValueError, ConnectionError, RuntimeError) as exc:
             worker_count, client_count = self._cluster_counts()

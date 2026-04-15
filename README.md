@@ -2,7 +2,18 @@
 
 ## Status
 
-`superweb-cluster` has completed Sprint 1 and is moving into Sprint 2.
+`superweb-cluster` has completed the Sprint 1 and Sprint 2 foundation work and
+is now entering Sprint 3.
+
+Sprint 1 established the baseline runtime: bootstrap, discovery, registration,
+protobuf messaging, heartbeat, and the first end-to-end distributed compute
+path.
+
+Sprint 2 hardened that baseline around the first production method, expanded
+hardware benchmark coverage, and reshaped the repository so new compute methods
+can be added without collapsing everything back into one runtime path.
+
+## Progress Through Sprint 2
 
 Sprint 1 delivered:
 
@@ -17,10 +28,51 @@ Sprint 1 delivered:
 - local CPU/CUDA benchmark generation and ranking
 - compute-node performance summary upload during worker registration
 - main-node tracking of total reported cluster GFLOPS
+
+Sprint 2 delivered the current baseline:
+
 - fixed-matrix-vector task distribution and result aggregation
 - Windows DX12 compute benchmarking for non-CUDA GPU paths
+- a cleaner repository split across `app/`, `common/`, `wire/`, `main_node/`, and `compute_node/`
+- explicit separation between `setup.py` environment preparation and `bootstrap.py` runtime startup
+- shared compute-method source trees under `compute_node/compute_methods/`
+- a deterministic shared FMVM dataset workspace under `compute_node/input_matrix/`
+- four in-tree FMVM backend families: CPU, CUDA, DX12, and Metal
+- Windows GPU backend routing that distinguishes NVIDIA/CUDA from non-NVIDIA/DX12 paths
+- a two-phase benchmark flow with autotune plus measurement for the reported result
+- runtime use of benchmark summaries to register worker compute capacity
+- expanded tests and documentation for the reorganized runtime model
+- planning groundwork for method-aware runtime evolution beyond FMVM
 
-Sprint 2 will build on that with broader workload scheduling and more methods.
+## Sprint 3 Plan
+
+Sprint 3 will focus on turning `superweb-cluster` from a single-method cluster
+into a multi-method platform, while also exposing more of the system through
+user-facing frontends.
+
+Compute-method goals:
+
+- add more executable methods beyond `fixed_matrix_vector_multiplication`
+- start with `spatial_convolution` / `conv2d` as the next major method
+- make worker registration method-aware so one worker can report different GFLOPS summaries for different methods
+- make main-node dispatch and aggregation method-aware so scheduling follows the client-requested method
+- continue restructuring the compute-node runtime around method handlers and reusable task routing
+
+Frontend goals:
+
+- build corresponding frontend features for cluster visibility, request submission, method selection, and result inspection
+- expose worker inventory, benchmark rankings, active method, and scheduler decisions in a human-friendly way
+- reduce reliance on terminal-only workflows for demos, debugging, and operator control
+
+Frontend coverage goals:
+
+- expand beyond the current CLI-first experience
+- add Windows frontend coverage for desktop demos and operator workflows
+- add iOS frontend coverage for mobile monitoring and lightweight control scenarios
+- keep shared backend contracts so web, Windows, and iOS surfaces can evolve against the same runtime concepts
+
+A detailed Sprint 3 planning document lives at
+`docs/sprint3_plan_2026-04-15.txt`.
 
 ## Project Entry
 

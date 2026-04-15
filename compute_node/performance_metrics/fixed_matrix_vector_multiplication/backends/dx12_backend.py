@@ -25,7 +25,7 @@ from compute_node.compute_methods.fixed_matrix_vector_multiplication import (
     DX12_EXECUTABLE_PATH,
     DX12_SOURCE_PATH,
 )
-from models import (
+from compute_node.performance_metrics.fixed_matrix_vector_multiplication.models import (
     DEFAULT_AUTOTUNE_REPEATS,
     DEFAULT_MEASUREMENT_REPEATS,
     BackendResult,
@@ -33,9 +33,11 @@ from models import (
     DatasetLayout,
     TrialRecord,
 )
-from backends.windows_gpu_inventory import detect_non_nvidia_windows_adapter
-from path_utils import sanitize_text, to_relative_cli_path, to_relative_string
-from scoring import linear_time_score
+from compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.windows_gpu_inventory import (
+    detect_non_nvidia_windows_adapter,
+)
+from compute_node.performance_metrics.fixed_matrix_vector_multiplication.scoring import linear_time_score
+from compute_node.performance_metrics.path_utils import sanitize_text, to_relative_cli_path, to_relative_string
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 WINDOWS_DX12_RUNTIME_NOTE = (
@@ -182,6 +184,8 @@ class Dx12Backend:
         spec: BenchmarkSpec,
         dataset: DatasetLayout,
         *,
+        measurement_spec: BenchmarkSpec | None = None,
+        measurement_dataset: DatasetLayout | None = None,
         time_budget_seconds: float,
         force_rebuild: bool = False,
     ) -> BackendResult:
@@ -232,43 +236,31 @@ class Dx12Backend:
                 notes=notes,
             )
 
+        measurement_spec = spec if measurement_spec is None else measurement_spec
+        measurement_dataset = dataset if measurement_dataset is None else measurement_dataset
         thread_group_sizes = _candidate_thread_group_sizes()
         rows_per_thread_values = _candidate_rows_per_thread()
         autotune_repeats = _autotune_repeats(spec)
-        measurement_repeats = _measurement_repeats(spec)
-        command = [
-            str(executable_path),
-            "--matrix",
-            _relative_cli_path(dataset.matrix_path),
-            "--vector",
-            _relative_cli_path(dataset.vector_path),
-            "--rows",
-            str(spec.rows),
-            "--cols",
-            str(spec.cols),
-            "--thread-group-sizes",
-            ",".join(str(value) for value in thread_group_sizes),
-            "--rows-per-thread",
-            ",".join(str(value) for value in rows_per_thread_values),
-            "--autotune-repeats",
-            str(autotune_repeats),
-            "--measurement-repeats",
-            str(measurement_repeats),
-        ]
+        final_measurement_repeats = (
+            1 if (measurement_spec != spec or measurement_dataset != dataset)
+            else _measurement_repeats(spec)
+        )
 
         notes.append(f"thread-group-size search order: {thread_group_sizes}")
         notes.append(f"rows-per-thread search order: {rows_per_thread_values}")
         notes.append(f"autotune_repeats_per_config: {autotune_repeats}")
-        notes.append(f"measurement_repeats_for_best_config: {measurement_repeats}")
+        notes.append(f"measurement_repeats_for_best_config: {final_measurement_repeats}")
 
         try:
-            completed = subprocess.run(
-                command,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=max(time_budget_seconds, 30.0),
-                cwd=ROOT_DIR,
+            autotune_metrics = self._run_runner(
+                executable_path,
+                spec,
+                dataset,
+                thread_group_sizes=thread_group_sizes,
+                rows_per_thread_values=rows_per_thread_values,
+                autotune_repeats=autotune_repeats,
+                measurement_repeats=1,
+                timeout_seconds=max(time_budget_seconds, 30.0),
             )
         except subprocess.TimeoutExpired:
             notes.append("DX12 benchmark timed out")
@@ -295,7 +287,44 @@ class Dx12Backend:
                 notes=notes,
             )
 
-        metrics = json.loads(completed.stdout)
+        try:
+            metrics = self._run_runner(
+                executable_path,
+                measurement_spec,
+                measurement_dataset,
+                thread_group_sizes=[int(autotune_metrics["thread_group_size"])],
+                rows_per_thread_values=[int(autotune_metrics["rows_per_thread"])],
+                autotune_repeats=1,
+                measurement_repeats=final_measurement_repeats,
+                timeout_seconds=max(time_budget_seconds, 30.0),
+            )
+        except subprocess.TimeoutExpired:
+            notes.append("DX12 benchmark timed out")
+            return BackendResult(
+                backend=self.name,
+                available=False,
+                selected_config=None,
+                autotune_trial=None,
+                best_trial=None,
+                trials=[],
+                notes=notes,
+            )
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or "").strip()
+            stdout = (exc.stdout or "").strip()
+            notes.append(_sanitize_note(stderr if stderr else (stdout if stdout else str(exc))))
+            return BackendResult(
+                backend=self.name,
+                available=False,
+                selected_config=None,
+                autotune_trial=None,
+                best_trial=None,
+                trials=[],
+                notes=notes,
+            )
+
+        if measurement_spec != spec or measurement_dataset != dataset:
+            notes.append(f"Autotuned on {spec.name} and measured on {measurement_spec.name}.")
         if "nvidia" in str(metrics.get("device_name") or "").lower():
             notes.append(
                 "DX12 runner selected an NVIDIA adapter; this backend is intentionally reserved for non-NVIDIA GPUs."
@@ -310,22 +339,30 @@ class Dx12Backend:
                 notes=notes,
             )
         autotune_score = linear_time_score(
-            float(metrics["autotune_wall_clock_latency_seconds"]),
+            float(autotune_metrics["autotune_wall_clock_latency_seconds"]),
             ideal_seconds=spec.ideal_seconds,
             zero_score_seconds=spec.zero_score_seconds,
         )
         measurement_score = linear_time_score(
             float(metrics["measurement_wall_clock_latency_seconds"]),
-            ideal_seconds=spec.ideal_seconds,
-            zero_score_seconds=spec.zero_score_seconds,
+            ideal_seconds=measurement_spec.ideal_seconds,
+            zero_score_seconds=measurement_spec.zero_score_seconds,
         )
 
+        autotune_config = {
+            "thread_group_size": int(autotune_metrics["thread_group_size"]),
+            "rows_per_thread": int(autotune_metrics["rows_per_thread"]),
+            "autotune_repeats": int(autotune_metrics["autotune_repeats"]),
+            "measurement_repeats": int(autotune_metrics["measurement_repeats"]),
+            "trials_run": int(autotune_metrics["trials_run"]),
+            "accumulation_precision": "fp32",
+        }
         config = {
             "thread_group_size": int(metrics["thread_group_size"]),
             "rows_per_thread": int(metrics["rows_per_thread"]),
-            "autotune_repeats": int(metrics["autotune_repeats"]),
+            "autotune_repeats": int(autotune_metrics["autotune_repeats"]),
             "measurement_repeats": int(metrics["measurement_repeats"]),
-            "trials_run": int(metrics["trials_run"]),
+            "trials_run": int(autotune_metrics["trials_run"]),
             "accumulation_precision": "fp32",
         }
         trial_notes: list[str] = ["accumulation_precision=fp32"]
@@ -355,10 +392,10 @@ class Dx12Backend:
 
         autotune_trial = TrialRecord(
             backend=self.name,
-            config=config,
-            wall_clock_latency_seconds=float(metrics["autotune_wall_clock_latency_seconds"]),
-            effective_gflops=float(metrics["autotune_effective_gflops"]),
-            checksum=str(metrics["autotune_checksum"]),
+            config=autotune_config,
+            wall_clock_latency_seconds=float(autotune_metrics["autotune_wall_clock_latency_seconds"]),
+            effective_gflops=float(autotune_metrics["autotune_effective_gflops"]),
+            checksum=str(autotune_metrics["autotune_checksum"]),
             score=autotune_score,
             notes=trial_notes,
         )
@@ -380,6 +417,47 @@ class Dx12Backend:
             trials=[autotune_trial, trial],
             notes=notes,
         )
+
+    def _run_runner(
+        self,
+        executable_path: Path,
+        spec: BenchmarkSpec,
+        dataset: DatasetLayout,
+        *,
+        thread_group_sizes: list[int],
+        rows_per_thread_values: list[int],
+        autotune_repeats: int,
+        measurement_repeats: int,
+        timeout_seconds: float,
+    ) -> dict[str, object]:
+        command = [
+            str(executable_path),
+            "--matrix",
+            _relative_cli_path(dataset.matrix_path),
+            "--vector",
+            _relative_cli_path(dataset.vector_path),
+            "--rows",
+            str(spec.rows),
+            "--cols",
+            str(spec.cols),
+            "--thread-group-sizes",
+            ",".join(str(value) for value in thread_group_sizes),
+            "--rows-per-thread",
+            ",".join(str(value) for value in rows_per_thread_values),
+            "--autotune-repeats",
+            str(autotune_repeats),
+            "--measurement-repeats",
+            str(measurement_repeats),
+        ]
+        completed = subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            cwd=ROOT_DIR,
+        )
+        return json.loads(completed.stdout)
 
     def _compile_if_needed(self, *, force_rebuild: bool = False) -> Path:
         """Return the DX12 runner path, compiling only when needed."""

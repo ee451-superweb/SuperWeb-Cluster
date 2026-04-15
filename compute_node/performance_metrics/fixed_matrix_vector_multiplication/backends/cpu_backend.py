@@ -30,7 +30,7 @@ from compute_node.compute_methods.fixed_matrix_vector_multiplication import (
     CPU_WINDOWS_EXECUTABLE_PATH,
     CPU_WINDOWS_SOURCE_PATH,
 )
-from models import (
+from compute_node.performance_metrics.fixed_matrix_vector_multiplication.models import (
     DEFAULT_AUTOTUNE_REPEATS,
     DEFAULT_MEASUREMENT_REPEATS,
     BackendResult,
@@ -38,8 +38,8 @@ from models import (
     DatasetLayout,
     TrialRecord,
 )
-from path_utils import sanitize_text, to_relative_cli_path, to_relative_string
-from scoring import linear_time_score
+from compute_node.performance_metrics.fixed_matrix_vector_multiplication.scoring import linear_time_score
+from compute_node.performance_metrics.path_utils import sanitize_text, to_relative_cli_path, to_relative_string
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 WINDOWS_SELF_CONTAINED_NOTE = (
@@ -254,6 +254,8 @@ class CpuBackend:
         spec: BenchmarkSpec,
         dataset: DatasetLayout,
         *,
+        measurement_spec: BenchmarkSpec | None = None,
+        measurement_dataset: DatasetLayout | None = None,
         time_budget_seconds: float,
         force_rebuild: bool = False,
     ) -> BackendResult:
@@ -294,44 +296,30 @@ class CpuBackend:
                 notes=notes,
             )
 
+        measurement_spec = spec if measurement_spec is None else measurement_spec
+        measurement_dataset = dataset if measurement_dataset is None else measurement_dataset
         worker_candidates = _binary_tree_worker_candidates(os.cpu_count() or 1)
         tile_candidates = _candidate_tile_sizes(spec.cols)
         autotune_repeats = _autotune_repeats(spec)
-        measurement_repeats = _measurement_repeats(spec)
-        command = [
-            str(executable_path),
-            "--matrix",
-            _relative_cli_path(dataset.matrix_path),
-            "--vector",
-            _relative_cli_path(dataset.vector_path),
-            "--rows",
-            str(spec.rows),
-            "--cols",
-            str(spec.cols),
-            "--accumulation-precision",
-            spec.accumulation_precision,
-            "--workers",
-            ",".join(str(value) for value in worker_candidates),
-            "--tile-sizes",
-            ",".join(str(value) for value in tile_candidates),
-            "--autotune-repeats",
-            str(autotune_repeats),
-            "--measurement-repeats",
-            str(measurement_repeats),
-        ]
+        final_measurement_repeats = (
+            1 if (measurement_spec != spec or measurement_dataset != dataset)
+            else _measurement_repeats(spec)
+        )
 
         notes.append(f"tile search order: {tile_candidates}")
         notes.append(f"autotune_repeats_per_config: {autotune_repeats}")
-        notes.append(f"measurement_repeats_for_best_config: {measurement_repeats}")
+        notes.append(f"measurement_repeats_for_best_config: {final_measurement_repeats}")
 
         try:
-            completed = subprocess.run(
-                command,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=max(time_budget_seconds, 30.0),
-                cwd=ROOT_DIR,
+            autotune_metrics = self._run_runner(
+                executable_path,
+                spec,
+                dataset,
+                workers=worker_candidates,
+                tile_sizes=tile_candidates,
+                autotune_repeats=autotune_repeats,
+                measurement_repeats=1,
+                timeout_seconds=max(time_budget_seconds, 30.0),
             )
         except subprocess.TimeoutExpired:
             notes.append("CPU benchmark timed out")
@@ -357,34 +345,82 @@ class CpuBackend:
                 notes=notes,
             )
 
-        metrics = json.loads(completed.stdout)
+        selected_workers = int(autotune_metrics["actual_workers"])
+        selected_tile_size = int(autotune_metrics["tile_size"])
+
+        try:
+            metrics = self._run_runner(
+                executable_path,
+                measurement_spec,
+                measurement_dataset,
+                workers=[selected_workers],
+                tile_sizes=[selected_tile_size],
+                autotune_repeats=1,
+                measurement_repeats=final_measurement_repeats,
+                timeout_seconds=max(time_budget_seconds, 30.0),
+            )
+        except subprocess.TimeoutExpired:
+            notes.append("CPU benchmark timed out")
+            return BackendResult(
+                backend=self.name,
+                available=False,
+                selected_config=None,
+                autotune_trial=None,
+                best_trial=None,
+                trials=[],
+                notes=notes,
+            )
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or "").strip()
+            notes.append(_sanitize_note(stderr if stderr else str(exc)))
+            return BackendResult(
+                backend=self.name,
+                available=False,
+                selected_config=None,
+                autotune_trial=None,
+                best_trial=None,
+                trials=[],
+                notes=notes,
+            )
+
+        if measurement_spec != spec or measurement_dataset != dataset:
+            notes.append(f"Autotuned on {spec.name} and measured on {measurement_spec.name}.")
         autotune_score = linear_time_score(
-            float(metrics["autotune_wall_clock_latency_seconds"]),
+            float(autotune_metrics["autotune_wall_clock_latency_seconds"]),
             ideal_seconds=spec.ideal_seconds,
             zero_score_seconds=spec.zero_score_seconds,
         )
         measurement_score = linear_time_score(
             float(metrics["measurement_wall_clock_latency_seconds"]),
-            ideal_seconds=spec.ideal_seconds,
-            zero_score_seconds=spec.zero_score_seconds,
+            ideal_seconds=measurement_spec.ideal_seconds,
+            zero_score_seconds=measurement_spec.zero_score_seconds,
         )
 
+        autotune_config = {
+            "workers": selected_workers,
+            "requested_workers": int(autotune_metrics["requested_workers"]),
+            "tile_size": selected_tile_size,
+            "accumulation_precision": str(autotune_metrics.get("accumulation_precision") or spec.accumulation_precision),
+            "autotune_repeats": int(autotune_metrics["autotune_repeats"]),
+            "measurement_repeats": int(autotune_metrics["measurement_repeats"]),
+            "trials_run": int(autotune_metrics["trials_run"]),
+        }
         config = {
             "workers": int(metrics["actual_workers"]),
             "requested_workers": int(metrics["requested_workers"]),
             "tile_size": int(metrics["tile_size"]),
-            "accumulation_precision": str(metrics.get("accumulation_precision") or spec.accumulation_precision),
-            "autotune_repeats": int(metrics["autotune_repeats"]),
+            "accumulation_precision": str(metrics.get("accumulation_precision") or measurement_spec.accumulation_precision),
+            "autotune_repeats": int(autotune_metrics["autotune_repeats"]),
             "measurement_repeats": int(metrics["measurement_repeats"]),
-            "trials_run": int(metrics["trials_run"]),
+            "trials_run": int(autotune_metrics["trials_run"]),
         }
         trial_notes = [f"accumulation_precision={config['accumulation_precision']}"]
         autotune_trial = TrialRecord(
             backend=self.name,
-            config=config,
-            wall_clock_latency_seconds=float(metrics["autotune_wall_clock_latency_seconds"]),
-            effective_gflops=float(metrics["autotune_effective_gflops"]),
-            checksum=str(metrics["autotune_checksum"]),
+            config=autotune_config,
+            wall_clock_latency_seconds=float(autotune_metrics["autotune_wall_clock_latency_seconds"]),
+            effective_gflops=float(autotune_metrics["autotune_effective_gflops"]),
+            checksum=str(autotune_metrics["autotune_checksum"]),
             score=autotune_score,
             notes=trial_notes,
         )
@@ -406,6 +442,49 @@ class CpuBackend:
             trials=[autotune_trial, trial],
             notes=notes,
         )
+
+    def _run_runner(
+        self,
+        executable_path: Path,
+        spec: BenchmarkSpec,
+        dataset: DatasetLayout,
+        *,
+        workers: list[int],
+        tile_sizes: list[int],
+        autotune_repeats: int,
+        measurement_repeats: int,
+        timeout_seconds: float,
+    ) -> dict[str, object]:
+        command = [
+            str(executable_path),
+            "--matrix",
+            _relative_cli_path(dataset.matrix_path),
+            "--vector",
+            _relative_cli_path(dataset.vector_path),
+            "--rows",
+            str(spec.rows),
+            "--cols",
+            str(spec.cols),
+            "--accumulation-precision",
+            spec.accumulation_precision,
+            "--workers",
+            ",".join(str(value) for value in workers),
+            "--tile-sizes",
+            ",".join(str(value) for value in tile_sizes),
+            "--autotune-repeats",
+            str(autotune_repeats),
+            "--measurement-repeats",
+            str(measurement_repeats),
+        ]
+        completed = subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            cwd=ROOT_DIR,
+        )
+        return json.loads(completed.stdout)
 
     def _compile_if_needed(self, *, force_rebuild: bool = False) -> Path:
         """Return the current platform CPU executable, compiling only when needed."""

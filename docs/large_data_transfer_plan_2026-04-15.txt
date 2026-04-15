@@ -1,0 +1,347 @@
+SuperWeb-Cluster 大数据传输侧通道实施计划
+时间戳: 2026-04-15
+
+背景:
+
+- 当前 runtime 通道使用 length-prefixed protobuf over TCP。
+- protobuf 控制通道很适合注册、心跳、任务分发、状态回报，但不适合长期承载大体积 tensor /
+  artifact 数据。
+- 目前 `conv2d` 已经作为第二种 method 接入，但 runtime 级输出会迅速超过当前控制通道的实用
+  负载范围。
+- 本轮目标不是立刻实现完整 side-channel，而是先明确一个不破坏现有架构的实现方案。
+
+问题定义:
+
+1. 当前控制通道是“整帧发送、整帧接收、整帧解码”。
+   - 大包会增加内存峰值
+   - 大包会阻塞控制消息
+   - 大包会放大 timeout / retry 抖动
+
+2. 集群网络环境可能混合 Ethernet 和 WiFi。
+   - 这意味着数据通道需要面对不稳定 RTT、间歇丢包和波动带宽
+   - 但这并不自动意味着应立即切换到 QUIC
+
+3. 我们真正需要解决的是:
+   - `worker -> main` 的大 task result 传输
+   - `main -> client` 的大最终结果传输
+
+核心设计结论:
+
+1. 必须把控制面和数据面拆开。
+   - protobuf 继续负责控制信息
+   - 大体积二进制结果走独立数据面
+
+2. 第一版 side-channel 推荐继续使用独立 TCP。
+   - 原因是实现成本低
+   - 调试成本低
+   - 与现有 runtime 兼容性最好
+   - 更适合作为课程项目中的第一版稳定方案
+
+3. 不建议第一版直接上 QUIC。
+   - QUIC 可以作为未来可替换的数据面实现
+   - 但当前阶段最重要的是把大数据传输从控制通道中剥离
+   - 不是立即切换到底层传输协议
+
+4. 数据面应该采用 chunked transfer，而不是单个超大消息。
+   - 降低单次重传代价
+   - 降低内存峰值
+   - 降低控制面阻塞影响
+
+本轮目标:
+
+1. 定义 side-channel 的模块划分。
+2. 定义控制面协商字段。
+3. 定义数据面消息格式。
+4. 定义 `worker -> main` 与 `main -> client` 两条时序。
+5. 让 runtime 主循环只保留抽象，不直接处理 chunk/socket 细节。
+
+明确不在本轮实现范围:
+
+1. 不实现 QUIC 版本的数据面。
+2. 不实现断点续传或多源并发下载。
+3. 不实现加密认证层的完整设计。
+4. 不实现跨版本 side-channel 协议兼容。
+
+推荐目录与模块:
+
+1. `wire/control_plane_message.py`
+   职责:
+   - 定义控制面需要新增的 artifact 协商结构
+   - 负责控制面 side-channel 相关字段的编解码辅助
+
+2. `wire/data_plane_message.py`
+   职责:
+   - 定义数据面自己的轻量 header
+   - 不强制使用 protobuf
+   - 优先使用简单固定头 + 可变 payload 的二进制格式
+
+3. `transport/large_data_transfer.py`
+   职责:
+   - 提供 sender / receiver / chunk writer / chunk reader
+   - 管理 socket 生命周期
+   - 管理传输状态和校验
+
+4. 可选新增 `transport/artifact_manager.py`
+   职责:
+   - 向 runtime 暴露高层 API
+   - 屏蔽底层 TCP chunk 细节
+
+建议的职责边界:
+
+1. `runtime.py` 负责:
+   - 判断结果是否需要 side-channel
+   - 在控制面协商 `artifact_id`
+   - 调用 artifact manager 发布或拉取数据
+
+2. `artifact_manager` 负责:
+   - 分配 artifact id
+   - 决定本地落盘路径
+   - 调用 sender / receiver
+   - 汇报传输完成或失败
+
+3. `large_data_transfer.py` 负责:
+   - 监听端口或主动连接
+   - chunk 化发送
+   - chunk 化接收
+   - checksum 校验
+
+4. `data_plane_message.py` 负责:
+   - transfer header
+   - chunk header
+   - complete / error header
+
+控制面建议新增语义:
+
+控制面原则:
+- protobuf 不直接携带大数据
+- protobuf 只携带引用、元数据、状态
+
+建议的 artifact 元数据字段:
+
+1. `artifact_id`
+2. `content_type`
+3. `size_bytes`
+4. `checksum`
+5. `producer_node_id`
+6. `transfer_host`
+7. `transfer_port`
+8. `chunk_size`
+9. `direction`
+10. `ready`
+
+建议的控制面事件:
+
+1. `ArtifactOffer`
+   - 生产方声明“我有一个 artifact 可以提供”
+
+2. `ArtifactReady`
+   - 传输端口已经就绪，可以开始连接
+
+3. `ArtifactComplete`
+   - 数据面传输完成，且 checksum 校验通过
+
+4. `ArtifactError`
+   - 传输失败，附带错误消息
+
+与当前结构的集成建议:
+
+1. `TaskResult`
+   - 保留现有小结果 in-band 路径
+   - 大结果改为:
+     - `output_vector = b""`
+     - `result_artifact_id = "..."`
+
+2. `ClientResponse`
+   - 保留小结果直返
+   - 大结果改为返回:
+     - `result_artifact_id`
+     - side-channel 元数据
+
+3. 当前已有的 `result_artifact_id` 字段可以继续沿用，
+   但需要补齐 artifact 元数据协商流程。
+
+数据面消息建议:
+
+不建议用 protobuf 承载数据面 chunk。
+建议使用轻量二进制格式。
+
+建议消息类型:
+
+1. `TRANSFER_INIT`
+   字段:
+   - protocol_version
+   - artifact_id
+   - total_size
+   - chunk_size
+   - checksum
+
+2. `CHUNK`
+   字段:
+   - artifact_id
+   - offset
+   - length
+   - payload
+
+3. `TRANSFER_END`
+   字段:
+   - artifact_id
+   - total_chunks
+   - checksum
+
+4. `TRANSFER_ERROR`
+   字段:
+   - artifact_id
+   - error_code
+   - error_message
+
+第一版传输策略:
+
+1. 单连接
+2. 顺序 chunk 发送
+3. 接收端顺序写入临时文件
+4. 传输完成后做总 checksum 校验
+5. 校验通过后 rename 到正式路径
+
+建议 chunk 大小:
+
+- 初始值建议 `256 KB` 或 `512 KB`
+- 不建议第一版就做动态 chunk tuning
+
+两条核心时序:
+
+一、`worker -> main`
+
+1. worker 完成 task 计算
+2. 如果结果较小:
+   - 继续原有 `TASK_RESULT.output_vector`
+3. 如果结果较大:
+   - worker 本地生成 artifact
+   - worker 通过控制面发送 `TASK_RESULT.result_artifact_id`
+   - 并携带 transfer host/port/size/checksum
+   - main 通过独立 TCP 数据面连接 worker 拉取 artifact
+   - main 校验成功后进入聚合流程
+
+二、`main -> client`
+
+1. main 完成最终聚合
+2. 如果结果较小:
+   - 继续原有 `CLIENT_RESPONSE.output_vector`
+3. 如果结果较大:
+   - main 本地生成 artifact
+   - main 通过控制面返回 `result_artifact_id`
+   - 并携带 transfer host/port/size/checksum
+   - client 通过独立 TCP 数据面连接 main 拉取 artifact
+
+第一版推荐拓扑:
+
+1. 以“接收方主动拉取”为主。
+   - `main` 主动从 `worker` 拉取
+   - `client` 主动从 `main` 拉取
+
+原因:
+   - 更符合当前 main node 作为协调中心的角色
+   - 更方便未来在前端侧做下载进度可视化
+
+实现阶段建议:
+
+Phase 1. 文档和接口层
+- 定义控制面字段
+- 定义数据面 header
+- 定义 `artifact_manager` API
+
+Phase 2. worker -> main 数据面
+- 先打通 task result 的大数据拉取
+- main 聚合器改成可从 artifact 路径读取
+
+Phase 3. main -> client 数据面
+- client 识别 `result_artifact_id`
+- client 能从 main 拉取最终结果文件
+
+Phase 4. 可靠性增强
+- 失败回收临时文件
+- 传输状态记录
+- 基础重试
+
+对现有代码的落点建议:
+
+1. `wire/runtime.py`
+   - 只补充控制面 side-channel 所需字段和辅助 builder
+
+2. `main_node/runtime.py`
+   - 判断何时切到 artifact 模式
+   - 调用 artifact manager
+
+3. `compute_node/runtime.py`
+   - 大结果时不直接塞 protobuf
+   - 转而调用 artifact manager 发布 artifact
+
+4. `main_node/aggregator.py`
+   - 支持从 artifact 文件读取 task result
+
+5. `client` 对应 runtime 入口
+   - 支持根据 `result_artifact_id` 下载最终结果
+
+建议的高层 API:
+
+1. `publish_bytes(...) -> ArtifactDescriptor`
+2. `publish_file(...) -> ArtifactDescriptor`
+3. `fetch_to_file(descriptor, target_path) -> Path`
+4. `fetch_to_bytes(descriptor) -> bytes`
+
+其中 `ArtifactDescriptor` 至少包含:
+- `artifact_id`
+- `size_bytes`
+- `checksum`
+- `host`
+- `port`
+- `content_type`
+
+测试计划:
+
+1. 控制面测试
+   - artifact 元数据编解码
+   - `TaskResult` / `ClientResponse` 的 artifact 模式
+
+2. 数据面单元测试
+   - `TRANSFER_INIT` header 编解码
+   - 单个 chunk 发送接收
+   - checksum 校验失败路径
+
+3. 集成测试
+   - `worker -> main` 大结果拉取成功
+   - `main -> client` 大结果拉取成功
+   - 小结果仍保持原有 in-band 行为
+
+4. 回归测试
+   - `fmvm` 现有小结果链路不受影响
+   - `conv2d` 小规模请求继续可走 in-band
+
+主要风险:
+
+1. 端口管理
+   - 需要决定数据面端口是否固定、是否动态分配
+
+2. 临时文件清理
+   - 中断或失败时需要回收未完成 artifact
+
+3. 与前端体验的衔接
+   - Windows / iOS 前端后续需要能够处理“收到 artifact descriptor 后再下载”的模式
+
+4. 并发传输控制
+   - 第一版不宜过度并行，否则会放大 WiFi 环境下的拥塞和抖动
+
+当前推荐结论:
+
+1. 方向上，应该做独立 TCP 数据面。
+2. 第一版不应直接上 QUIC。
+3. 主循环应只保留 abstraction。
+4. `control_plane_message.py`、`data_plane_message.py`、`large_data_transfer.py`
+   这组拆分是合理的。
+5. 如果希望主循环更干净，建议额外加入 `artifact_manager.py`。
+
+建议的下一步:
+
+1. reviewer 确认文档中的模块边界和命名
+2. reviewer 确认第一版采用 TCP data plane
+3. reviewer 确认先做 `worker -> main` 还是同时做 `main -> client`
+4. 之后再进入实现阶段

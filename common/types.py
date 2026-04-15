@@ -65,8 +65,22 @@ class ComputeHardwarePerformance:
 
 
 @dataclass(slots=True)
+class MethodPerformanceSummary:
+    """One method-scoped benchmark summary reported by a compute node."""
+
+    method: str
+    hardware_count: int = 0
+    ranked_hardware: list[ComputeHardwarePerformance] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class ComputePerformanceSummary:
-    """Compact benchmark summary sent from a compute node to the scheduler."""
+    """Compact benchmark summary sent from a compute node to the scheduler.
+
+    `hardware_count` / `ranked_hardware` stay as a legacy compatibility view.
+    New multi-method code should prefer `method_summaries`.
+    """
 
     hardware_count: int = 0
     ranked_hardware: list[ComputeHardwarePerformance] = field(default_factory=list)
+    method_summaries: list[MethodPerformanceSummary] = field(default_factory=list)

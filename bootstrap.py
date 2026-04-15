@@ -37,7 +37,7 @@ BENCHMARK_RESULT_PATH = BENCHMARK_DIR / "result.json"
 def _benchmark_command() -> list[str]:
     """Build the local benchmark command using the current Python executable."""
 
-    return [str(active_python_path()), str(BENCHMARK_SCRIPT_PATH)]
+    return [str(active_python_path()), str(BENCHMARK_SCRIPT_PATH), "--method", "all"]
 
 
 def _setup_command() -> list[str]:

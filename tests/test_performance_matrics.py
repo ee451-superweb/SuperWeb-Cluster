@@ -15,33 +15,36 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-PERF_DIR = Path(__file__).resolve().parents[1] / "compute_node" / "performance_metrics"
-if str(PERF_DIR) not in sys.path:
-    sys.path.insert(0, str(PERF_DIR))
+PERF_DIR = (
+    Path(__file__).resolve().parents[1]
+    / "compute_node"
+    / "performance_metrics"
+    / "fixed_matrix_vector_multiplication"
+)
 
-import benchmark
-import backends as backend_registry
-from backends.cpu_backend import (
+from compute_node.performance_metrics import benchmark
+from compute_node.performance_metrics.fixed_matrix_vector_multiplication import backends as backend_registry
+from compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.cpu_backend import (
     CpuArtifacts,
     CpuBackend,
     _binary_tree_worker_candidates,
     _candidate_tile_sizes as cpu_candidate_tile_sizes,
     _cpu_artifacts_for_platform,
 )
-from backends.cuda_backend import (
+from compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.cuda_backend import (
     CudaBackend,
     _candidate_block_sizes as cuda_candidate_block_sizes,
     _candidate_tile_sizes as cuda_candidate_tile_sizes,
     _candidate_transpose_modes as cuda_candidate_transpose_modes,
     _windows_gencode_args,
 )
-from backends.dx12_backend import (
+from compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.dx12_backend import (
     Dx12Backend,
     _detect_non_nvidia_windows_adapter,
     _candidate_rows_per_thread as dx12_candidate_rows_per_thread,
     _candidate_thread_group_sizes as dx12_candidate_thread_group_sizes,
 )
-from backends.metal_backend import (
+from compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.metal_backend import (
     MetalBackend,
     _candidate_block_sizes as metal_candidate_block_sizes,
     _candidate_tile_sizes as metal_candidate_tile_sizes,
@@ -54,11 +57,23 @@ from compute_node.input_matrix import (
     generate_dataset,
     load_float32_file,
 )
-from models import DEFAULT_AUTOTUNE_REPEATS, DEFAULT_MEASUREMENT_REPEATS
-from path_utils import to_relative_cli_path
-from scoring import linear_time_score
-from workloads import build_benchmark_spec
+from compute_node.input_matrix import generate as input_matrix_generate_cli
+from compute_node.input_matrix.spatial_convolution import (
+    build_dataset_layout as build_conv_dataset_layout,
+    build_input_matrix_spec as build_conv_input_matrix_spec,
+    dataset_is_generated as conv_dataset_is_generated,
+    generate_dataset as generate_conv_dataset,
+)
+from compute_node.performance_metrics.fixed_matrix_vector_multiplication.models import (
+    DEFAULT_AUTOTUNE_REPEATS,
+    DEFAULT_MEASUREMENT_REPEATS,
+)
+from compute_node.performance_metrics.path_utils import to_relative_cli_path
+from compute_node.performance_metrics.fixed_matrix_vector_multiplication.scoring import linear_time_score
+from compute_node.performance_metrics.fixed_matrix_vector_multiplication.workloads import build_benchmark_spec
 import subprocess
+
+from app.constants import METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION
 
 
 class PerformanceMatricsTests(unittest.TestCase):
@@ -77,11 +92,24 @@ class PerformanceMatricsTests(unittest.TestCase):
         args = benchmark.build_parser().parse_args(["--accumulation-precision", "fp64_accumulate"])
         self.assertEqual(args.accumulation_precision, "fp64_accumulate")
 
+    def test_input_matrix_cli_defaults_to_all_methods(self) -> None:
+        args = input_matrix_generate_cli.build_parser().parse_args([])
+        self.assertEqual(args.method, "all")
+
     def test_windows_default_backend_order_routes_gpu_by_display_adapter(self) -> None:
         with (
-            mock.patch("backends.os.name", "nt"),
-            mock.patch("backends.detect_nvidia_windows_adapter", return_value=("NVIDIA GeForce RTX 4060 Laptop GPU", "")),
-            mock.patch("backends.detect_non_nvidia_windows_adapter", return_value=("AMD Radeon 780M Graphics", "")),
+            mock.patch(
+                "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.os.name",
+                "nt",
+            ),
+            mock.patch(
+                "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.detect_nvidia_windows_adapter",
+                return_value=("NVIDIA GeForce RTX 4060 Laptop GPU", ""),
+            ),
+            mock.patch(
+                "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.detect_non_nvidia_windows_adapter",
+                return_value=("AMD Radeon 780M Graphics", ""),
+            ),
         ):
             names = [backend.name for backend in backend_registry.build_backends()]
 
@@ -197,23 +225,43 @@ class PerformanceMatricsTests(unittest.TestCase):
 
             self.assertFalse(dataset_is_generated(layout, spec))
 
+    def test_spatial_convolution_dataset_generation_supports_small_override(self) -> None:
+        spec = build_conv_input_matrix_spec(h=16, w=16, c_in=4, c_out=8, k=3, pad=1, stride=1)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            layout = build_conv_dataset_layout(Path(temp_dir), prefix="test_")
+            generate_conv_dataset(layout, spec, generator_workers=2, chunk_values=16)
+            self.assertTrue(conv_dataset_is_generated(layout, spec))
+            self.assertEqual(layout.input_path.stat().st_size, spec.input_bytes)
+            self.assertEqual(layout.weight_path.stat().st_size, spec.weight_bytes)
+
     def test_small_override_uses_override_dataset_directory_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
             default_dataset_dir = temp_root / "generated"
             args = argparse.Namespace(
+                method=METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
                 backend=["cpu"],
                 dataset_dir=default_dataset_dir,
                 output=temp_root / "result.json",
                 time_budget=30.0,
+                rebuild=False,
                 accumulation_precision="fp32",
                 rows=8,
                 cols=16,
+                role="compute",
+                h=None,
+                w=None,
+                cin=None,
+                cout=None,
+                k=None,
+                pad=None,
+                stride=None,
             )
             with mock.patch.object(benchmark, "DEFAULT_DATASET_DIR", default_dataset_dir):
                 report = benchmark.run_benchmark(args)
 
-        dataset_root = Path(report["dataset"]["root_dir"])
+        method_report = report["methods"][METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION]
+        dataset_root = Path(method_report["dataset"]["root_dir"])
         self.assertEqual(dataset_root.parts[-3:], ("generated", "overrides", "8x16"))
 
     def test_benchmark_auto_generates_and_runs_cpu(self) -> None:
@@ -222,43 +270,64 @@ class PerformanceMatricsTests(unittest.TestCase):
         if not available:
             self.skipTest("CPU backend is unavailable in this environment.")
 
-        with tempfile.TemporaryDirectory() as temp_dir, mock.patch("backends.cpu_backend.os.cpu_count", return_value=1):
+        with tempfile.TemporaryDirectory() as temp_dir, mock.patch(
+            "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.cpu_backend.os.cpu_count",
+            return_value=1,
+        ):
             args = argparse.Namespace(
+                method=METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
                 backend=["cpu"],
                 dataset_dir=Path(temp_dir),
                 output=Path(temp_dir) / "result.json",
                 time_budget=30.0,
+                rebuild=False,
                 accumulation_precision="fp32",
                 rows=8,
                 cols=16,
+                role="compute",
+                h=None,
+                w=None,
+                cin=None,
+                cout=None,
+                k=None,
+                pad=None,
+                stride=None,
             )
             report = benchmark.run_benchmark(args)
 
-        self.assertEqual(report["method"], "fixed_matrix_vector_multiplication")
-        self.assertEqual(report["schema_version"], 2)
-        self.assertEqual(report["best_backend"], "cpu")
-        self.assertEqual(report["ranking"], ["cpu"])
-        self.assertIn("workload", report)
-        self.assertIn("host", report)
-        self.assertIn("hardware_inventory", report)
-        self.assertIn("detected_backends", report)
-        self.assertIn("usable_backends", report)
-        self.assertIn("backend_results", report)
-        assert isinstance(report["backend_results"], dict)
-        assert isinstance(report["hardware_inventory"], dict)
-        self.assertFalse(Path(report["dataset"]["root_dir"]).is_absolute())
-        self.assertFalse(Path(report["dataset"]["matrix_path"]).is_absolute())
-        self.assertFalse(Path(report["dataset"]["vector_path"]).is_absolute())
-        self.assertIn("cpu", report["backend_results"])
-        self.assertIn("cpu", report["hardware_inventory"])
-        self.assertIn("cpu", report["detected_backends"])
-        self.assertIn("cpu", report["usable_backends"])
-        self.assertEqual(report["workload"]["autotune_repeats"], DEFAULT_AUTOTUNE_REPEATS)
-        self.assertEqual(report["workload"]["measurement_repeats"], DEFAULT_MEASUREMENT_REPEATS)
-        self.assertEqual(report["workload"]["accumulation_precision"], "fp32")
-        self.assertEqual(report["workload"]["input_dtype"], "fp32")
-        self.assertEqual(report["workload"]["output_dtype"], "fp32")
-        cpu_result = report["backend_results"]["cpu"]
+        self.assertEqual(report["schema_version"], 4)
+        self.assertIn("device_overview", report)
+        self.assertIn("methods", report)
+        method_report = report["methods"][METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION]
+        self.assertEqual(method_report["method"], METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION)
+        self.assertEqual(method_report["best_backend"], "cpu")
+        self.assertEqual(method_report["ranking"], ["cpu"])
+        self.assertIn("workload", method_report)
+        self.assertIn("dataset", method_report)
+        self.assertIn("detected_backends", method_report)
+        self.assertIn("usable_backends", method_report)
+        self.assertIn("backends", method_report)
+        assert isinstance(method_report["backends"], dict)
+        self.assertFalse(Path(method_report["dataset"]["root_dir"]).is_absolute())
+        self.assertFalse(Path(method_report["dataset"]["artifacts"]["autotune_matrix"]).is_absolute())
+        self.assertFalse(Path(method_report["dataset"]["artifacts"]["autotune_vector"]).is_absolute())
+        self.assertFalse(Path(method_report["dataset"]["artifacts"]["measurement_matrix"]).is_absolute())
+        self.assertFalse(Path(method_report["dataset"]["artifacts"]["measurement_vector"]).is_absolute())
+        self.assertIn("cpu", method_report["backends"])
+        self.assertIn("cpu", method_report["detected_backends"])
+        self.assertIn("cpu", method_report["usable_backends"])
+        self.assertEqual(
+            method_report["workload"]["autotune_plan"]["autotune_repeats"],
+            DEFAULT_AUTOTUNE_REPEATS,
+        )
+        self.assertEqual(
+            method_report["workload"]["measurement_plan"]["measurement_repeats"],
+            DEFAULT_MEASUREMENT_REPEATS,
+        )
+        self.assertEqual(method_report["workload"]["autotune_plan"]["accumulation_precision"], "fp32")
+        self.assertEqual(method_report["workload"]["autotune_plan"]["input_dtype"], "fp32")
+        self.assertEqual(method_report["workload"]["autotune_plan"]["output_dtype"], "fp32")
+        cpu_result = method_report["backends"]["cpu"]
         self.assertTrue(cpu_result["available"])
         self.assertEqual(cpu_result["rank"], 1)
         self.assertIsNotNone(cpu_result["best_config"])
@@ -279,8 +348,7 @@ class PerformanceMatricsTests(unittest.TestCase):
         self.assertGreater(float(cpu_result["best_result"]["effective_gflops"]), 0.0)
         self.assertIn("checksum", cpu_result["best_result"])
         self.assertIn("effective_gflops", cpu_result["best_result"])
-        self.assertTrue(bool(report["hardware_inventory"]["cpu"]["probe_available"]))
-        self.assertTrue(str(report["hardware_inventory"]["cpu"]["probe_message"]))
+        self.assertTrue(str(cpu_result["device_name"]))
 
     def test_cuda_backend_probe_returns_status(self) -> None:
         backend = CudaBackend()
@@ -311,10 +379,22 @@ class PerformanceMatricsTests(unittest.TestCase):
             source_path.write_text("// source placeholder\n", encoding="utf-8")
 
             with (
-                mock.patch("backends.cuda_backend.os.name", "nt"),
-                mock.patch("backends.cuda_backend.CUDA_EXECUTABLE_PATH", binary_path),
-                mock.patch("backends.cuda_backend.CUDA_SOURCE_PATH", source_path),
-                mock.patch("backends.cuda_backend._detect_compute_capability", return_value="89"),
+                mock.patch(
+                    "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.cuda_backend.os.name",
+                    "nt",
+                ),
+                mock.patch(
+                    "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.cuda_backend.CUDA_EXECUTABLE_PATH",
+                    binary_path,
+                ),
+                mock.patch(
+                    "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.cuda_backend.CUDA_SOURCE_PATH",
+                    source_path,
+                ),
+                mock.patch(
+                    "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.cuda_backend._detect_compute_capability",
+                    return_value="89",
+                ),
                 mock.patch.object(backend, "_toolchain_status", return_value=(False, "nvcc missing")),
             ):
                 available, message = backend.probe()
@@ -332,8 +412,14 @@ class PerformanceMatricsTests(unittest.TestCase):
             source_path.write_text("// source placeholder\n", encoding="utf-8")
 
             with (
-                mock.patch("backends.cuda_backend.CUDA_EXECUTABLE_PATH", binary_path),
-                mock.patch("backends.cuda_backend.CUDA_SOURCE_PATH", source_path),
+                mock.patch(
+                    "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.cuda_backend.CUDA_EXECUTABLE_PATH",
+                    binary_path,
+                ),
+                mock.patch(
+                    "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.cuda_backend.CUDA_SOURCE_PATH",
+                    source_path,
+                ),
                 mock.patch.object(backend, "_toolchain_status", return_value=(False, "nvcc missing")),
             ):
                 with self.assertRaises(FileNotFoundError):
@@ -357,7 +443,10 @@ class PerformanceMatricsTests(unittest.TestCase):
             ),
             stderr="",
         )
-        with mock.patch("backends.dx12_backend.subprocess.run", return_value=completed):
+        with mock.patch(
+            "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.dx12_backend.subprocess.run",
+            return_value=completed,
+        ):
             adapter_name, message = _detect_non_nvidia_windows_adapter()
 
         self.assertEqual(adapter_name, "AMD Radeon 780M Graphics")
@@ -369,9 +458,18 @@ class PerformanceMatricsTests(unittest.TestCase):
             source_path = Path(temp_dir) / "fmvm_dx12_runner.cpp"
             source_path.write_text("// dx12 placeholder\n", encoding="utf-8")
             with (
-                mock.patch("backends.dx12_backend.os.name", "nt"),
-                mock.patch("backends.dx12_backend.DX12_SOURCE_PATH", source_path),
-                mock.patch("backends.dx12_backend._detect_non_nvidia_windows_adapter", return_value=(None, "no AMD or Intel adapter")),
+                mock.patch(
+                    "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.dx12_backend.os.name",
+                    "nt",
+                ),
+                mock.patch(
+                    "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.dx12_backend.DX12_SOURCE_PATH",
+                    source_path,
+                ),
+                mock.patch(
+                    "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.dx12_backend._detect_non_nvidia_windows_adapter",
+                    return_value=(None, "no AMD or Intel adapter"),
+                ),
             ):
                 available, message = backend.probe()
 
@@ -438,7 +536,10 @@ class PerformanceMatricsTests(unittest.TestCase):
         if not cpu_available or not metal_available:
             self.skipTest("CPU/Metal cross-implementation comparison is unavailable in this environment.")
 
-        with tempfile.TemporaryDirectory() as temp_dir, mock.patch("backends.cpu_backend.os.cpu_count", return_value=1):
+        with tempfile.TemporaryDirectory() as temp_dir, mock.patch(
+            "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.cpu_backend.os.cpu_count",
+            return_value=1,
+        ):
             spec = build_benchmark_spec(rows=8, cols=16)
             layout = build_dataset_layout(Path(temp_dir))
             generate_dataset(layout, spec)
@@ -508,7 +609,10 @@ class PerformanceMatricsTests(unittest.TestCase):
         if not cpu_available or not cuda_available:
             self.skipTest("CPU/CUDA cross-implementation comparison is unavailable in this environment.")
 
-        with tempfile.TemporaryDirectory() as temp_dir, mock.patch("backends.cpu_backend.os.cpu_count", return_value=1):
+        with tempfile.TemporaryDirectory() as temp_dir, mock.patch(
+            "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.cpu_backend.os.cpu_count",
+            return_value=1,
+        ):
             spec = build_benchmark_spec(rows=8, cols=16)
             layout = build_dataset_layout(Path(temp_dir))
             generate_dataset(layout, spec)

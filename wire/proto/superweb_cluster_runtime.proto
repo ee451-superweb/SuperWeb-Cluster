@@ -41,9 +41,16 @@ message ComputeHardwarePerformance {
   uint32 rank = 3;
 }
 
+message MethodPerformanceSummary {
+  string method = 1;
+  uint32 hardware_count = 2;
+  repeated ComputeHardwarePerformance ranked_hardware = 3;
+}
+
 message ComputePerformanceSummary {
   uint32 hardware_count = 1;
   repeated ComputeHardwarePerformance ranked_hardware = 2;
+  repeated MethodPerformanceSummary method_summaries = 3;
 }
 
 message RegisterOk {
@@ -99,6 +106,7 @@ message ClientResponse {
   string client_id = 12;
   // Echoes the iteration_count from the matching ClientRequest.
   uint32 iteration_count = 13;
+  string result_artifact_id = 14;
 }
 
 message TaskAssign {
@@ -116,6 +124,16 @@ message TaskAssign {
   bytes vector_data = 11;
   // How many times the assigned processor slice should execute this math.
   uint32 iteration_count = 12;
+  uint32 start_oc = 13;
+  uint32 end_oc = 14;
+  uint32 tensor_h = 15;
+  uint32 tensor_w = 16;
+  uint32 channels_in = 17;
+  uint32 channels_out = 18;
+  uint32 kernel_size = 19;
+  uint32 padding = 20;
+  uint32 stride = 21;
+  bytes weight_data = 22;
 }
 
 message TaskAccept {
@@ -147,6 +165,11 @@ message TaskResult {
   bytes output_vector = 9;
   // Echoes the iteration_count from the matching TaskAssign.
   uint32 iteration_count = 10;
+  uint32 start_oc = 11;
+  uint32 end_oc = 12;
+  uint32 output_h = 13;
+  uint32 output_w = 14;
+  string result_artifact_id = 15;
 }
 
 message RuntimeEnvelope {

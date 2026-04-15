@@ -6,7 +6,11 @@ import platform
 import sys
 import time
 
-from models import DEFAULT_ACCUMULATION_PRECISION, DEFAULT_AUTOTUNE_REPEATS, DEFAULT_MEASUREMENT_REPEATS
+from compute_node.performance_metrics.fixed_matrix_vector_multiplication.models import (
+    DEFAULT_ACCUMULATION_PRECISION,
+    DEFAULT_AUTOTUNE_REPEATS,
+    DEFAULT_MEASUREMENT_REPEATS,
+)
 
 
 def trial_sort_key(result) -> tuple[float, float]:
@@ -72,8 +76,11 @@ def build_report(
     method: str,
     total_elapsed: float,
     force_rebuild: bool,
-    dataset,
-    spec,
+    autotune_dataset,
+    measurement_dataset,
+    autotune_spec,
+    measurement_spec,
+    full_runtime_measurement: bool,
     dataset_was_generated: bool,
     hardware_inventory: dict[str, dict[str, object]],
     detected_backends: list[str],
@@ -100,15 +107,26 @@ def build_report(
         "generated_at_unix": time.time(),
         "benchmark_elapsed_seconds": total_elapsed,
         "workload": {
+            "autotune": {
+                "name": autotune_spec.name,
+                "rows": autotune_spec.rows,
+                "cols": autotune_spec.cols,
+            },
+            "measurement": {
+                "name": measurement_spec.name,
+                "rows": measurement_spec.rows,
+                "cols": measurement_spec.cols,
+            },
             "autotune_repeats": DEFAULT_AUTOTUNE_REPEATS,
-            "measurement_repeats": DEFAULT_MEASUREMENT_REPEATS,
+            "measurement_repeats": 1 if full_runtime_measurement else DEFAULT_MEASUREMENT_REPEATS,
             "selection_metric": "autotune_average_latency",
             "reported_metric": "measurement_average_latency",
             "force_rebuild": force_rebuild,
             "input_dtype": "fp32",
             "output_dtype": "fp32",
-            "accumulation_precision": spec.accumulation_precision or DEFAULT_ACCUMULATION_PRECISION,
+            "accumulation_precision": autotune_spec.accumulation_precision or DEFAULT_ACCUMULATION_PRECISION,
             "cross_backend_validation": "fp32_tolerance",
+            "full_runtime_measurement": full_runtime_measurement,
         },
         "host": {
             "platform": sys.platform,
@@ -118,13 +136,29 @@ def build_report(
             "python_version": platform.python_version(),
         },
         "dataset": {
-            "root_dir": to_relative_string(dataset.root_dir, start=root_dir),
-            "matrix_path": to_relative_string(dataset.matrix_path, start=root_dir),
-            "vector_path": to_relative_string(dataset.vector_path, start=root_dir),
-            "rows": spec.rows,
-            "cols": spec.cols,
-            "matrix_bytes": spec.matrix_bytes,
-            "vector_bytes": spec.vector_bytes,
+            "root_dir": to_relative_string(autotune_dataset.root_dir, start=root_dir),
+            "artifacts": {
+                "autotune_matrix": to_relative_string(autotune_dataset.matrix_path, start=root_dir),
+                "autotune_vector": to_relative_string(autotune_dataset.vector_path, start=root_dir),
+                "measurement_matrix": to_relative_string(measurement_dataset.matrix_path, start=root_dir),
+                "measurement_vector": to_relative_string(measurement_dataset.vector_path, start=root_dir),
+            },
+            "shape": {
+                "autotune": {
+                    "rows": autotune_spec.rows,
+                    "cols": autotune_spec.cols,
+                },
+                "measurement": {
+                    "rows": measurement_spec.rows,
+                    "cols": measurement_spec.cols,
+                },
+            },
+            "bytes": {
+                "autotune_matrix": autotune_spec.matrix_bytes,
+                "autotune_vector": autotune_spec.vector_bytes,
+                "measurement_matrix": measurement_spec.matrix_bytes,
+                "measurement_vector": measurement_spec.vector_bytes,
+            },
             "dataset_was_generated": dataset_was_generated,
         },
         "hardware_inventory": hardware_inventory,
