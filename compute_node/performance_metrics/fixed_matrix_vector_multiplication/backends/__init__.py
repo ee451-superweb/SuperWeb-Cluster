@@ -12,22 +12,21 @@ Each backend object is responsible for one compute target, for example:
 - Metal
 - OpenCL
 
-Today the automatic benchmark flow wires in CPU, CUDA, DX12, and Metal, and this
-folder is where future hardware-specific runners should be added.
+Today the automatic benchmark flow wires in CPU, CUDA, and Metal. The DX12
+module is retained on disk for postmortem debugging, but its benchmark entry
+point is disabled because it can trigger fatal system instability on some
+Windows machines.
 """
 
 from __future__ import annotations
 
 import os
 
+from app.constants import DX12_BACKEND_DISABLED_REASON
 from .cpu_backend import CpuBackend
 from .cuda_backend import CudaBackend
-from .dx12_backend import Dx12Backend
 from .metal_backend import MetalBackend
-from .windows_gpu_inventory import (
-    detect_non_nvidia_windows_adapter,
-    detect_nvidia_windows_adapter,
-)
+from .windows_gpu_inventory import detect_nvidia_windows_adapter
 
 
 def _known_backend_factories() -> dict[str, type[object]]:
@@ -36,7 +35,6 @@ def _known_backend_factories() -> dict[str, type[object]]:
     return {
         "cpu": CpuBackend,
         "cuda": CudaBackend,
-        "dx12": Dx12Backend,
         "metal": MetalBackend,
     }
 
@@ -44,24 +42,16 @@ def _known_backend_factories() -> dict[str, type[object]]:
 def _default_backend_names() -> list[str]:
     """Pick the backends that should run automatically.
 
-    On Windows we route GPU work by the display-adapter inventory:
-
-    - NVIDIA adapters prefer CUDA
-    - non-NVIDIA adapters prefer DX12
-
-    This keeps the default flow aligned with what the machine can realistically
-    execute instead of probing every GPU backend blindly.
+    On Windows we keep the default path conservative and exclude DX12 entirely
+    because the DX12 module is currently considered unsafe to run.
     """
 
     names = ["cpu"]
 
     if os.name == "nt":
         nvidia_adapter_name, _ = detect_nvidia_windows_adapter()
-        non_nvidia_adapter_name, _ = detect_non_nvidia_windows_adapter()
         if nvidia_adapter_name is not None:
             names.append("cuda")
-        if non_nvidia_adapter_name is not None:
-            names.append("dx12")
         return names
 
     names.extend(["cuda", "metal"])
@@ -91,6 +81,8 @@ def build_backends(names: list[str] | None = None) -> list[object]:
 
     backends: list[object] = []
     for name in ordered_names:
+        if name == "dx12":
+            raise ValueError(DX12_BACKEND_DISABLED_REASON)
         if name not in factories:
             raise ValueError(f"unknown backend {name!r}")
         backends.append(factories[name]())

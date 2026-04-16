@@ -26,6 +26,7 @@ from compute_node.compute_methods.spatial_convolution.performance_metrics.path_u
 from compute_node.compute_methods.spatial_convolution.performance_metrics.scoring import (
     linear_time_score,
 )
+from compute_node.performance_metrics.benchmark_status import emit_status
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 CPU_ROOT_DIR = ROOT_DIR / "conv2d_runners" / "cpu"
@@ -135,6 +136,17 @@ def _measurement_repeats(_spec: BenchmarkSpec | None = None) -> int:
 
 class CpuBackend:
     name = "cpu"
+
+    def diagnostic_context(self, spec: BenchmarkSpec | None = None) -> dict[str, object]:
+        hardware_workers = os.cpu_count() or 1
+        cout = 1 if spec is None else spec.c_out
+        return {
+            "hardware_workers": hardware_workers,
+            "worker_search_order": _binary_tree_worker_candidates(hardware_workers),
+            "tile_size_candidates": _candidate_tile_sizes(cout),
+            "autotune_repeats": _autotune_repeats(spec),
+            "measurement_repeats": _measurement_repeats(spec),
+        }
 
     def probe(self) -> tuple[bool, str]:
         artifacts = _current_cpu_artifacts()
@@ -279,6 +291,16 @@ class CpuBackend:
             "--autotune-repeats", str(autotune_repeats),
             "--measurement-repeats", str(measurement_repeats),
         ]
+        emit_status(
+            "method.spatial_convolution.backend.native_runner.start",
+            status="running",
+            method="spatial_convolution",
+            backend=self.name,
+            command=command,
+            timeout_seconds=timeout_seconds,
+            autotune_repeats=autotune_repeats,
+            measurement_repeats=measurement_repeats,
+        )
         completed = subprocess.run(
             command,
             check=True,
@@ -286,6 +308,13 @@ class CpuBackend:
             text=True,
             timeout=timeout_seconds,
             cwd=ROOT_DIR,
+        )
+        emit_status(
+            "method.spatial_convolution.backend.native_runner.complete",
+            status="running",
+            method="spatial_convolution",
+            backend=self.name,
+            command=command,
         )
         return json.loads(completed.stdout)
 

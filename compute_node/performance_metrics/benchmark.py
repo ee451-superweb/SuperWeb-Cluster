@@ -14,7 +14,17 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.constants import METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION, METHOD_SPATIAL_CONVOLUTION
+from app.runtime_environment import relaunch_with_project_python_if_needed
+from setup import active_python_path
+from app.constants import DX12_BACKEND_DISABLED_REASON, METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION, METHOD_SPATIAL_CONVOLUTION
+from compute_node.performance_metrics.benchmark_status import (
+    configure_status_environment,
+    emit_status,
+    mark_benchmark_failed,
+    mark_benchmark_finished,
+    mark_benchmark_started,
+    resolve_status_paths,
+)
 from compute_node.performance_metrics.device_overview import collect_device_overview
 from compute_node.performance_metrics.fixed_matrix_vector_multiplication.config import (
     DATASET_DIR as FMVM_DATASET_DIR,
@@ -53,8 +63,8 @@ def build_parser() -> argparse.ArgumentParser:
             METHOD_SPATIAL_CONVOLUTION,
             "all",
         ),
-        default=METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
-        help="Which method benchmark to run. Default keeps legacy FMVM behavior.",
+        default="all",
+        help="Which method benchmark to run. Default: run both methods in sequence.",
     )
     parser.add_argument(
         "--backend",
@@ -73,6 +83,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=DEFAULT_OUTPUT_PATH,
         help="JSON file that receives the benchmark report.",
+    )
+    parser.add_argument(
+        "--status-output",
+        type=Path,
+        default=None,
+        help="Crash-survivable JSON snapshot describing the last active benchmark step.",
+    )
+    parser.add_argument(
+        "--trace-output",
+        type=Path,
+        default=None,
+        help="JSONL trace file that appends every benchmark step as it runs.",
     )
     parser.add_argument(
         "--time-budget",
@@ -111,6 +133,16 @@ def _selected_methods(method_arg: str) -> list[str]:
 
 
 def _run_fmvm_benchmark(args: argparse.Namespace) -> dict[str, object]:
+    emit_status(
+        "method.fmvm.dispatch",
+        status="running",
+        method=METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
+        requested_backends=args.backend or ["auto"],
+        rebuild=bool(getattr(args, "rebuild", False)),
+        rows=args.rows,
+        cols=args.cols,
+        accumulation_precision=getattr(args, "accumulation_precision", "fp32"),
+    )
     fmvm_args = argparse.Namespace(
         backend=args.backend,
         dataset_dir=args.dataset_dir,
@@ -137,7 +169,7 @@ def _run_spatial_convolution_benchmark(args: argparse.Namespace) -> dict[str, ob
     with tempfile.TemporaryDirectory(prefix="superweb-spatial-benchmark-") as temp_dir:
         temp_output_path = Path(temp_dir) / "spatial_convolution_result.json"
         command = [
-            sys.executable,
+            str(active_python_path()),
             str(SPATIAL_CONV_BENCHMARK_PATH),
             "--output",
             str(temp_output_path),
@@ -164,16 +196,48 @@ def _run_spatial_convolution_benchmark(args: argparse.Namespace) -> dict[str, ob
             if value is not None:
                 command.extend([cli_flag, str(value)])
 
-        subprocess.run(
-            command,
-            check=True,
-            cwd=PROJECT_ROOT,
-            timeout=3600.0,
-            capture_output=True,
-            text=True,
+        emit_status(
+            "method.spatial_convolution.subprocess.start",
+            status="running",
+            method=METHOD_SPATIAL_CONVOLUTION,
+            command=command,
+            cwd=str(PROJECT_ROOT),
+            dataset_dir=str(METHOD_DATASET_DIRS[METHOD_SPATIAL_CONVOLUTION]),
+            role=args.role,
         )
+        try:
+            subprocess.run(
+                command,
+                check=True,
+                cwd=PROJECT_ROOT,
+                timeout=3600.0,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or "").strip()
+            stdout = (exc.stdout or "").strip()
+            error_text = stderr or stdout or str(exc)
+            if DX12_BACKEND_DISABLED_REASON in error_text:
+                error_text = DX12_BACKEND_DISABLED_REASON
+            emit_status(
+                "method.spatial_convolution.subprocess.error",
+                status="failed",
+                method=METHOD_SPATIAL_CONVOLUTION,
+                error=error_text,
+                returncode=exc.returncode,
+            )
+            raise RuntimeError(error_text) from exc
         payload = json.loads(temp_output_path.read_text(encoding="utf-8"))
         payload.setdefault("benchmark_elapsed_seconds", time.perf_counter() - started)
+        emit_status(
+            "method.spatial_convolution.subprocess.complete",
+            status="running",
+            method=METHOD_SPATIAL_CONVOLUTION,
+            elapsed_seconds=payload.get("benchmark_elapsed_seconds"),
+            usable_backends=payload.get("usable_backends", []),
+            ranking=payload.get("ranking", []),
+        )
         return payload
 
 
@@ -242,31 +306,132 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
     methods = _selected_methods(getattr(args, "method", METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION))
     started = time.perf_counter()
     raw_method_reports: dict[str, dict[str, object]] = {}
+    total_steps = len(methods) + 2
     for method_name in methods:
+        method_index = len(raw_method_reports) + 1
+        emit_status(
+            "method.start",
+            status="running",
+            method=method_name,
+            step_index=method_index,
+            total_steps=total_steps,
+        )
+        print(
+            f"[benchmark] Step {method_index}/{total_steps}: running {method_name} benchmark...",
+            flush=True,
+        )
         if method_name == METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION:
             raw_method_reports[method_name] = _run_fmvm_benchmark(args)
         elif method_name == METHOD_SPATIAL_CONVOLUTION:
             raw_method_reports[method_name] = _run_spatial_convolution_benchmark(args)
         else:
             raise ValueError(f"unsupported benchmark method: {method_name}")
+        elapsed = time.perf_counter() - started
+        print(
+            f"[benchmark] Completed {method_name} benchmark in {elapsed:.2f}s.",
+            flush=True,
+        )
+        emit_status(
+            "method.complete",
+            status="running",
+            method=method_name,
+            step_index=method_index,
+            total_steps=total_steps,
+            elapsed_seconds=elapsed,
+            usable_backends=(raw_method_reports[method_name] or {}).get("usable_backends", []),
+            ranking=(raw_method_reports[method_name] or {}).get("ranking", []),
+        )
 
+    print(
+        f"[benchmark] Step {len(methods) + 1}/{total_steps}: normalizing combined report...",
+        flush=True,
+    )
+    emit_status(
+        "benchmark.normalize.start",
+        status="running",
+        step_index=len(methods) + 1,
+        total_steps=total_steps,
+        methods=methods,
+    )
     normalized_report = _normalize_results(
         raw_method_reports,
         total_elapsed=time.perf_counter() - started,
     )
+    print(
+        f"[benchmark] Step {len(methods) + 2}/{total_steps}: writing benchmark reports...",
+        flush=True,
+    )
+    emit_status(
+        "benchmark.write_reports.start",
+        status="running",
+        step_index=len(methods) + 2,
+        total_steps=total_steps,
+        methods=list(raw_method_reports),
+    )
     _write_method_reports(normalized_report)
+    emit_status(
+        "benchmark.write_reports.complete",
+        status="running",
+        methods=list(raw_method_reports),
+        ranking_summary={
+            method_name: ((normalized_report.get("methods") or {}).get(method_name) or {}).get("ranking", [])
+            for method_name in raw_method_reports
+        },
+    )
     return normalized_report
 
 
 def main(argv: list[str] | None = None) -> int:
+    relaunch_result = relaunch_with_project_python_if_needed(
+        argv,
+        script_path=Path(__file__),
+        cwd=PROJECT_ROOT,
+    )
+    if relaunch_result is not None:
+        return relaunch_result
+
     args = build_parser().parse_args(argv)
-    report = run_benchmark(args)
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    report_text = json.dumps(report, indent=2)
-    args.output.write_text(report_text, encoding="utf-8")
-    print(report_text, flush=True)
-    return 0
+    status_path, trace_path = resolve_status_paths(
+        output_path=args.output,
+        status_path=args.status_output,
+        trace_path=args.trace_output,
+    )
+    configure_status_environment(status_path=status_path, trace_path=trace_path)
+    methods = _selected_methods(getattr(args, "method", METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION))
+    mark_benchmark_started(
+        argv=list(sys.argv[1:] if argv is None else argv),
+        cwd=PROJECT_ROOT,
+        output_path=args.output,
+        methods=methods,
+    )
+
+    started = time.perf_counter()
+    try:
+        report = run_benchmark(args)
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        report_text = json.dumps(report, indent=2)
+        args.output.write_text(report_text, encoding="utf-8")
+        print(report_text, flush=True)
+        mark_benchmark_finished(
+            output_path=args.output,
+            methods_completed=methods,
+            elapsed_seconds=time.perf_counter() - started,
+        )
+        return 0
+    except Exception as exc:
+        mark_benchmark_failed(
+            output_path=args.output,
+            error=str(exc),
+            methods_started=methods,
+        )
+        raise
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        raise SystemExit(130)
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1)

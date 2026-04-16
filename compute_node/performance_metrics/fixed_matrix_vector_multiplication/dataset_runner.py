@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import subprocess
-import sys
 from pathlib import Path
 
+from setup import active_python_path
+from compute_node.performance_metrics.benchmark_status import emit_status
 from compute_node.input_matrix.fixed_matrix_vector_multiplication import (
     build_dataset_layout,
     build_input_matrix_spec,
@@ -48,7 +49,7 @@ def generate_dataset_if_missing(
         return False
 
     command = [
-        sys.executable,
+        str(active_python_path()),
         to_relative_cli_path(generate_script_path, start=root_dir),
         "--output-dir",
         to_relative_cli_path(dataset_dir, start=root_dir),
@@ -59,7 +60,27 @@ def generate_dataset_if_missing(
     ]
     if not require_runtime_measurement:
         command.append("--skip-runtime")
+    emit_status(
+        "method.fmvm.dataset.generate.start",
+        status="running",
+        method="fixed_matrix_vector_multiplication",
+        dataset_dir=str(dataset_dir),
+        test_rows=test_rows,
+        test_cols=test_cols,
+        require_runtime_measurement=require_runtime_measurement,
+        command=command,
+        cwd=str(root_dir),
+    )
     subprocess.run(command, check=True, cwd=root_dir)
+    emit_status(
+        "method.fmvm.dataset.generate.complete",
+        status="running",
+        method="fixed_matrix_vector_multiplication",
+        dataset_dir=str(dataset_dir),
+        test_rows=test_rows,
+        test_cols=test_cols,
+        require_runtime_measurement=require_runtime_measurement,
+    )
 
     generated_test = dataset_is_generated(test_layout, test_spec)
     generated_runtime = dataset_is_generated(runtime_layout, runtime_spec)

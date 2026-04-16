@@ -23,6 +23,7 @@ from compute_node.compute_methods.spatial_convolution.performance_metrics.path_u
 from compute_node.compute_methods.spatial_convolution.performance_metrics.scoring import (
     linear_time_score,
 )
+from compute_node.performance_metrics.benchmark_status import emit_status
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 METAL_DIR = ROOT_DIR / "conv2d_runners" / "metal"
@@ -46,6 +47,15 @@ def _candidate_tile_sizes() -> list[int]:
 
 class MetalBackend:
     name = "metal"
+
+    def diagnostic_context(self, _spec: BenchmarkSpec | None = None) -> dict[str, object]:
+        return {
+            "block_size_candidates": _candidate_block_sizes(),
+            "tile_size_candidates": _candidate_tile_sizes(),
+            "autotune_repeats": DEFAULT_AUTOTUNE_REPEATS,
+            "measurement_repeats": DEFAULT_MEASUREMENT_REPEATS,
+            "runner_path": str(METAL_EXECUTABLE_PATH),
+        }
 
     def probe(self) -> tuple[bool, str]:
         if sys.platform != "darwin": return False, "Metal backend is only available on macOS."
@@ -152,6 +162,16 @@ class MetalBackend:
             "--autotune-repeats", str(autotune_repeats),
             "--measurement-repeats", str(measurement_repeats),
         ]
+        emit_status(
+            "method.spatial_convolution.backend.native_runner.start",
+            status="running",
+            method="spatial_convolution",
+            backend=self.name,
+            command=command,
+            timeout_seconds=timeout_seconds,
+            autotune_repeats=autotune_repeats,
+            measurement_repeats=measurement_repeats,
+        )
         completed = subprocess.run(
             command,
             check=True,
@@ -159,5 +179,12 @@ class MetalBackend:
             text=True,
             timeout=timeout_seconds,
             cwd=ROOT_DIR,
+        )
+        emit_status(
+            "method.spatial_convolution.backend.native_runner.complete",
+            status="running",
+            method="spatial_convolution",
+            backend=self.name,
+            command=command,
         )
         return json.loads(completed.stdout)

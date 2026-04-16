@@ -229,6 +229,8 @@ __marimo__/
 
 # Local generated datasets and benchmark reports
 /compute_node/performance_metrics/result.json
+/compute_node/performance_metrics/result_status.json
+/compute_node/performance_metrics/result_trace.jsonl
 /compute_node/performance_metrics/*/result.json
 /compute_node/input_matrix/*/generated/
 /compute_node/compute_methods/**/dataset/generated/
@@ -237,6 +239,12 @@ __marimo__/
 
 # Local build artifacts from compute methods
 /compute_node/compute_methods/**/performance_metrics/conv2d_runners/**/build/
+!/compute_node/compute_methods/spatial_convolution/performance_metrics/conv2d_runners/cpu/windows/build/
+/compute_node/compute_methods/spatial_convolution/performance_metrics/conv2d_runners/cpu/windows/build/*
+!/compute_node/compute_methods/spatial_convolution/performance_metrics/conv2d_runners/cpu/windows/build/fmvm_cpu_windows.exe
+!/compute_node/compute_methods/spatial_convolution/performance_metrics/conv2d_runners/cuda/build/
+/compute_node/compute_methods/spatial_convolution/performance_metrics/conv2d_runners/cuda/build/*
+!/compute_node/compute_methods/spatial_convolution/performance_metrics/conv2d_runners/cuda/build/fmvm_cuda_runner.exe
 /compute_node/compute_methods/**/*.obj
 /compute_node/compute_methods/**/*.ilk
 /compute_node/compute_methods/**/*.pdb

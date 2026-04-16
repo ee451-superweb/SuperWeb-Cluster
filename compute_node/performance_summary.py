@@ -12,6 +12,7 @@ from common.types import ComputeHardwarePerformance, ComputePerformanceSummary, 
 
 DEFAULT_RESULT_PATH = Path(__file__).resolve().parent / "performance_metrics" / "result.json"
 WEAK_PROCESSOR_THRESHOLD = 0.5
+DISABLED_RUNTIME_BACKENDS = frozenset({"dx12"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +118,8 @@ def _iter_ranked_backend_entries(payload: dict[str, Any]) -> list[tuple[str, dic
     for fallback_rank, backend_name in enumerate(ranked_backend_names, start=1):
         backend_entry = backend_results.get(backend_name)
         if not isinstance(backend_entry, dict):
+            continue
+        if str(backend_name) in DISABLED_RUNTIME_BACKENDS:
             continue
         if not backend_entry.get("available"):
             continue

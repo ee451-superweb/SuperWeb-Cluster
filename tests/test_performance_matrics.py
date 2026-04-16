@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import tempfile
@@ -23,6 +24,8 @@ PERF_DIR = (
 )
 
 from compute_node.performance_metrics import benchmark
+from compute_node.performance_metrics import result_format
+from compute_node.compute_methods.spatial_convolution.performance_metrics import backends as spatial_backend_registry
 from compute_node.performance_metrics.fixed_matrix_vector_multiplication import backends as backend_registry
 from compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.cpu_backend import (
     CpuArtifacts,
@@ -38,12 +41,6 @@ from compute_node.performance_metrics.fixed_matrix_vector_multiplication.backend
     _candidate_transpose_modes as cuda_candidate_transpose_modes,
     _windows_gencode_args,
 )
-from compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.dx12_backend import (
-    Dx12Backend,
-    _detect_non_nvidia_windows_adapter,
-    _candidate_rows_per_thread as dx12_candidate_rows_per_thread,
-    _candidate_thread_group_sizes as dx12_candidate_thread_group_sizes,
-)
 from compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.metal_backend import (
     MetalBackend,
     _candidate_block_sizes as metal_candidate_block_sizes,
@@ -57,13 +54,16 @@ from compute_node.input_matrix import (
     generate_dataset,
     load_float32_file,
 )
+from compute_node.input_matrix import generator as shared_input_generator
 from compute_node.input_matrix import generate as input_matrix_generate_cli
+from compute_node.input_matrix.fixed_matrix_vector_multiplication import generate as fmvm_generate_cli
 from compute_node.input_matrix.spatial_convolution import (
     build_dataset_layout as build_conv_dataset_layout,
     build_input_matrix_spec as build_conv_input_matrix_spec,
     dataset_is_generated as conv_dataset_is_generated,
     generate_dataset as generate_conv_dataset,
 )
+from compute_node.input_matrix.spatial_convolution import generate as spatial_generate_cli
 from compute_node.performance_metrics.fixed_matrix_vector_multiplication.models import (
     DEFAULT_AUTOTUNE_REPEATS,
     DEFAULT_MEASUREMENT_REPEATS,
@@ -73,7 +73,7 @@ from compute_node.performance_metrics.fixed_matrix_vector_multiplication.scoring
 from compute_node.performance_metrics.fixed_matrix_vector_multiplication.workloads import build_benchmark_spec
 import subprocess
 
-from app.constants import METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION
+from app.constants import DX12_BACKEND_DISABLED_REASON, METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION, METHOD_SPATIAL_CONVOLUTION
 
 
 class PerformanceMatricsTests(unittest.TestCase):
@@ -92,9 +92,128 @@ class PerformanceMatricsTests(unittest.TestCase):
         args = benchmark.build_parser().parse_args(["--accumulation-precision", "fp64_accumulate"])
         self.assertEqual(args.accumulation_precision, "fp64_accumulate")
 
+    def test_benchmark_parser_defaults_to_all_methods(self) -> None:
+        args = benchmark.build_parser().parse_args([])
+        self.assertEqual(args.method, "all")
+
     def test_input_matrix_cli_defaults_to_all_methods(self) -> None:
         args = input_matrix_generate_cli.build_parser().parse_args([])
         self.assertEqual(args.method, "all")
+        self.assertEqual(args.workers, max(1, os.cpu_count() or 1))
+        self.assertEqual(args.chunk_mib, 8)
+
+    def test_method_local_generate_parsers_use_cpu_count_and_8mib_chunks(self) -> None:
+        fmvm_args = fmvm_generate_cli.build_parser().parse_args([])
+        spatial_args = spatial_generate_cli.build_parser().parse_args([])
+
+        expected_workers = max(1, os.cpu_count() or 1)
+        self.assertEqual(fmvm_args.workers, expected_workers)
+        self.assertEqual(spatial_args.workers, expected_workers)
+        self.assertEqual(fmvm_args.chunk_mib, 8)
+        self.assertEqual(spatial_args.chunk_mib, 8)
+
+    def test_normalize_method_report_adds_structured_cuda_environment(self) -> None:
+        raw_method = {
+            "generated_at_unix": 123.0,
+            "benchmark_elapsed_seconds": 1.5,
+            "workload": {
+                "autotune": {"name": "test-conv2d"},
+                "measurement": {"name": "runtime-conv2d"},
+                "autotune_repeats": 3,
+                "measurement_repeats": 1,
+                "full_runtime_measurement": True,
+            },
+            "hardware_inventory": {
+                "cuda": {
+                    "probe_message": "CUDA backend available for 'NVIDIA GeForce RTX 4060 Laptop GPU'. Existing binary is older than the source, so it will be rebuilt.",
+                }
+            },
+            "backends": {
+                "cuda": {
+                    "available": True,
+                    "rank": 1,
+                    "best_config": {"block_size": 256, "tile_size": 16, "trials_run": 4},
+                    "autotune_result": {
+                        "wall_clock_latency_seconds": 0.1,
+                        "effective_gflops": 100.0,
+                        "checksum": "chk_a",
+                        "score": 1000.0,
+                    },
+                    "best_result": {
+                        "wall_clock_latency_seconds": 0.2,
+                        "effective_gflops": 200.0,
+                        "checksum": "chk_b",
+                        "score": 1000.0,
+                    },
+                    "notes": [
+                        "compiled CUDA runner from conv2d_runners/cuda/fmvm_cuda_runner.cu; fatbin SMs: sm_75, sm_89",
+                        "Autotuned on test-conv2d and measured on runtime-conv2d.",
+                    ],
+                    "trial_notes": ["device=NVIDIA GeForce RTX 4060 Laptop GPU"],
+                }
+            },
+            "backends_considered": ["cuda"],
+            "detected_backends": ["cuda"],
+            "usable_backends": ["cuda"],
+            "ranking": ["cuda"],
+            "best_backend": "cuda",
+        }
+
+        with (
+            mock.patch.object(
+                result_format,
+                "_detect_cuda_gpu_inventory",
+                return_value=[
+                    {
+                        "name": "NVIDIA GeForce RTX 4060 Laptop GPU",
+                        "sm_digits": "89",
+                        "driver_version": "576.52",
+                    }
+                ],
+            ),
+            mock.patch.object(result_format, "_detect_nvcc_version", return_value="13.2"),
+        ):
+            normalized = result_format.normalize_method_report(
+                method_name=METHOD_SPATIAL_CONVOLUTION,
+                raw_method=raw_method,
+                dataset_root="compute_node/input_matrix/spatial_convolution/generated",
+                device_overview={},
+            )
+
+        cuda_backend = normalized["backends"]["cuda"]
+        self.assertEqual(
+            cuda_backend["cuda_environment"],
+            {
+                "detected_architecture": "Ada",
+                "sm_version": "sm_89",
+                "driver_version": "576.52",
+                "nvcc_version": "13.2",
+                "binary_status": "recompiled",
+            },
+        )
+        self.assertEqual(
+            cuda_backend["notes"],
+            ["binary recompiled", "test autotune, runtime measurement"],
+        )
+
+    def test_write_float32_file_parallelizes_even_when_one_chunk_would_cover_the_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
+            shared_input_generator,
+            "_write_float32_file_parallel",
+            return_value="parallel-sha256",
+        ) as parallel_writer:
+            output_path = Path(temp_dir) / "test.bin"
+            sha256_hex = shared_input_generator.write_float32_file(
+                output_path,
+                total_values=32,
+                seed=123,
+                chunk_values=1024,
+                label="test.bin",
+                worker_count=2,
+            )
+
+        self.assertEqual(sha256_hex, "parallel-sha256")
+        parallel_writer.assert_called_once()
 
     def test_windows_default_backend_order_routes_gpu_by_display_adapter(self) -> None:
         with (
@@ -106,14 +225,25 @@ class PerformanceMatricsTests(unittest.TestCase):
                 "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.detect_nvidia_windows_adapter",
                 return_value=("NVIDIA GeForce RTX 4060 Laptop GPU", ""),
             ),
-            mock.patch(
-                "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.detect_non_nvidia_windows_adapter",
-                return_value=("AMD Radeon 780M Graphics", ""),
-            ),
         ):
             names = [backend.name for backend in backend_registry.build_backends()]
 
-        self.assertEqual(names, ["cpu", "cuda", "dx12"])
+        self.assertEqual(names, ["cpu", "cuda"])
+
+    def test_spatial_windows_default_backend_order_routes_gpu_by_display_adapter(self) -> None:
+        with (
+            mock.patch(
+                "compute_node.compute_methods.spatial_convolution.performance_metrics.backends.os.name",
+                "nt",
+            ),
+            mock.patch(
+                "compute_node.compute_methods.spatial_convolution.performance_metrics.backends.detect_nvidia_windows_adapter",
+                return_value=("NVIDIA GeForce RTX 4060 Laptop GPU", ""),
+            ),
+        ):
+            names = [backend.name for backend in spatial_backend_registry.build_backends()]
+
+        self.assertEqual(names, ["cpu", "cuda"])
 
     def test_cpu_artifacts_follow_platform(self) -> None:
         windows_artifacts = _cpu_artifacts_for_platform("win32")
@@ -295,7 +425,7 @@ class PerformanceMatricsTests(unittest.TestCase):
             )
             report = benchmark.run_benchmark(args)
 
-        self.assertEqual(report["schema_version"], 4)
+        self.assertEqual(report["schema_version"], 5)
         self.assertIn("device_overview", report)
         self.assertIn("methods", report)
         method_report = report["methods"][METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION]
@@ -365,9 +495,9 @@ class PerformanceMatricsTests(unittest.TestCase):
         self.assertIn("-gencode=arch=compute_90,code=sm_90", args)
         self.assertIn("-gencode=arch=compute_120,code=sm_120", args)
 
-    def test_dx12_candidate_search_spaces_are_short(self) -> None:
-        self.assertEqual(dx12_candidate_thread_group_sizes(), [256, 512])
-        self.assertEqual(dx12_candidate_rows_per_thread(), [1, 2])
+    def test_fmvm_dx12_backend_request_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, re.escape(DX12_BACKEND_DISABLED_REASON)):
+            backend_registry.build_backends(["dx12"])
 
     def test_cuda_backend_probe_accepts_prebuilt_windows_runner_without_nvcc(self) -> None:
         backend = CudaBackend()
@@ -425,66 +555,9 @@ class PerformanceMatricsTests(unittest.TestCase):
                 with self.assertRaises(FileNotFoundError):
                     backend._resolve_executable_path(force_rebuild=True)
 
-    def test_dx12_backend_probe_returns_status(self) -> None:
-        backend = Dx12Backend()
-        available, message = backend.probe()
-        self.assertIsInstance(available, bool)
-        self.assertTrue(message)
-
-    def test_detect_non_nvidia_windows_adapter_prefers_amd_or_intel(self) -> None:
-        completed = subprocess.CompletedProcess(
-            args=["powershell"],
-            returncode=0,
-            stdout=json.dumps(
-                [
-                    {"Name": "NVIDIA GeForce RTX 4060 Laptop GPU", "AdapterCompatibility": "NVIDIA", "PNPDeviceID": "PCI\\VEN_10DE"},
-                    {"Name": "AMD Radeon 780M Graphics", "AdapterCompatibility": "Advanced Micro Devices, Inc.", "PNPDeviceID": "PCI\\VEN_1002"},
-                ]
-            ),
-            stderr="",
-        )
-        with mock.patch(
-            "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.dx12_backend.subprocess.run",
-            return_value=completed,
-        ):
-            adapter_name, message = _detect_non_nvidia_windows_adapter()
-
-        self.assertEqual(adapter_name, "AMD Radeon 780M Graphics")
-        self.assertEqual(message, "")
-
-    def test_dx12_backend_probe_rejects_nvidia_only_hosts(self) -> None:
-        backend = Dx12Backend()
-        with tempfile.TemporaryDirectory() as temp_dir:
-            source_path = Path(temp_dir) / "fmvm_dx12_runner.cpp"
-            source_path.write_text("// dx12 placeholder\n", encoding="utf-8")
-            with (
-                mock.patch(
-                    "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.dx12_backend.os.name",
-                    "nt",
-                ),
-                mock.patch(
-                    "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.dx12_backend.DX12_SOURCE_PATH",
-                    source_path,
-                ),
-                mock.patch(
-                    "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.dx12_backend._detect_non_nvidia_windows_adapter",
-                    return_value=(None, "no AMD or Intel adapter"),
-                ),
-            ):
-                available, message = backend.probe()
-
-        self.assertFalse(available)
-        self.assertIn("no AMD or Intel adapter", message)
-
-    def test_dx12_backend_rejects_fp64_accumulate(self) -> None:
-        backend = Dx12Backend()
-        with tempfile.TemporaryDirectory() as temp_dir:
-            layout = build_dataset_layout(Path(temp_dir))
-            spec = build_benchmark_spec(rows=8, cols=16, accumulation_precision="fp64_accumulate")
-            result = backend.run(spec, layout, time_budget_seconds=1.0)
-
-        self.assertFalse(result.available)
-        self.assertIn("only fp32 accumulation", result.notes[0])
+    def test_spatial_dx12_backend_request_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, re.escape(DX12_BACKEND_DISABLED_REASON)):
+            spatial_backend_registry.build_backends(["dx12"])
 
     def test_metal_backend_probe_returns_status(self) -> None:
         backend = MetalBackend()

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -11,9 +12,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from app.runtime_environment import relaunch_with_project_python_if_needed
 from app.constants import METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION, METHOD_SPATIAL_CONVOLUTION
 from compute_node.input_matrix.fixed_matrix_vector_multiplication.generate import main as generate_fmvm_main
 from compute_node.input_matrix.spatial_convolution.generate import main as generate_spatial_main
+
+DEFAULT_GENERATOR_WORKERS = max(1, os.cpu_count() or 1)
+DEFAULT_CHUNK_MIB = 8
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -30,8 +35,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override the generated dataset directory for a single selected method.",
     )
     parser.add_argument("--force", action="store_true", help="Rewrite matching datasets.")
-    parser.add_argument("--workers", type=int, default=None, help="Optional generator worker count.")
-    parser.add_argument("--chunk-mib", type=int, default=32, help="Chunk size in MiB used while streaming data.")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=DEFAULT_GENERATOR_WORKERS,
+        help="Generator worker count. Default: OS logical processor count.",
+    )
+    parser.add_argument(
+        "--chunk-mib",
+        type=int,
+        default=DEFAULT_CHUNK_MIB,
+        help="Chunk size in MiB used while streaming data.",
+    )
     parser.add_argument("--skip-runtime", action="store_true", help="Generate only the test dataset.")
     parser.add_argument("--rows", type=int, help="FMVM test-only row-count override.")
     parser.add_argument("--cols", type=int, help="FMVM test-only column-count override.")
@@ -103,6 +118,14 @@ def _build_spatial_args(args: argparse.Namespace) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    relaunch_result = relaunch_with_project_python_if_needed(
+        argv,
+        script_path=Path(__file__),
+        cwd=PROJECT_ROOT,
+    )
+    if relaunch_result is not None:
+        return relaunch_result
+
     args = build_parser().parse_args(argv)
     methods = _selected_methods(args.method)
     if args.output_dir is not None and len(methods) > 1:

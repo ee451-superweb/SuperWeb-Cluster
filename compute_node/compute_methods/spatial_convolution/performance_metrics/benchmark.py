@@ -14,6 +14,8 @@ PROJECT_ROOT = ROOT_DIR.parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from setup import active_python_path
+from compute_node.performance_metrics.benchmark_status import emit_status
 from compute_node.compute_methods.spatial_convolution.performance_metrics.backends import (
     build_backends,
 )
@@ -64,7 +66,7 @@ def _generate_if_needed(dataset_dir: Path, spec, role: str, *, require_runtime_m
 
     script = ROOT_DIR.parent / "dataset" / "generate.py"
     cmd = [
-        sys.executable,
+        str(active_python_path()),
         str(script),
         "--output-dir",
         str(dataset_dir),
@@ -89,7 +91,25 @@ def _generate_if_needed(dataset_dir: Path, spec, role: str, *, require_runtime_m
         cmd.append("--include-runtime-weight")
     else:
         cmd.append("--skip-runtime")
+    emit_status(
+        "method.spatial_convolution.dataset.generate.start",
+        status="running",
+        method="spatial_convolution",
+        dataset_dir=str(dataset_dir),
+        role=role,
+        require_runtime_measurement=require_runtime_measurement,
+        command=cmd,
+        cwd=str(PROJECT_ROOT),
+    )
     subprocess.run(cmd, check=True)
+    emit_status(
+        "method.spatial_convolution.dataset.generate.complete",
+        status="running",
+        method="spatial_convolution",
+        dataset_dir=str(dataset_dir),
+        role=role,
+        require_runtime_measurement=require_runtime_measurement,
+    )
 
 
 def _serialize_backend_result(result: dict, rank: int | None) -> dict:
@@ -130,7 +150,33 @@ def _spec_to_dict(spec) -> dict:
 def _final_measurement_repeats(use_runtime_measurement: bool) -> int:
     return 1 if use_runtime_measurement else DEFAULT_MEASUREMENT_REPEATS
 
+
+def _backend_diagnostic_context(backend, spec: BenchmarkSpec) -> dict[str, object] | None:
+    builder = getattr(backend, "diagnostic_context", None)
+    if not callable(builder):
+        return None
+    try:
+        payload = builder(spec)
+    except TypeError:
+        payload = builder()
+    return payload if isinstance(payload, dict) else None
+
 def run_benchmark(args: argparse.Namespace) -> dict:
+    emit_status(
+        "method.spatial_convolution.start",
+        status="running",
+        method="spatial_convolution",
+        requested_backends=args.backend or ["auto"],
+        rebuild=bool(getattr(args, "rebuild", False)),
+        role=args.role,
+        h=args.h,
+        w=args.w,
+        cin=args.cin,
+        cout=args.cout,
+        k=args.k,
+        pad=args.pad,
+        stride=args.stride,
+    )
     spec = build_benchmark_spec(
         h=args.h,
         w=args.w,
@@ -168,10 +214,37 @@ def run_benchmark(args: argparse.Namespace) -> dict:
     for b in backends:
         print(f" -> Probing {b.name}...")
         probe_available, probe_message = b.probe()
+        emit_status(
+            "method.spatial_convolution.backend.probe",
+            status="running",
+            method="spatial_convolution",
+            backend=b.name,
+            probe_available=bool(probe_available),
+            probe_message=str(probe_message),
+            diagnostic_context=_backend_diagnostic_context(b, spec),
+        )
         hardware_inventory[b.name] = {
             "probe_available": bool(probe_available),
             "probe_message": str(probe_message),
         }
+        emit_status(
+            "method.spatial_convolution.backend.start",
+            status="running",
+            method="spatial_convolution",
+            backend=b.name,
+            autotune_spec=_spec_to_dict(spec),
+            measurement_spec=_spec_to_dict(measurement_spec),
+            dataset_paths={
+                "autotune_input": str(test_layout.input_path),
+                "autotune_weight": str(test_layout.weight_path),
+                "measurement_input": str(measurement_layout.input_path),
+                "measurement_weight": str(measurement_layout.weight_path),
+            },
+            probe_available=bool(probe_available),
+            probe_message=str(probe_message),
+            diagnostic_context=_backend_diagnostic_context(b, spec),
+            force_rebuild=bool(args.rebuild),
+        )
         result = b.run(
             spec,
             test_layout,
@@ -182,6 +255,15 @@ def run_benchmark(args: argparse.Namespace) -> dict:
         )
         res = result.to_dict() if hasattr(result, 'to_dict') else result
         backend_results[b.name] = res
+        emit_status(
+            "method.spatial_convolution.backend.complete",
+            status="running",
+            method="spatial_convolution",
+            backend=b.name,
+            available=bool(res.get("available")),
+            selected_config=res.get("selected_config") or res.get("best_config"),
+            notes=res.get("notes", []),
+        )
 
         if res.get("available"):
             best = res.get("best_trial") or res.get("best_result") or {}
@@ -206,6 +288,13 @@ def run_benchmark(args: argparse.Namespace) -> dict:
     detected_backends = [
         name for name, inventory in hardware_inventory.items() if inventory.get("probe_available")
     ]
+    emit_status(
+        "method.spatial_convolution.complete",
+        status="running",
+        method="spatial_convolution",
+        detected_backends=detected_backends,
+        ranking=ranking,
+    )
 
     return {
         "schema_version": 2,
@@ -247,3 +336,6 @@ if __name__ == "__main__":
         sys.exit(main())
     except KeyboardInterrupt:
         sys.exit(130)
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)

@@ -20,7 +20,9 @@ This workspace now uses a method-scoped layout:
 
 The benchmark consumes method-scoped datasets from `../input_matrix/README.md`.
 It also does not own the low-level method implementations themselves. Shared
-CPU/CUDA/DX12/Metal runners live under `../compute_methods/`.
+CPU/CUDA/Metal runners live under `../compute_methods/`. The DX12 source tree
+is still present for debugging, but its benchmark and runtime entry points are
+disabled in this build because the module can trigger fatal system instability.
 
 `bootstrap.py` is still the top-level project entrypoint. In normal use, this
 benchmark workspace is invoked automatically when
@@ -92,10 +94,10 @@ Top-level `benchmark.py` acts as the orchestrator:
 7. normalize the output into one shared `result.json` schema
 8. write both the aggregate report and the per-method `result.json` files
 
-On Windows, the default GPU routing is intentionally simple:
+On Windows, the default GPU routing is intentionally conservative:
 
 - if Device Manager reports an NVIDIA display adapter, the automatic benchmark includes `cuda`
-- if Device Manager reports a non-NVIDIA display adapter such as AMD Radeon 780M or Intel graphics, the automatic benchmark includes `dx12`
+- DX12 is excluded entirely because repeated `spatial_convolution` runs on the AMD Radeon 780M path caused system-level crashes
 
 ## Main Files
 
@@ -127,8 +129,6 @@ On Windows, the default GPU routing is intentionally simple:
   - Windows/macOS CPU backend adapter
 - `backends/cuda_backend.py`
   - CUDA backend adapter
-- `backends/dx12_backend.py`
-  - Windows DX12 backend adapter for non-CUDA GPU paths
 - `backends/metal_backend.py`
   - Metal backend adapter
 - `../compute_methods/fixed_matrix_vector_multiplication/cpu/windows/fmvm_cpu_windows.cpp`
@@ -137,10 +137,6 @@ On Windows, the default GPU routing is intentionally simple:
   - macOS CPU compute runner
 - `../compute_methods/fixed_matrix_vector_multiplication/cuda/fmvm_cuda_runner.cu`
   - CUDA compute runner
-- `../compute_methods/fixed_matrix_vector_multiplication/dx12/fmvm_dx12_runner.cpp`
-  - Windows DX12 compute runner
-  - benchmark mode uploads the fixed matrix once per benchmark process
-  - compute-node runtime can also keep it resident across many assigned tasks
 - `../compute_methods/fixed_matrix_vector_multiplication/metal/fmvm_metal_runner.mm`
   - Metal host runner
 - `../compute_methods/fixed_matrix_vector_multiplication/metal/fmvm_metal_kernels.metal`
@@ -162,16 +158,6 @@ On Windows, the default GPU routing is intentionally simple:
   - the checked-in Windows CUDA runner is built as a fat binary for `sm_75`, `sm_80`, `sm_86`, `sm_89`, `sm_90`, and `sm_120`
   - runtime needs only a compatible NVIDIA driver; `nvcc` and Visual Studio are only needed for rebuilding
   - keeps the matrix-vector arithmetic in FP32
-- `dx12`
-  - Windows-only backend for DirectX 12 compute
-  - intended as the first native GPU path for integrated GPUs such as Radeon 780M
-  - reserved for non-NVIDIA adapters so it complements CUDA instead of duplicating it on GeForce hardware
-  - prefers the minimum-power DXGI adapter before falling back to general hardware enumeration
-  - sweeps `thread_group_size` and `rows_per_thread`
-  - uses a slightly longer autotune phase than the other backends so iGPU burst noise is less likely to pick the wrong config
-  - uses a thread-group reduction kernel so adjacent GPU lanes walk adjacent matrix columns instead of striding across rows
-  - links only against Windows Direct3D 12 system libraries and keeps the arithmetic in FP32
-  - now participates in the default automatic benchmark order
 - `metal`
   - enabled on macOS when a prebuilt self-contained runner is present, or when
     `xcrun` can resolve `metal`, `metallib`, and `clang++`
@@ -239,34 +225,6 @@ Run only the Metal backend:
 python "compute_node/performance_metrics/benchmark.py" --backend metal
 ```
 
-Run only the DX12 backend:
-
-```bash
-python "compute_node/performance_metrics/benchmark.py" --backend dx12
-```
-
-Run the DX12 benchmark and force a local rebuild of the native runner:
-
-```bash
-python "compute_node/performance_metrics/benchmark.py" --backend dx12 --rebuild
-```
-
-Run the raw DX12 executable directly for one fixed config:
-
-```bash
-compute_node\compute_methods\fixed_matrix_vector_multiplication\dx12\build\fmvm_dx12_runner.exe ^
-  --matrix ..\input_matrix\generated\A.bin ^
-  --vector ..\input_matrix\generated\x.bin ^
-  --output %TEMP%\fmvm_dx12_output.bin ^
-  --rows 16384 ^
-  --cols 32768 ^
-  --row-start 0 ^
-  --row-end 16384 ^
-  --fixed-thread-group-size 512 ^
-  --fixed-rows-per-thread 1 ^
-  --iteration-count 1
-```
-
 Generate the FMVM dataset without running the benchmark:
 
 ```bash
@@ -307,16 +265,23 @@ production dataset does not get overwritten.
 
 - Generated datasets in `compute_node/input_matrix/generated/` and benchmark
   reports such as `result.json` are local-only and git-ignored.
-- `generate.py` uses 32 MiB streaming chunks by default and, when NumPy is
+- `generate.py` uses 8 MiB streaming chunks by default and, when NumPy is
   installed, generates each chunk with vectorized integer math instead of a
   Python per-value loop.
 - The matrix generator can also fan out chunk writes across multiple workers
   for a faster one-time dataset build on larger machines.
 - The benchmark entrypoint itself is now split into smaller helper modules so
   dataset preparation and report assembly do not live in one giant file.
-- The FMVM CPU/CUDA/DX12/Metal sources now live under `compute_node/compute_methods/`
+- The FMVM CPU/CUDA/Metal sources now live under `compute_node/compute_methods/`
   so `performance_metrics/` stays focused on benchmarking rather than owning
   method source trees.
+- The DX12 module is disabled in this build. Repeated
+  `spatial_convolution` benchmark runs on the AMD Radeon 780M path caused
+  fatal system instability and at least one power-protection event that
+  required a BIOS reset before the machine would power on normally again.
+- DX12 source files remain in-tree for postmortem debugging only. Benchmark
+  and runtime entry points reject DX12 requests with a fatal warning instead of
+  launching the native runner.
 - The shared dataset metadata is intentionally generic. It records dataset
   shape, dtype, seeds, hashes, and file layout without embedding
   `performance_metrics/`-specific tuning state.

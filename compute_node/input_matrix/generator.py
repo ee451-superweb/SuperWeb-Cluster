@@ -5,7 +5,9 @@ from __future__ import annotations
 import concurrent.futures
 import hashlib
 import json
+import math
 import os
+import io
 from pathlib import Path
 from typing import Callable
 
@@ -14,38 +16,50 @@ from .spec import (
     DEFAULT_MATRIX_SEED,
     DEFAULT_VECTOR_SEED,
     GENERATOR_ALGORITHM,
-    HASH_READ_BYTES,
-    PROGRESS_STEP_BYTES,
     DatasetLayout,
     InputMatrixSpec,
 )
 from .splitmix import np, float32_chunk_from_counter
 
+WRITE_SLICE_BYTES = 4 * 1024 * 1024
+AUTO_GENERATOR_WORKER_CAP = 16
 
-def _hash_file_sha256(path: Path) -> str:
-    """Hash one generated file in a streaming pass."""
 
-    sha256 = hashlib.sha256()
-    with path.open("rb") as handle:
-        while True:
-            chunk = handle.read(HASH_READ_BYTES)
-            if not chunk:
-                break
-            sha256.update(chunk)
-    return sha256.hexdigest()
+def _write_generated_chunk(
+    handle: io.BufferedWriter,
+    sha256: hashlib._Hash,
+    chunk: bytes | bytearray,
+    *,
+    label: str,
+    completed_bytes: int,
+    total_bytes: int,
+    progress: Callable[[str, int, int], None] | None = None,
+) -> int:
+    """Write one generated chunk in smaller slices to smooth I/O and progress updates."""
+
+    chunk_view = memoryview(chunk)
+    try:
+        for offset in range(0, len(chunk_view), WRITE_SLICE_BYTES):
+            piece = chunk_view[offset:offset + WRITE_SLICE_BYTES]
+            handle.write(piece)
+            sha256.update(piece)
+            completed_bytes += len(piece)
+            if progress:
+                progress(label, completed_bytes, total_bytes)
+    finally:
+        chunk_view.release()
+    return completed_bytes
 
 
 def _generator_worker_count(requested_workers: int | None, total_values: int, chunk_values: int) -> int:
     """Choose a conservative worker count for dataset generation."""
 
     resolved_workers = max(1, int(requested_workers)) if requested_workers is not None else 0
-    if total_values <= chunk_values:
+    if total_values <= 0:
         return 1
-    if np is None:
-        return resolved_workers or 1
 
     cpu_count = os.cpu_count() or 1
-    automatic_workers = max(1, min(cpu_count, 8))
+    automatic_workers = max(1, min(cpu_count, AUTO_GENERATOR_WORKER_CAP))
     return resolved_workers or automatic_workers
 
 
@@ -61,14 +75,29 @@ def _build_chunk_plan(total_values: int, chunk_values: int) -> list[tuple[int, i
     return plan
 
 
-def _write_chunk_to_existing_file(path: str, offset_bytes: int, count: int, start_index: int, seed: int) -> int:
-    """Worker entrypoint that fills one byte range inside an already-open file."""
+def _parallel_chunk_values(total_values: int, chunk_values: int, worker_count: int) -> int:
+    """Split large logical chunks further so multiple workers can actually help."""
 
-    chunk = float32_chunk_from_counter(count, start_index, seed)
-    with Path(path).open("r+b", buffering=0) as handle:
-        handle.seek(offset_bytes)
-        handle.write(chunk)
-    return len(chunk)
+    if worker_count <= 1 or total_values <= 1:
+        return max(1, chunk_values)
+
+    min_parallel_chunks = max(2, worker_count * 2)
+    current_chunks = max(1, math.ceil(total_values / chunk_values))
+    if current_chunks >= min_parallel_chunks:
+        return max(1, chunk_values)
+
+    adjusted_chunk_values = math.ceil(total_values / min_parallel_chunks)
+    min_reasonable_chunk_values = max(1, (1024 * 1024) // 4)
+    if total_values > min_reasonable_chunk_values:
+        adjusted_chunk_values = max(min_reasonable_chunk_values, adjusted_chunk_values)
+    return max(1, min(chunk_values, adjusted_chunk_values))
+
+
+def _generate_chunk_bytes(task: tuple[int, int, int]) -> bytes | bytearray:
+    """Worker entrypoint that returns one deterministic float32 byte chunk."""
+
+    count, start_index, seed = task
+    return float32_chunk_from_counter(count, start_index, seed)
 
 
 def _remove_if_exists(path: Path) -> None:
@@ -95,31 +124,37 @@ def _write_float32_file_parallel(
     total_bytes = total_values * 4
     temp_path = path.with_suffix(path.suffix + ".tmp")
     completed_bytes = 0
-    plan = _build_chunk_plan(total_values, chunk_values)
+    effective_chunk_values = _parallel_chunk_values(total_values, chunk_values, worker_count)
+    plan = _build_chunk_plan(total_values, effective_chunk_values)
+    sha256 = hashlib.sha256()
+    executor_cls = concurrent.futures.ThreadPoolExecutor if np is not None else concurrent.futures.ProcessPoolExecutor
 
     _remove_if_exists(temp_path)
     try:
-        with temp_path.open("wb") as handle:
-            handle.truncate(total_bytes)
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = [
-                executor.submit(
-                    _write_chunk_to_existing_file,
-                    str(temp_path),
-                    offset_bytes,
-                    current_chunk_values,
-                    start_index,
-                    seed,
+        with temp_path.open("wb") as handle, executor_cls(max_workers=worker_count) as executor:
+            chunk_iter = executor.map(
+                _generate_chunk_bytes,
+                ((current_chunk_values, start_index, seed) for _offset_bytes, current_chunk_values, start_index in plan),
+            )
+            for (_offset_bytes, current_chunk_values, _start_index), chunk in zip(plan, chunk_iter):
+                chunk_bytes = bytes(chunk)
+                expected_bytes = current_chunk_values * 4
+                if len(chunk_bytes) != expected_bytes:
+                    raise ValueError(
+                        f"{label} generated {len(chunk_bytes)} bytes for a {current_chunk_values}-value chunk; "
+                        f"expected {expected_bytes}"
+                    )
+                completed_bytes = _write_generated_chunk(
+                    handle,
+                    sha256,
+                    chunk_bytes,
+                    label=label,
+                    completed_bytes=completed_bytes,
+                    total_bytes=total_bytes,
+                    progress=progress,
                 )
-                for offset_bytes, current_chunk_values, start_index in plan
-            ]
-            for future in concurrent.futures.as_completed(futures):
-                completed_bytes += int(future.result())
-                if progress:
-                    progress(label, completed_bytes, total_bytes)
 
-        sha256_hex = _hash_file_sha256(temp_path)
+        sha256_hex = sha256.hexdigest()
         temp_path.replace(path)
         return sha256_hex
     except Exception:
@@ -155,7 +190,6 @@ def write_float32_file(
     temp_path = path.with_suffix(path.suffix + ".tmp")
     sha256 = hashlib.sha256()
     written_values = 0
-    next_progress_bytes = PROGRESS_STEP_BYTES
 
     _remove_if_exists(temp_path)
     try:
@@ -163,16 +197,17 @@ def write_float32_file(
             while written_values < total_values:
                 current_chunk_values = min(chunk_values, total_values - written_values)
                 chunk = float32_chunk_from_counter(current_chunk_values, written_values, seed)
-                handle.write(chunk)
-                sha256.update(chunk)
-                written_values += current_chunk_values
                 written_bytes = written_values * 4
-                handle.flush()
-
-                if progress and (written_bytes >= next_progress_bytes or written_values == total_values):
-                    progress(label, written_bytes, total_bytes)
-                    while next_progress_bytes <= written_bytes:
-                        next_progress_bytes += PROGRESS_STEP_BYTES
+                written_bytes = _write_generated_chunk(
+                    handle,
+                    sha256,
+                    chunk,
+                    label=label,
+                    completed_bytes=written_bytes,
+                    total_bytes=total_bytes,
+                    progress=progress,
+                )
+                written_values += current_chunk_values
 
         temp_path.replace(path)
         return sha256.hexdigest()

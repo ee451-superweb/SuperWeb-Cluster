@@ -12,12 +12,12 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.constants import DX12_BACKEND_DISABLED_REASON
 from common.work_partition import partition_contiguous_range
 from compute_node.compute_methods.fixed_matrix_vector_multiplication import (
     CPU_MACOS_EXECUTABLE_PATH,
     CPU_WINDOWS_EXECUTABLE_PATH,
     CUDA_EXECUTABLE_PATH,
-    DX12_EXECUTABLE_PATH,
     FMVM_METHOD_DIR,
 )
 from compute_node.input_matrix.fixed_matrix_vector_multiplication import (
@@ -295,9 +295,7 @@ class FixedMatrixVectorTaskExecutor:
         )
         if not dx12_processors or sys.platform != "win32":
             return None
-        if not dataset_is_generated(self.dataset_layout, self.spec):
-            return None
-        return _Dx12ResidentRunner(self.dataset_layout, self.spec, dx12_processors)
+        return None
 
     def _build_runtime_command(
         self,
@@ -377,34 +375,7 @@ class FixedMatrixVectorTaskExecutor:
             ]
 
         if processor.hardware_type == "dx12":
-            executable_path = DX12_EXECUTABLE_PATH
-            thread_group_size = int(processor.best_config.get("thread_group_size") or 128)
-            rows_per_thread = int(processor.best_config.get("rows_per_thread") or 1)
-            return [
-                str(executable_path),
-                "--matrix",
-                str(self.dataset_layout.matrix_path),
-                "--vector",
-                str(vector_path),
-                "--output",
-                str(output_path),
-                "--rows",
-                str(self.spec.rows),
-                "--cols",
-                str(self.spec.cols),
-                "--row-start",
-                str(processor_slice.row_start),
-                "--row-end",
-                str(processor_slice.row_end),
-                "--fixed-thread-group-size",
-                str(thread_group_size),
-                "--fixed-rows-per-thread",
-                str(rows_per_thread),
-                # Task mode uses iteration_count to repeat the same math locally
-                # without resending the client request through the cluster.
-                "--iteration-count",
-                str(iteration_count),
-            ]
+            raise ValueError(DX12_BACKEND_DISABLED_REASON)
 
         raise ValueError(f"unsupported local processor type: {processor.hardware_type}")
 

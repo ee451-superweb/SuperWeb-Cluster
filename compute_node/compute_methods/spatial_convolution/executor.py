@@ -10,7 +10,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-from app.constants import METHOD_SPATIAL_CONVOLUTION, STATUS_OK
+from app.constants import DX12_BACKEND_DISABLED_REASON, METHOD_SPATIAL_CONVOLUTION, STATUS_OK
+from setup import active_python_path
 from compute_node.performance_metrics.spatial_convolution.config import (
     DATASET_DIR as TOP_LEVEL_DATASET_DIR,
     GENERATE_SCRIPT_PATH as TOP_LEVEL_GENERATE_SCRIPT_PATH,
@@ -23,6 +24,7 @@ PERF_DIR = METHOD_DIR / "performance_metrics"
 DEFAULT_CONV_RESULT_PATH = TOP_LEVEL_RESULT_PATH
 DEFAULT_DATASET_DIR = TOP_LEVEL_DATASET_DIR
 DATASET_GENERATE_SCRIPT_PATH = TOP_LEVEL_GENERATE_SCRIPT_PATH
+DISABLED_SPATIAL_BACKENDS = frozenset({"dx12"})
 
 
 def _load_module(module_name: str, path: Path):
@@ -50,9 +52,17 @@ def _best_backend_name(result_path: Path) -> str:
     if isinstance(methods, dict):
         method_payload = methods.get(METHOD_SPATIAL_CONVOLUTION) or {}
         ranking = method_payload.get("ranking", [])
-        return str(ranking[0]) if ranking else "cpu"
+        for backend_name in ranking:
+            name = str(backend_name)
+            if name not in DISABLED_SPATIAL_BACKENDS:
+                return name
+        return "cpu"
     ranking = payload.get("ranking", [])
-    return str(ranking[0]) if ranking else "cpu"
+    for backend_name in ranking:
+        name = str(backend_name)
+        if name not in DISABLED_SPATIAL_BACKENDS:
+            return name
+    return "cpu"
 
 
 def _runner_path(backend_name: str) -> Path:
@@ -64,6 +74,8 @@ def _runner_path(backend_name: str) -> Path:
             return runners_dir / "cpu" / "macos" / "build" / "fmvm_cpu_macos"
     if backend_name == "cuda":
         return runners_dir / "cuda" / "build" / ("fmvm_cuda_runner.exe" if os.name == "nt" else "fmvm_cuda_runner")
+    if backend_name == "dx12":
+        raise ValueError(DX12_BACKEND_DISABLED_REASON)
     if backend_name == "metal":
         return runners_dir / "metal" / "build" / "fmvm_metal_runner"
     raise ValueError(f"unsupported spatial_convolution backend: {backend_name}")
@@ -118,7 +130,7 @@ def _ensure_dataset_ready(dataset_dir: Path) -> None:
         return
     subprocess.run(
         [
-            sys.executable,
+            str(active_python_path()),
             str(DATASET_GENERATE_SCRIPT_PATH),
             "--output-dir",
             str(dataset_dir),

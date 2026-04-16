@@ -50,6 +50,12 @@ RUNTIME_MSG_TASK_RESULT = "TASK_RESULT"
 METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION = "fixed_matrix_vector_multiplication"
 METHOD_SPATIAL_CONVOLUTION = "spatial_convolution"
 
+DX12_BACKEND_DISABLED_REASON = (
+    "DX12 backend is disabled due to a fatal instability bug that can trigger "
+    "system-level crashes or power-protection events during benchmark execution. "
+    "Do not use DX12 in this build."
+)
+
 STATUS_OK = 200
 STATUS_ACCEPTED = 202
 STATUS_BAD_REQUEST = 400

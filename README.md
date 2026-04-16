@@ -13,6 +13,71 @@ Sprint 2 hardened that baseline around the first production method, expanded
 hardware benchmark coverage, and reshaped the repository so new compute methods
 can be added without collapsing everything back into one runtime path.
 
+## Features
+
+| Capability | Description |
+|---|---|
+| **Auto-Discovery** | Zero-configuration LAN discovery via mDNS, with `discover` and `announce` bootstrap roles |
+| **Method-Aware Benchmarking** | Each node benchmarks supported methods locally and reports per-method GFLOPS summaries during registration |
+| **GFLOPS-Aware Scheduling** | The main node tracks benchmark-derived processor inventories and partitions work proportionally to measured throughput |
+| **Deterministic Input Data** | Shared fixed-seed generators create byte-stable FMVM and spatial-convolution datasets on every machine |
+| **Native Runner Stack** | In-tree CPU, CUDA, and Metal runners back both benchmarking and compute-node task execution |
+| **Structured Runtime Protocol** | Registration, heartbeat, client requests, task assignment, and task results all flow through framed protobuf messages |
+| **Crash-Survivable Benchmark Tracing** | Benchmark progress is persisted to `result_status.json` and `result_trace.jsonl` for postmortem analysis |
+
+## System Picture
+
+```text
+Client
+  |
+  |  CLIENT_REQUEST(method, object_id, iteration_count, payload)
+  v
+Main Node
+  |
+  |  before accepting work:
+  |  1. prepare local dataset cache
+  |  2. run local benchmark for supported methods
+  |  3. collect worker registrations and method summaries
+  |
+  |  runtime responsibilities:
+  |  - choose method-aware scheduler
+  |  - partition work by benchmarked GFLOPS
+  |  - aggregate task results into one client response
+  v
+Compute Nodes
+  |
+  |  on startup:
+  |  1. prepare deterministic dataset cache
+  |  2. run local method benchmarks
+  |  3. register per-method hardware summaries
+  |
+  |  on task receipt:
+  |  - dispatch to the selected native runner
+  |  - execute the local slice
+  |  - return a structured task result
+```
+
+## Method Workloads
+
+The project currently uses two representative methods:
+
+| Method | Autotune Workload | Reported Workload | Primary Partition |
+|---|---|---|---|
+| `fixed_matrix_vector_multiplication` | `2048 x 4096` | `16384 x 32768` (`2 GiB` matrix) | contiguous row ranges |
+| `spatial_convolution` | `256 x 256`, `32 -> 64`, `k=3`, `pad=1`, `stride=1` | `2048 x 2048`, `128 -> 256`, `k=3`, `pad=1`, `stride=1` | contiguous output-channel ranges |
+
+We use them as two different workload styles:
+
+- `fixed_matrix_vector_multiplication`
+  - represents a more bandwidth-sensitive, inference-like proxy workload
+- `spatial_convolution`
+  - represents a more compute-dense, training-like proxy workload
+
+The benchmark autotunes on the smaller workload, then reports speed on the
+larger workload. For `spatial_convolution`, protocol and runtime plumbing are
+already in-tree, while the large-result data-plane path is still being
+hardened for very large outputs.
+
 ## Progress Through Sprint 2
 
 Sprint 1 delivered:
@@ -32,13 +97,14 @@ Sprint 1 delivered:
 Sprint 2 delivered the current baseline:
 
 - fixed-matrix-vector task distribution and result aggregation
-- Windows DX12 compute benchmarking for non-CUDA GPU paths
+- initial Windows DX12 compute benchmarking experiments for non-CUDA GPU paths
 - a cleaner repository split across `app/`, `common/`, `wire/`, `main_node/`, and `compute_node/`
 - explicit separation between `setup.py` environment preparation and `bootstrap.py` runtime startup
 - shared compute-method source trees under `compute_node/compute_methods/`
 - a deterministic shared FMVM dataset workspace under `compute_node/input_matrix/`
-- four in-tree FMVM backend families: CPU, CUDA, DX12, and Metal
-- Windows GPU backend routing that distinguishes NVIDIA/CUDA from non-NVIDIA/DX12 paths
+- three active in-tree FMVM backend families: CPU, CUDA, and Metal
+- the DX12 source tree is retained for debugging, but its entry points are disabled because the module can trigger fatal system instability
+- Windows GPU backend routing now defaults to the routine-safe CUDA path when an NVIDIA adapter is present
 - a two-phase benchmark flow with autotune plus measurement for the reported result
 - runtime use of benchmark summaries to register worker compute capacity
 - expanded tests and documentation for the reorganized runtime model
@@ -223,17 +289,30 @@ The main runtime protobuf messages are:
 - `TASK_FAIL`
 - `TASK_RESULT`
 
-Right now the active executable method is:
+The runtime and benchmark stack now recognize two methods:
 
 - `fixed_matrix_vector_multiplication`
+- `spatial_convolution`
 
-The client sends one 32K-length FP32 vector, the main node splits matrix rows
-across workers in proportion to registered GFLOPS, and compute nodes execute
-their assigned row ranges on the processors they kept after local filtering.
-Both the client response and worker task messages echo the assigned runtime id
-and the requested `iteration_count`.
-That `iteration_count` is a compute-side loop count for one structured request,
-not a request-resend count at the client or main-node layer.
+`fixed_matrix_vector_multiplication` is the most mature end-to-end path today:
+
+- the client sends one FP32 vector payload
+- the main node partitions matrix rows by registered GFLOPS
+- compute nodes execute their assigned row ranges on the processors that
+  survived local benchmark filtering
+- the main node aggregates row slices into one `CLIENT_RESPONSE`
+
+`spatial_convolution` is already integrated into the method registry, benchmark
+workspace, and runtime handler structure:
+
+- the benchmark path is fully method-aware and uses test/runtime dataset pairs
+- the runtime protocol and executors understand output-channel slicing
+- large-result transport is the remaining hardening area for the biggest
+  outputs, so that path is still under active development
+
+Across both methods, `iteration_count` is a compute-side loop count for one
+structured request, not a request-resend count at the client or main-node
+layer.
 
 ## Quick Start
 
@@ -255,6 +334,9 @@ Run only the benchmark workspace:
 python "compute_node/performance_metrics/benchmark.py"
 ```
 
+That default benchmark now runs both supported methods in sequence and writes a
+combined report plus crash-survivable progress files.
+
 Generate only the shared matrix/vector dataset:
 
 ```bash
@@ -271,21 +353,25 @@ python "compute_node/input_matrix/generate.py"
 - Standalone networking experiments now live under `experiments/networking/`.
 - Tree and planning documents now live under `docs/`.
 - Generated datasets under `compute_node/input_matrix/generated/` and benchmark
-  reports such as `compute_node/performance_metrics/result.json` are local
-  machine artifacts and stay git-ignored.
+  reports such as `compute_node/performance_metrics/result.json`,
+  `compute_node/performance_metrics/result_status.json`, and
+  `compute_node/performance_metrics/result_trace.jsonl` are local machine
+  artifacts and stay git-ignored.
 - Shared compute-method implementations now live under
   `compute_node/compute_methods/`, so runtime executors and benchmark backends
   no longer hide method source trees inside `performance_metrics/`.
-- The FMVM compute method now has four native backend families in-tree:
-  CPU, CUDA, DX12, and Metal.
-- On Windows, automatic GPU backend selection now inspects display adapters:
-  NVIDIA adapters route to CUDA, and non-NVIDIA adapters route to DX12.
-  You can still force DX12 explicitly with
-  `compute_node/performance_metrics/benchmark.py --backend dx12`.
+- The FMVM compute method currently exposes three routine-safe native backend
+  families in-tree: CPU, CUDA, and Metal.
+- The DX12 module is currently disabled in this build. Repeated
+  `spatial_convolution` benchmark runs on the AMD Radeon 780M path caused
+  system-level crashes severe enough to require a BIOS power reset before the
+  machine would respond to the power button again.
+- DX12 source files are still kept in-tree for postmortem debugging, but
+  benchmark and runtime entry points now reject DX12 requests with a fatal
+  warning instead of attempting to run them.
 - The fixed FMVM benchmark uses a two-phase workload:
   autotune each candidate config with `3` repeats, then measure the winning
   config with `20` repeats for the reported result.
 - The dataset generator is independent from `performance_metrics/`; the
   benchmark workspace consumes `compute_node/input_matrix/` rather than owning
   the input-file format itself.
-

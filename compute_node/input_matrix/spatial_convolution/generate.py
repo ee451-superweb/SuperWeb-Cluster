@@ -13,6 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from app.runtime_environment import relaunch_with_project_python_if_needed
 from compute_node.performance_metrics.spatial_convolution.config import DATASET_DIR
 from compute_node.input_matrix.spatial_convolution import (
     build_dataset_layout,
@@ -21,6 +22,10 @@ from compute_node.input_matrix.spatial_convolution import (
     generate_dataset,
     get_runtime_input_matrix_spec,
 )
+from compute_node.input_matrix.progress import build_progress_reporter
+
+DEFAULT_GENERATOR_WORKERS = max(1, os.cpu_count() or 1)
+DEFAULT_CHUNK_MIB = 8
 
 
 def _benchmark_fields_match(layout, spec) -> bool:
@@ -76,18 +81,32 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--include-runtime-weight", action="store_true")
     parser.add_argument("--skip-runtime", action="store_true")
     parser.add_argument("--force", action="store_true", help="Rewrite datasets even if matching files already exist.")
-    parser.add_argument("--workers", type=int, default=None, help="Optional generator worker count.")
-    parser.add_argument("--chunk-mib", type=int, default=32, help="Chunk size in MiB used while streaming data.")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=DEFAULT_GENERATOR_WORKERS,
+        help="Generator worker count. Default: OS logical processor count.",
+    )
+    parser.add_argument(
+        "--chunk-mib",
+        type=int,
+        default=DEFAULT_CHUNK_MIB,
+        help="Chunk size in MiB used while streaming data.",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    relaunch_result = relaunch_with_project_python_if_needed(
+        argv,
+        script_path=Path(__file__),
+        cwd=PROJECT_ROOT,
+    )
+    if relaunch_result is not None:
+        return relaunch_result
 
-    def _progress(label: str, written_bytes: int, total_bytes: int) -> None:
-        print(f"\r  {label}: {written_bytes / 1048576:.1f} / {total_bytes / 1048576:.1f} MiB", end="", flush=True)
-        if written_bytes == total_bytes:
-            print()
+    args = build_parser().parse_args(argv)
+    _progress, close_progress = build_progress_reporter()
 
     custom_requested = any(
         value is not None for value in (args.h, args.w, args.cin, args.cout, args.k, args.pad, args.stride)
@@ -109,44 +128,46 @@ def main(argv: list[str] | None = None) -> int:
     runtime_spec = get_runtime_input_matrix_spec()
     chunk_values = max(1, (args.chunk_mib * 1024 * 1024) // 4)
 
-    test_layout = build_dataset_layout(args.output_dir, prefix="test_")
-    if args.force:
-        _reset_stale_files(test_layout, test_spec, skip_weight=False)
-    elif not dataset_is_generated(test_layout, test_spec, skip_weight=False):
-        _reset_stale_files(test_layout, test_spec, skip_weight=False)
-    if args.force or not dataset_is_generated(test_layout, test_spec, skip_weight=False):
-        print(f"\n[Data Gen] Creating spatial-convolution TEST dataset ({test_spec.h}x{test_spec.w})...")
-        generate_dataset(
-            test_layout,
-            test_spec,
-            skip_weight=False,
-            progress=_progress,
-            generator_workers=args.workers,
-            chunk_values=chunk_values,
-        )
-
-    if not args.skip_runtime:
-        runtime_layout = build_dataset_layout(args.output_dir, prefix="runtime_")
-        skip_rt_weight = (args.role == "compute") and not args.include_runtime_weight
+    try:
+        test_layout = build_dataset_layout(args.output_dir, prefix="test_")
         if args.force:
-            _reset_stale_files(runtime_layout, runtime_spec, skip_weight=skip_rt_weight)
-        elif not dataset_is_generated(runtime_layout, runtime_spec, skip_weight=skip_rt_weight):
-            _reset_stale_files(runtime_layout, runtime_spec, skip_weight=skip_rt_weight)
-        if args.force or not dataset_is_generated(runtime_layout, runtime_spec, skip_weight=skip_rt_weight):
-            needs_input = not runtime_layout.input_path.exists()
-            needs_weight = not skip_rt_weight and not runtime_layout.weight_path.exists()
-            label = "RUNTIME INPUT" if needs_input and skip_rt_weight and not needs_weight else "FULL RUNTIME"
-            print(f"\n[Data Gen] Creating spatial-convolution {label} ({runtime_spec.h}x{runtime_spec.w})...")
+            _reset_stale_files(test_layout, test_spec, skip_weight=False)
+        elif not dataset_is_generated(test_layout, test_spec, skip_weight=False):
+            _reset_stale_files(test_layout, test_spec, skip_weight=False)
+        if args.force or not dataset_is_generated(test_layout, test_spec, skip_weight=False):
+            print(f"\n[Data Gen] Creating spatial-convolution TEST dataset ({test_spec.h}x{test_spec.w})...")
             generate_dataset(
-                runtime_layout,
-                runtime_spec,
-                skip_weight=skip_rt_weight,
+                test_layout,
+                test_spec,
+                skip_weight=False,
                 progress=_progress,
                 generator_workers=args.workers,
                 chunk_values=chunk_values,
             )
 
-    return 0
+        if not args.skip_runtime:
+            runtime_layout = build_dataset_layout(args.output_dir, prefix="runtime_")
+            skip_rt_weight = (args.role == "compute") and not args.include_runtime_weight
+            if args.force:
+                _reset_stale_files(runtime_layout, runtime_spec, skip_weight=skip_rt_weight)
+            elif not dataset_is_generated(runtime_layout, runtime_spec, skip_weight=skip_rt_weight):
+                _reset_stale_files(runtime_layout, runtime_spec, skip_weight=skip_rt_weight)
+            if args.force or not dataset_is_generated(runtime_layout, runtime_spec, skip_weight=skip_rt_weight):
+                needs_input = not runtime_layout.input_path.exists()
+                needs_weight = not skip_rt_weight and not runtime_layout.weight_path.exists()
+                label = "RUNTIME INPUT" if needs_input and skip_rt_weight and not needs_weight else "FULL RUNTIME"
+                print(f"\n[Data Gen] Creating spatial-convolution {label} ({runtime_spec.h}x{runtime_spec.w})...")
+                generate_dataset(
+                    runtime_layout,
+                    runtime_spec,
+                    skip_weight=skip_rt_weight,
+                    progress=_progress,
+                    generator_workers=args.workers,
+                    chunk_values=chunk_values,
+                )
+        return 0
+    finally:
+        close_progress()
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from compute_node.input_matrix.fixed_matrix_vector_multiplication import build_dataset_layout
+from compute_node.performance_metrics.benchmark_status import emit_status
 from compute_node.performance_metrics.fixed_matrix_vector_multiplication.config import (
     DATASET_DIR as METHOD_DATASET_DIR,
     GENERATE_SCRIPT_PATH as METHOD_GENERATE_SCRIPT_PATH,
@@ -83,6 +84,16 @@ def build_parser() -> argparse.ArgumentParser:
 def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
     """Run the FMVM benchmark and return the JSON-serializable report."""
 
+    emit_status(
+        "method.fmvm.start",
+        status="running",
+        method="fixed_matrix_vector_multiplication",
+        requested_backends=args.backend or ["auto"],
+        rebuild=bool(getattr(args, "rebuild", False)),
+        rows=args.rows,
+        cols=args.cols,
+        accumulation_precision=getattr(args, "accumulation_precision", "fp32"),
+    )
     backends = build_backends(args.backend)
     force_rebuild = bool(getattr(args, "rebuild", False))
     hardware_inventory = probe_backends(backends)
@@ -117,6 +128,13 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
     )
     dataset_was_generated = False
     if detected_backends:
+        emit_status(
+            "method.fmvm.dataset.check",
+            status="running",
+            method="fixed_matrix_vector_multiplication",
+            dataset_dir=str(dataset_dir),
+            require_runtime_measurement=use_runtime_measurement,
+        )
         dataset_was_generated = generate_dataset_if_missing(
             dataset_dir,
             spec.rows,
@@ -132,6 +150,14 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
     runnable_index = 0
     for backend in backends:
         if backend.name not in detected_backends:
+            emit_status(
+                "method.fmvm.backend.skipped",
+                status="running",
+                method="fixed_matrix_vector_multiplication",
+                backend=backend.name,
+                reason="probe_unavailable",
+                probe_message=(hardware_inventory.get(backend.name) or {}).get("probe_message"),
+            )
             backend_results.append(
                 backend.run(
                     spec,
@@ -147,19 +173,53 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
         elapsed = time.perf_counter() - total_started
         remaining = max(args.time_budget - elapsed, 1.0)
         per_backend_budget = remaining / max(len(runnable_backends) - runnable_index, 1)
+        emit_status(
+            "method.fmvm.backend.start",
+            status="running",
+            method="fixed_matrix_vector_multiplication",
+            backend=backend.name,
+            time_budget_seconds=per_backend_budget,
+            elapsed_seconds=elapsed,
+            autotune_spec={"rows": spec.rows, "cols": spec.cols},
+            measurement_spec={"rows": measurement_spec.rows, "cols": measurement_spec.cols},
+            dataset_paths={
+                "autotune_matrix": str(autotune_dataset.matrix_path),
+                "autotune_vector": str(autotune_dataset.vector_path),
+                "measurement_matrix": str(measurement_dataset.matrix_path),
+                "measurement_vector": str(measurement_dataset.vector_path),
+            },
+            probe_message=(hardware_inventory.get(backend.name) or {}).get("probe_message"),
+        )
+        result = backend.run(
+            spec,
+            autotune_dataset,
+            measurement_spec=measurement_spec,
+            measurement_dataset=measurement_dataset,
+            time_budget_seconds=per_backend_budget,
+            force_rebuild=force_rebuild,
+        )
+        emit_status(
+            "method.fmvm.backend.complete",
+            status="running",
+            method="fixed_matrix_vector_multiplication",
+            backend=backend.name,
+            available=bool(getattr(result, "available", False)),
+            selected_config=getattr(result, "selected_config", None),
+            notes=list(getattr(result, "notes", [])),
+        )
         backend_results.append(
-            backend.run(
-                spec,
-                autotune_dataset,
-                measurement_spec=measurement_spec,
-                measurement_dataset=measurement_dataset,
-                time_budget_seconds=per_backend_budget,
-                force_rebuild=force_rebuild,
-            )
+            result
         )
         runnable_index += 1
 
     total_elapsed = time.perf_counter() - total_started
+    emit_status(
+        "method.fmvm.complete",
+        status="running",
+        method="fixed_matrix_vector_multiplication",
+        elapsed_seconds=total_elapsed,
+        detected_backends=detected_backends,
+    )
     return build_report(
         method="fixed_matrix_vector_multiplication",
         total_elapsed=total_elapsed,

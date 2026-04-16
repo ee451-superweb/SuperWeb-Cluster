@@ -26,6 +26,7 @@ from compute_node.compute_methods.spatial_convolution.performance_metrics.path_u
 from compute_node.compute_methods.spatial_convolution.performance_metrics.scoring import (
     linear_time_score,
 )
+from compute_node.performance_metrics.benchmark_status import emit_status
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 CUDA_DIR = ROOT_DIR / "conv2d_runners" / "cuda"
@@ -234,6 +235,17 @@ def _fatbin_note(capability: str | None) -> str:
 
 class CudaBackend:
     name = "cuda"
+
+    def diagnostic_context(self, spec: BenchmarkSpec | None = None) -> dict[str, object]:
+        return {
+            "device_name": _detect_cuda_device_name(),
+            "compute_capability": _detect_compute_capability(),
+            "block_size_candidates": _candidate_block_sizes(),
+            "tile_size_candidates": _candidate_tile_sizes(),
+            "transpose_modes": _candidate_transpose_modes(),
+            "autotune_repeats": _autotune_repeats(spec),
+            "measurement_repeats": _measurement_repeats(spec),
+        }
 
     def probe(self) -> tuple[bool, str]:
         if not CUDA_SOURCE_PATH.exists():
@@ -495,6 +507,16 @@ class CudaBackend:
             "--measurement-repeats",
             str(measurement_repeats),
         ]
+        emit_status(
+            "method.spatial_convolution.backend.native_runner.start",
+            status="running",
+            method="spatial_convolution",
+            backend=self.name,
+            command=command,
+            timeout_seconds=timeout_seconds,
+            autotune_repeats=autotune_repeats,
+            measurement_repeats=measurement_repeats,
+        )
 
         try:
             completed = subprocess.run(
@@ -504,6 +526,13 @@ class CudaBackend:
                 text=True,
                 timeout=timeout_seconds,
                 cwd=ROOT_DIR,
+            )
+            emit_status(
+                "method.spatial_convolution.backend.native_runner.complete",
+                status="running",
+                method="spatial_convolution",
+                backend=self.name,
+                command=command,
             )
             return json.loads(completed.stdout)
         except subprocess.CalledProcessError as exc:

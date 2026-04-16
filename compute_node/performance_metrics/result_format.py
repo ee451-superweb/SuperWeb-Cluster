@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import ast
+import csv
 import re
+import shutil
+import subprocess
 import time
+from functools import lru_cache
 from typing import Any
 
 from app.constants import METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION, METHOD_SPATIAL_CONVOLUTION
@@ -14,6 +18,29 @@ from compute_node.performance_metrics.spatial_convolution.config import DISPLAY_
 _DEVICE_NOTE_PATTERN = re.compile(r"device=(.+)")
 _QUOTED_DEVICE_PATTERN = re.compile(r"'([^']+)'")
 _SEARCH_VALUES_PATTERN = re.compile(r"search order: (?P<values>\[.*\])$")
+_SM_NOTE_PATTERN = re.compile(r"\bsm[_=]?(\d+)\b", re.IGNORECASE)
+_NVCC_RELEASE_PATTERN = re.compile(r"release\s+(\d+(?:\.\d+)*)", re.IGNORECASE)
+
+_CUDA_ARCHITECTURE_BY_SM = {
+    "50": "Maxwell",
+    "52": "Maxwell",
+    "60": "Pascal",
+    "61": "Pascal",
+    "70": "Volta",
+    "72": "Volta",
+    "75": "Turing",
+    "80": "Ampere",
+    "86": "Ampere",
+    "87": "Ampere",
+    "88": "Ampere",
+    "89": "Ada",
+    "90": "Hopper",
+    "100": "Blackwell",
+    "103": "Blackwell",
+    "110": "Blackwell",
+    "120": "Blackwell",
+    "121": "Blackwell",
+}
 
 
 def _literal_list(text: str) -> list[object]:
@@ -26,6 +53,36 @@ def _literal_list(text: str) -> list[object]:
 
 def _compact_note(note: str) -> str | None:
     lowered = note.lower()
+    if "cuda backend available" in lowered or "nvcc detected on path" in lowered:
+        return None
+    if "compiled cuda runner" in lowered or "compiled self-contained windows cuda runner" in lowered:
+        return "binary recompiled"
+    if "compiled windows dx12 runner" in lowered:
+        return "binary recompiled"
+    if (
+        "cuda" in lowered
+        and ("existing binary is older" in lowered or "source or build recipe is newer" in lowered)
+        and ("existing binary will be used" in lowered or "existing runner will be used" in lowered)
+    ):
+        return "binary outdated"
+    if (
+        "dx12" in lowered
+        and ("existing binary is older" in lowered or "source or build recipe is newer" in lowered)
+        and ("existing binary will be used" in lowered or "existing runner will be used" in lowered)
+    ):
+        return "binary outdated"
+    if (
+        "using prebuilt cuda runner" in lowered
+        or "using prebuilt self-contained windows cuda runner" in lowered
+        or "using cuda runner at" in lowered
+        or ("cuda backend" in lowered and "via prebuilt binary" in lowered)
+        or ("cuda backend" in lowered and "via self-contained windows runner" in lowered)
+    ):
+        return "binary available"
+    if "using prebuilt windows dx12 runner" in lowered:
+        return "binary available"
+    if "fatbin sms:" in lowered or "ptx fallback:" in lowered or "toolkit-limited omissions:" in lowered:
+        return None
     replacements = (
         ("using prebuilt", "prebuilt runner"),
         ("cpu runner resolved", "prebuilt runner"),
@@ -33,7 +90,8 @@ def _compact_note(note: str) -> str | None:
         ("self-contained", "self-contained binary"),
         ("only available on macos", "macOS only"),
         ("only fp32 accumulation", "fp32 accumulation only"),
-        ("autotuned on", "autotune on test workload; report runtime workload"),
+        ("autotuned on", "test autotune, runtime measurement"),
+        ("autotune on", "test autotune, runtime measurement"),
     )
     for needle, replacement in replacements:
         if needle in lowered:
@@ -45,6 +103,8 @@ def _compact_note(note: str) -> str | None:
     if "autotune_repeats_per_config" in lowered or "measurement_repeats_for_best_config" in lowered:
         return None
     if lowered.startswith("accumulation_precision="):
+        return None
+    if lowered.startswith("device=") or lowered.startswith("sm="):
         return None
     trimmed = note.strip()
     return trimmed if len(trimmed) <= 120 else f"{trimmed[:117]}..."
@@ -58,6 +118,143 @@ def _compact_notes(*note_lists: list[str]) -> list[str]:
             if compact and compact not in compacted:
                 compacted.append(compact)
     return compacted[:3]
+
+
+def _cuda_architecture_name(sm_digits: str | None) -> str | None:
+    if not sm_digits:
+        return None
+    if sm_digits in _CUDA_ARCHITECTURE_BY_SM:
+        return _CUDA_ARCHITECTURE_BY_SM[sm_digits]
+    try:
+        numeric = int(sm_digits)
+    except ValueError:
+        return None
+    if numeric >= 100:
+        return "Blackwell"
+    return None
+
+
+@lru_cache(maxsize=1)
+def _detect_cuda_gpu_inventory() -> list[dict[str, str]]:
+    nvidia_smi = shutil.which("nvidia-smi")
+    if not nvidia_smi:
+        return []
+
+    completed = subprocess.run(
+        [
+            nvidia_smi,
+            "--query-gpu=name,compute_cap,driver_version",
+            "--format=csv,noheader",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        return []
+
+    rows: list[dict[str, str]] = []
+    for row in csv.reader(completed.stdout.splitlines()):
+        if not row:
+            continue
+        name = row[0].strip() if len(row) >= 1 else ""
+        compute_cap = row[1].strip() if len(row) >= 2 else ""
+        driver_version = row[2].strip() if len(row) >= 3 else ""
+        sm_digits = compute_cap.replace(".", "")
+        rows.append(
+            {
+                "name": name,
+                "sm_digits": sm_digits if sm_digits.isdigit() else "",
+                "driver_version": driver_version,
+            }
+        )
+    return rows
+
+
+@lru_cache(maxsize=1)
+def _detect_nvcc_version() -> str:
+    nvcc = shutil.which("nvcc")
+    if not nvcc:
+        return "not detected"
+
+    completed = subprocess.run(
+        [nvcc, "--version"],
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        return "not detected"
+
+    combined = "\n".join(part for part in (completed.stdout, completed.stderr) if part)
+    match = _NVCC_RELEASE_PATTERN.search(combined)
+    if match:
+        return match.group(1)
+    return "not detected"
+
+
+def _extract_sm_digits(raw_backend: dict[str, Any], probe_message: str) -> str | None:
+    note_sources = [
+        *[str(item) for item in raw_backend.get("trial_notes", [])],
+        *[str(item) for item in raw_backend.get("notes", [])],
+        probe_message,
+    ]
+    for note in note_sources:
+        match = _SM_NOTE_PATTERN.search(note)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _cuda_binary_status(raw_backend: dict[str, Any], probe_message: str) -> str:
+    note_sources = [probe_message, *[str(item) for item in raw_backend.get("notes", [])]]
+    lowered_notes = [note.lower() for note in note_sources]
+    if any(
+        "compiled cuda runner" in note or "compiled self-contained windows cuda runner" in note
+        for note in lowered_notes
+    ):
+        return "recompiled"
+    if any(
+        ("existing binary is older" in note or "source or build recipe is newer" in note)
+        and ("existing binary will be used" in note or "existing runner will be used" in note)
+        for note in lowered_notes
+    ):
+        return "outdated"
+    if any(
+        "using prebuilt" in note
+        or "using cuda runner at" in note
+        or "via prebuilt binary" in note
+        or "via self-contained windows runner" in note
+        for note in lowered_notes
+    ):
+        return "available"
+    if any("binary is missing" in note for note in lowered_notes):
+        return "missing"
+    return "not detected"
+
+
+def _normalize_cuda_environment(
+    *,
+    device_name: str,
+    raw_backend: dict[str, Any],
+    probe_message: str,
+) -> dict[str, str]:
+    gpu_inventory = _detect_cuda_gpu_inventory()
+    matched_gpu = next((gpu for gpu in gpu_inventory if gpu.get("name") == device_name), None)
+    if matched_gpu is None and gpu_inventory:
+        matched_gpu = gpu_inventory[0]
+
+    sm_digits = (
+        (matched_gpu or {}).get("sm_digits")
+        or _extract_sm_digits(raw_backend, probe_message)
+        or ""
+    )
+    architecture = _cuda_architecture_name(sm_digits)
+    return {
+        "detected_architecture": architecture or "not detected",
+        "sm_version": f"sm_{sm_digits}" if sm_digits else "not detected",
+        "driver_version": ((matched_gpu or {}).get("driver_version") or "not detected"),
+        "nvcc_version": _detect_nvcc_version(),
+        "binary_status": _cuda_binary_status(raw_backend, probe_message),
+    }
 
 
 def _extract_search_space(raw_backend: dict[str, Any], probe_message: str) -> dict[str, list[object]]:
@@ -141,10 +338,11 @@ def _normalize_backend(
     best_config = raw_backend.get("best_config") or raw_backend.get("selected_config")
     best_result = raw_backend.get("best_result") or raw_backend.get("best_trial")
     autotune_result = raw_backend.get("autotune_result") or raw_backend.get("autotune_trial")
-    return {
+    device_name = _extract_device_name(backend_name, raw_backend, probe_message, device_overview)
+    normalized = {
         "backend": backend_name,
         "available": bool(raw_backend.get("available")),
-        "device_name": _extract_device_name(backend_name, raw_backend, probe_message, device_overview),
+        "device_name": device_name,
         "rank": raw_backend.get("rank"),
         "autotune_plan": {
             "autotune_repeats": autotune_plan.get("autotune_repeats"),
@@ -161,6 +359,13 @@ def _normalize_backend(
             [str(item) for item in raw_backend.get("trial_notes", [])],
         ),
     }
+    if backend_name == "cuda":
+        normalized["cuda_environment"] = _normalize_cuda_environment(
+            device_name=device_name,
+            raw_backend=raw_backend,
+            probe_message=probe_message,
+        )
+    return normalized
 
 
 def _normalize_fixed_matrix_vector_dataset(
@@ -329,7 +534,7 @@ def build_report(
     total_elapsed: float,
 ) -> dict[str, Any]:
     return {
-        "schema_version": 4,
+        "schema_version": 5,
         "generated_at_unix": time.time(),
         "benchmark_elapsed_seconds": total_elapsed,
         "device_overview": device_overview,
