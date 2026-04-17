@@ -1,4 +1,9 @@
-﻿"""Low-level UDP multicast helpers."""
+﻿"""Create, use, and close UDP multicast sockets for discovery traffic.
+
+Use this module when discovery code needs concrete UDP socket operations such as
+sending the browse query, receiving announce packets, or joining/leaving the
+multicast group.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +15,7 @@ from dataclasses import dataclass
 from adapters import network
 from common.types import DiscoveryResult
 from app.config import AppConfig
-from wire.discovery import (
+from wire.discovery_protocol.discovery import (
     describe_discovery_message,
     build_announce_message,
     build_discover_message,
@@ -22,14 +27,18 @@ from app.trace_utils import trace_function
 
 @dataclass(slots=True)
 class MulticastSocket:
-    """Socket wrapper with optional multicast membership tracking."""
+    """Bundle one UDP socket with the multicast membership bytes needed to leave it."""
 
     sock: socket.socket
     membership: bytes | None = None
 
     @trace_function
     def close(self) -> None:
-        """Best-effort close of the underlying socket."""
+        """Use this when discovery code is done with the socket wrapper.
+
+        Args: self wrapper whose socket and multicast membership should be cleaned up.
+        Returns: None after the socket is closed and membership is dropped when present.
+        """
 
         network.drop_multicast_membership(self.sock, self.membership)
         network.safe_close(self.sock)
@@ -37,7 +46,11 @@ class MulticastSocket:
 
 @trace_function
 def create_sender(config: AppConfig) -> MulticastSocket:
-    """Create a sender socket that can also receive a unicast announce reply."""
+    """Use this when a node wants to send the multicast discover probe.
+
+    Args: config discovery settings including timeout, group, port, and TTL.
+    Returns: A sender socket wrapper bound to an ephemeral UDP port for replies.
+    """
 
     sock = network.create_udp_socket(reuse_addr=False)
     # Bind to an ephemeral port so replies come back to this specific process.
@@ -54,7 +67,11 @@ def create_sender(config: AppConfig) -> MulticastSocket:
 
 @trace_function
 def create_receiver(config: AppConfig) -> MulticastSocket:
-    """Create a multicast listener socket."""
+    """Use this when a main node wants to listen for multicast discovery probes.
+
+    Args: config discovery settings including group, port, and timeout.
+    Returns: A receiver socket wrapper joined to the configured multicast group.
+    """
 
     # macOS requires SO_REUSEPORT to share the standard mDNS port 5353 with
     # other listeners such as mDNSResponder and third-party apps.
@@ -74,7 +91,11 @@ def create_receiver(config: AppConfig) -> MulticastSocket:
 
 @trace_function
 def send_discover(endpoint: MulticastSocket, config: AppConfig, node_name: str) -> None:
-    """Send a multicast discover packet."""
+    """Use this after creating a sender socket to emit one discover packet.
+
+    Args: endpoint sender socket wrapper, config discovery settings, and node_name sender name for protocol helpers.
+    Returns: None after one UDP discover packet is sent.
+    """
 
     payload = build_discover_message(node_name)
     endpoint.sock.sendto(payload, (config.multicast_group, config.udp_port))
@@ -82,7 +103,11 @@ def send_discover(endpoint: MulticastSocket, config: AppConfig, node_name: str) 
 
 @trace_function
 def recv_announce(endpoint: MulticastSocket, config: AppConfig) -> DiscoveryResult:
-    """Wait for an announce reply on a sender socket."""
+    """Use this on the discovering side while waiting for one announce reply.
+
+    Args: endpoint sender socket wrapper and config containing timeout/buffer settings.
+    Returns: A DiscoveryResult describing the discovered main node or timeout/failure.
+    """
 
     original_timeout = endpoint.sock.gettimeout()
     deadline = None if original_timeout is None else time.monotonic() + original_timeout
@@ -116,7 +141,11 @@ def recv_announce(endpoint: MulticastSocket, config: AppConfig) -> DiscoveryResu
 
 
 def recv_packet(endpoint: MulticastSocket, buffer_size: int) -> tuple[tuple[str, int], bytes] | None:
-    """Receive one UDP packet."""
+    """Use this low-level helper when any discovery flow needs one UDP datagram.
+
+    Args: endpoint socket wrapper to read from and buffer_size maximum datagram size.
+    Returns: ``(addr, data)`` for one packet, or ``None`` when the socket times out.
+    """
 
     try:
         data, addr = endpoint.sock.recvfrom(buffer_size)
@@ -129,7 +158,11 @@ def recv_packet(endpoint: MulticastSocket, buffer_size: int) -> tuple[tuple[str,
 
 @trace_function
 def recv_discover(endpoint: MulticastSocket, buffer_size: int) -> tuple[tuple[str, int], bytes] | None:
-    """Wait for a main-node query packet and return the sender address."""
+    """Use this on the announce side while waiting for a valid discover query.
+
+    Args: endpoint receiver socket wrapper and buffer_size maximum datagram size.
+    Returns: ``(addr, message)`` for the first valid discover packet, or ``None`` on timeout.
+    """
 
     original_timeout = endpoint.sock.gettimeout()
     deadline = None if original_timeout is None else time.monotonic() + original_timeout
@@ -160,7 +193,11 @@ def send_announce(
     config: AppConfig,
     node_name: str,
 ) -> str:
-    """Send an announce packet back to the discovering peer."""
+    """Use this after receiving a discover packet to reply directly to that peer.
+
+    Args: endpoint receiver socket wrapper, target sender address, config listener settings, and node_name announced main-node name.
+    Returns: The local host address embedded into the announce payload.
+    """
 
     host = network.resolve_local_ip(remote_host=target[0], remote_port=max(target[1], 1))
     payload = build_announce_message(host, config.tcp_port, node_name)
@@ -170,14 +207,22 @@ def send_announce(
 
 @trace_function
 def describe_packet(message: bytes) -> str:
-    """Return a human-readable summary of a discovery packet."""
+    """Use this for logs that should summarize one raw discovery datagram.
+
+    Args: message raw UDP discovery packet bytes.
+    Returns: A human-readable description of the parsed packet contents.
+    """
 
     return describe_discovery_message(message)
 
 
 @trace_function
 def close(endpoint: MulticastSocket | None) -> None:
-    """Best-effort close helper."""
+    """Use this helper when callers want a nullable-safe multicast close.
+
+    Args: endpoint optional socket wrapper to close.
+    Returns: None after the wrapper is closed when it exists.
+    """
 
     if endpoint is None:
         return

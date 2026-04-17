@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import tempfile
@@ -15,26 +16,36 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-PERF_DIR = Path(__file__).resolve().parents[1] / "compute_node" / "performance_metrics"
-if str(PERF_DIR) not in sys.path:
-    sys.path.insert(0, str(PERF_DIR))
+PERF_DIR = (
+    Path(__file__).resolve().parents[1]
+    / "compute_node"
+    / "performance_metrics"
+    / "fixed_matrix_vector_multiplication"
+)
 
-import benchmark
-from backends.cpu_backend import (
+from compute_node.performance_metrics import benchmark
+from compute_node.performance_metrics import result_format
+from compute_node.performance_metrics.spatial_convolution import benchmark as spatial_benchmark
+from compute_node.performance_metrics.spatial_convolution import backends as spatial_backend_registry
+from compute_node.performance_metrics.fixed_matrix_vector_multiplication import backends as backend_registry
+from compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.cpu_backend import (
     CpuArtifacts,
     CpuBackend,
     _binary_tree_worker_candidates,
     _candidate_tile_sizes as cpu_candidate_tile_sizes,
     _cpu_artifacts_for_platform,
 )
-from backends.cuda_backend import (
+from compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.cuda_backend import (
     CudaBackend,
     _candidate_block_sizes as cuda_candidate_block_sizes,
     _candidate_tile_sizes as cuda_candidate_tile_sizes,
     _candidate_transpose_modes as cuda_candidate_transpose_modes,
     _windows_gencode_args,
 )
-from backends.metal_backend import (
+from compute_node.performance_metrics.spatial_convolution.backends.cuda_backend import (
+    CudaBackend as SpatialCudaBackend,
+)
+from compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.metal_backend import (
     MetalBackend,
     _candidate_block_sizes as metal_candidate_block_sizes,
     _candidate_tile_sizes as metal_candidate_tile_sizes,
@@ -47,11 +58,34 @@ from compute_node.input_matrix import (
     generate_dataset,
     load_float32_file,
 )
-from models import DEFAULT_AUTOTUNE_REPEATS, DEFAULT_MEASUREMENT_REPEATS
-from path_utils import to_relative_cli_path
-from scoring import linear_time_score
-from workloads import build_benchmark_spec
+from compute_node.input_matrix import generator as shared_input_generator
+from compute_node.input_matrix import generate as input_matrix_generate_cli
+from compute_node.input_matrix.fixed_matrix_vector_multiplication import generate as fmvm_generate_cli
+from compute_node.input_matrix.spatial_convolution import (
+    build_dataset_layout as build_conv_dataset_layout,
+    build_input_matrix_spec as build_conv_input_matrix_spec,
+    dataset_is_generated as conv_dataset_is_generated,
+    generate_dataset as generate_conv_dataset,
+    get_test_input_matrix_spec as get_conv_test_input_matrix_spec,
+)
+from compute_node.input_matrix.fixed_matrix_vector_multiplication import (
+    get_test_input_matrix_spec as get_fmvm_test_input_matrix_spec,
+)
+from compute_node.input_matrix.spatial_convolution import generate as spatial_generate_cli
+from compute_node.performance_metrics.fixed_matrix_vector_multiplication.models import (
+    DEFAULT_AUTOTUNE_REPEATS,
+    DEFAULT_MEASUREMENT_REPEATS,
+)
+from compute_node.performance_metrics.spatial_convolution.models import (
+    BenchmarkSpec as SpatialBenchmarkSpec,
+)
+from compute_node.performance_metrics.path_utils import to_relative_cli_path
+from compute_node.performance_metrics.fixed_matrix_vector_multiplication.scoring import linear_time_score
+from compute_node.performance_metrics.fixed_matrix_vector_multiplication.workloads import build_benchmark_spec
 import subprocess
+
+from app.constants import DX12_BACKEND_DISABLED_REASON, METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION, METHOD_SPATIAL_CONVOLUTION
+from tests.support import require_integration
 
 
 class PerformanceMatricsTests(unittest.TestCase):
@@ -65,6 +99,185 @@ class PerformanceMatricsTests(unittest.TestCase):
     def test_benchmark_parser_accepts_rebuild_flag(self) -> None:
         args = benchmark.build_parser().parse_args(["--rebuild"])
         self.assertTrue(args.rebuild)
+
+    def test_benchmark_parser_accepts_accumulation_precision(self) -> None:
+        args = benchmark.build_parser().parse_args(["--accumulation-precision", "fp64_accumulate"])
+        self.assertEqual(args.accumulation_precision, "fp64_accumulate")
+
+    def test_benchmark_parser_defaults_to_all_methods(self) -> None:
+        args = benchmark.build_parser().parse_args([])
+        self.assertEqual(args.method, "all")
+
+    def test_benchmark_parser_accepts_workload_mode(self) -> None:
+        args = benchmark.build_parser().parse_args(["--workload-mode", "large"])
+        self.assertEqual(args.workload_mode, "large")
+
+    def test_spatial_benchmark_parser_accepts_cuda_channel_batch_flags(self) -> None:
+        args = spatial_benchmark.build_parser().parse_args(
+            [
+                "--workload-mode",
+                "small",
+                "--output-channel-batch",
+                "8",
+                "--output-channel-batch-scale",
+                "0.75",
+                "--cooldown-ms",
+                "2.5",
+            ]
+        )
+        self.assertEqual(args.workload_mode, "small")
+        self.assertEqual(args.output_channel_batch, 8)
+        self.assertEqual(args.output_channel_batch_scale, 0.75)
+        self.assertEqual(args.cooldown_ms, 2.5)
+
+    def test_input_matrix_cli_defaults_to_all_methods(self) -> None:
+        args = input_matrix_generate_cli.build_parser().parse_args([])
+        self.assertEqual(args.method, "all")
+        self.assertEqual(args.workers, max(1, os.cpu_count() or 1))
+        self.assertEqual(args.chunk_mib, 8)
+
+    def test_method_local_generate_parsers_use_cpu_count_and_8mib_chunks(self) -> None:
+        fmvm_args = fmvm_generate_cli.build_parser().parse_args([])
+        spatial_args = spatial_generate_cli.build_parser().parse_args([])
+
+        expected_workers = max(1, os.cpu_count() or 1)
+        self.assertEqual(fmvm_args.workers, expected_workers)
+        self.assertEqual(spatial_args.workers, expected_workers)
+        self.assertEqual(fmvm_args.chunk_mib, 8)
+        self.assertEqual(spatial_args.chunk_mib, 8)
+
+    def test_normalize_method_report_adds_structured_cuda_environment(self) -> None:
+        raw_method = {
+            "generated_at_unix": 123.0,
+            "benchmark_elapsed_seconds": 1.5,
+            "workload": {
+                "autotune": {"name": "test-conv2d"},
+                "measurement": {"name": "runtime-conv2d"},
+                "autotune_repeats": 3,
+                "measurement_repeats": 1,
+                "full_runtime_measurement": True,
+            },
+            "hardware_inventory": {
+                "cuda": {
+                    "probe_message": "CUDA backend available for 'NVIDIA GeForce RTX 4060 Laptop GPU'. Existing binary is older than the source, so it will be rebuilt.",
+                }
+            },
+            "backends": {
+                "cuda": {
+                    "available": True,
+                    "rank": 1,
+                    "best_config": {"block_size": 256, "tile_size": 16, "trials_run": 4},
+                    "autotune_result": {
+                        "wall_clock_latency_seconds": 0.1,
+                        "effective_gflops": 100.0,
+                        "checksum": "chk_a",
+                        "score": 1000.0,
+                    },
+                    "best_result": {
+                        "wall_clock_latency_seconds": 0.2,
+                        "effective_gflops": 200.0,
+                        "checksum": "chk_b",
+                        "score": 1000.0,
+                    },
+                    "notes": [
+                        "compiled CUDA runner from compute_node/compute_methods/spatial_convolution/cuda/spatial_conv_cuda_runner.cu; fatbin SMs: sm_75, sm_89",
+                        "Autotuned on test-conv2d and measured on runtime-conv2d.",
+                    ],
+                    "trial_notes": ["device=NVIDIA GeForce RTX 4060 Laptop GPU"],
+                }
+            },
+            "backends_considered": ["cuda"],
+            "detected_backends": ["cuda"],
+            "usable_backends": ["cuda"],
+            "ranking": ["cuda"],
+            "best_backend": "cuda",
+        }
+
+        with (
+            mock.patch.object(
+                result_format,
+                "_detect_cuda_gpu_inventory",
+                return_value=[
+                    {
+                        "name": "NVIDIA GeForce RTX 4060 Laptop GPU",
+                        "sm_digits": "89",
+                        "driver_version": "576.52",
+                    }
+                ],
+            ),
+            mock.patch.object(result_format, "_detect_nvcc_version", return_value="13.2"),
+        ):
+            normalized = result_format.normalize_method_report(
+                method_name=METHOD_SPATIAL_CONVOLUTION,
+                raw_method=raw_method,
+                dataset_root="compute_node/input_matrix/spatial_convolution/generated",
+                device_overview={},
+            )
+
+        cuda_backend = normalized["backends"]["cuda"]
+        self.assertEqual(
+            cuda_backend["cuda_environment"],
+            {
+                "detected_architecture": "Ada",
+                "sm_version": "sm_89",
+                "driver_version": "576.52",
+                "nvcc_version": "13.2",
+                "binary_status": "recompiled",
+            },
+        )
+        self.assertEqual(
+            cuda_backend["notes"],
+            ["binary recompiled", "test autotune, runtime measurement"],
+        )
+
+    def test_write_float32_file_parallelizes_even_when_one_chunk_would_cover_the_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
+            shared_input_generator,
+            "_write_float32_file_parallel",
+            return_value="parallel-sha256",
+        ) as parallel_writer:
+            output_path = Path(temp_dir) / "test.bin"
+            sha256_hex = shared_input_generator.write_float32_file(
+                output_path,
+                total_values=32,
+                seed=123,
+                chunk_values=1024,
+                label="test.bin",
+                worker_count=2,
+            )
+
+        self.assertEqual(sha256_hex, "parallel-sha256")
+        parallel_writer.assert_called_once()
+
+    def test_windows_default_backend_order_routes_gpu_by_display_adapter(self) -> None:
+        with (
+            mock.patch(
+                "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.os.name",
+                "nt",
+            ),
+            mock.patch(
+                "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.detect_nvidia_windows_adapter",
+                return_value=("NVIDIA GeForce RTX 4060 Laptop GPU", ""),
+            ),
+        ):
+            names = [backend.name for backend in backend_registry.build_backends()]
+
+        self.assertEqual(names, ["cpu", "cuda"])
+
+    def test_spatial_windows_default_backend_order_routes_gpu_by_display_adapter(self) -> None:
+        with (
+            mock.patch(
+                "compute_node.performance_metrics.spatial_convolution.backends.os.name",
+                "nt",
+            ),
+            mock.patch(
+                "compute_node.performance_metrics.spatial_convolution.backends.detect_nvidia_windows_adapter",
+                return_value=("NVIDIA GeForce RTX 4060 Laptop GPU", ""),
+            ),
+        ):
+            names = [backend.name for backend in spatial_backend_registry.build_backends()]
+
+        self.assertEqual(names, ["cpu", "cuda"])
 
     def test_cpu_artifacts_follow_platform(self) -> None:
         windows_artifacts = _cpu_artifacts_for_platform("win32")
@@ -132,6 +345,14 @@ class PerformanceMatricsTests(unittest.TestCase):
         self.assertEqual(spec.matrix_bytes, 2 * 1024**3)
         self.assertEqual(spec.vector_bytes, 32_768 * 4)
 
+    def test_small_default_workloads_are_doubled(self) -> None:
+        fmvm_spec = get_fmvm_test_input_matrix_spec()
+        conv_spec = get_conv_test_input_matrix_spec()
+
+        self.assertEqual((fmvm_spec.rows, fmvm_spec.cols), (4_096, 8_192))
+        self.assertEqual((conv_spec.h, conv_spec.w), (512, 512))
+        self.assertEqual((conv_spec.c_in, conv_spec.c_out), (64, 128))
+
     def test_generate_dataset_with_small_override(self) -> None:
         spec = build_input_matrix_spec(rows=8, cols=16)
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -176,63 +397,145 @@ class PerformanceMatricsTests(unittest.TestCase):
 
             self.assertFalse(dataset_is_generated(layout, spec))
 
+    def test_spatial_convolution_dataset_generation_supports_small_override(self) -> None:
+        spec = build_conv_input_matrix_spec(h=16, w=16, c_in=4, c_out=8, k=3, pad=1, stride=1)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            layout = build_conv_dataset_layout(Path(temp_dir), prefix="test_")
+            generate_conv_dataset(layout, spec, generator_workers=2, chunk_values=16)
+            self.assertTrue(conv_dataset_is_generated(layout, spec))
+            self.assertEqual(layout.input_path.stat().st_size, spec.input_bytes)
+            self.assertEqual(layout.weight_path.stat().st_size, spec.weight_bytes)
+
+    def test_normalize_spatial_dataset_uses_runtime_artifacts_for_large_only_mode(self) -> None:
+        raw_method = {
+            "workload": {
+                "autotune_dataset_variant": "large",
+                "measurement_dataset_variant": "large",
+                "full_runtime_measurement": False,
+            }
+        }
+
+        normalized = result_format.normalize_method_report(
+            method_name=METHOD_SPATIAL_CONVOLUTION,
+            raw_method=raw_method,
+            dataset_root="compute_node/input_matrix/spatial_convolution/generated",
+            device_overview={},
+        )
+
+        dataset = normalized["dataset"]
+        self.assertEqual(
+            dataset["artifacts"]["autotune_input"],
+            "compute_node/input_matrix/spatial_convolution/generated/runtime_input.bin",
+        )
+        self.assertEqual(
+            dataset["artifacts"]["autotune_weight"],
+            "compute_node/input_matrix/spatial_convolution/generated/runtime_weight.bin",
+        )
+        self.assertEqual(
+            dataset["artifacts"]["measurement_input"],
+            "compute_node/input_matrix/spatial_convolution/generated/runtime_input.bin",
+        )
+        self.assertEqual(
+            dataset["artifacts"]["measurement_weight"],
+            "compute_node/input_matrix/spatial_convolution/generated/runtime_weight.bin",
+        )
+
+    @require_integration("Dataset override flow is validated through a real benchmark run.")
     def test_small_override_uses_override_dataset_directory_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
             default_dataset_dir = temp_root / "generated"
             args = argparse.Namespace(
+                method=METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
                 backend=["cpu"],
                 dataset_dir=default_dataset_dir,
                 output=temp_root / "result.json",
                 time_budget=30.0,
+                rebuild=False,
+                accumulation_precision="fp32",
                 rows=8,
                 cols=16,
+                role="compute",
+                h=None,
+                w=None,
+                cin=None,
+                cout=None,
+                k=None,
+                pad=None,
+                stride=None,
             )
             with mock.patch.object(benchmark, "DEFAULT_DATASET_DIR", default_dataset_dir):
                 report = benchmark.run_benchmark(args)
 
-        dataset_root = Path(report["dataset"]["root_dir"])
+        method_report = report["methods"][METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION]
+        dataset_root = Path(method_report["dataset"]["root_dir"])
         self.assertEqual(dataset_root.parts[-3:], ("generated", "overrides", "8x16"))
 
+    @require_integration("Real benchmark execution is reserved for integration runs.")
     def test_benchmark_auto_generates_and_runs_cpu(self) -> None:
         backend = CpuBackend()
         available, _message = backend.probe()
         if not available:
             self.skipTest("CPU backend is unavailable in this environment.")
 
-        with tempfile.TemporaryDirectory() as temp_dir, mock.patch("backends.cpu_backend.os.cpu_count", return_value=1):
+        with tempfile.TemporaryDirectory() as temp_dir, mock.patch(
+            "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.cpu_backend.os.cpu_count",
+            return_value=1,
+        ):
             args = argparse.Namespace(
+                method=METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
                 backend=["cpu"],
                 dataset_dir=Path(temp_dir),
                 output=Path(temp_dir) / "result.json",
                 time_budget=30.0,
+                rebuild=False,
+                accumulation_precision="fp32",
                 rows=8,
                 cols=16,
+                role="compute",
+                h=None,
+                w=None,
+                cin=None,
+                cout=None,
+                k=None,
+                pad=None,
+                stride=None,
             )
             report = benchmark.run_benchmark(args)
 
-        self.assertEqual(report["method"], "fixed_matrix_vector_multiplication")
-        self.assertEqual(report["schema_version"], 2)
-        self.assertEqual(report["best_backend"], "cpu")
-        self.assertEqual(report["ranking"], ["cpu"])
-        self.assertIn("workload", report)
-        self.assertIn("host", report)
-        self.assertIn("hardware_inventory", report)
-        self.assertIn("detected_backends", report)
-        self.assertIn("usable_backends", report)
-        self.assertIn("backend_results", report)
-        assert isinstance(report["backend_results"], dict)
-        assert isinstance(report["hardware_inventory"], dict)
-        self.assertFalse(Path(report["dataset"]["root_dir"]).is_absolute())
-        self.assertFalse(Path(report["dataset"]["matrix_path"]).is_absolute())
-        self.assertFalse(Path(report["dataset"]["vector_path"]).is_absolute())
-        self.assertIn("cpu", report["backend_results"])
-        self.assertIn("cpu", report["hardware_inventory"])
-        self.assertIn("cpu", report["detected_backends"])
-        self.assertIn("cpu", report["usable_backends"])
-        self.assertEqual(report["workload"]["autotune_repeats"], DEFAULT_AUTOTUNE_REPEATS)
-        self.assertEqual(report["workload"]["measurement_repeats"], DEFAULT_MEASUREMENT_REPEATS)
-        cpu_result = report["backend_results"]["cpu"]
+        self.assertEqual(report["schema_version"], 5)
+        self.assertIn("device_overview", report)
+        self.assertIn("methods", report)
+        method_report = report["methods"][METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION]
+        self.assertEqual(method_report["method"], METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION)
+        self.assertEqual(method_report["best_backend"], "cpu")
+        self.assertEqual(method_report["ranking"], ["cpu"])
+        self.assertIn("workload", method_report)
+        self.assertIn("dataset", method_report)
+        self.assertIn("detected_backends", method_report)
+        self.assertIn("usable_backends", method_report)
+        self.assertIn("backends", method_report)
+        assert isinstance(method_report["backends"], dict)
+        self.assertFalse(Path(method_report["dataset"]["root_dir"]).is_absolute())
+        self.assertFalse(Path(method_report["dataset"]["artifacts"]["autotune_matrix"]).is_absolute())
+        self.assertFalse(Path(method_report["dataset"]["artifacts"]["autotune_vector"]).is_absolute())
+        self.assertFalse(Path(method_report["dataset"]["artifacts"]["measurement_matrix"]).is_absolute())
+        self.assertFalse(Path(method_report["dataset"]["artifacts"]["measurement_vector"]).is_absolute())
+        self.assertIn("cpu", method_report["backends"])
+        self.assertIn("cpu", method_report["detected_backends"])
+        self.assertIn("cpu", method_report["usable_backends"])
+        self.assertEqual(
+            method_report["workload"]["autotune_plan"]["autotune_repeats"],
+            DEFAULT_AUTOTUNE_REPEATS,
+        )
+        self.assertEqual(
+            method_report["workload"]["measurement_plan"]["measurement_repeats"],
+            DEFAULT_MEASUREMENT_REPEATS,
+        )
+        self.assertEqual(method_report["workload"]["autotune_plan"]["accumulation_precision"], "fp32")
+        self.assertEqual(method_report["workload"]["autotune_plan"]["input_dtype"], "fp32")
+        self.assertEqual(method_report["workload"]["autotune_plan"]["output_dtype"], "fp32")
+        cpu_result = method_report["backends"]["cpu"]
         self.assertTrue(cpu_result["available"])
         self.assertEqual(cpu_result["rank"], 1)
         self.assertIsNotNone(cpu_result["best_config"])
@@ -245,6 +548,7 @@ class PerformanceMatricsTests(unittest.TestCase):
         self.assertFalse(any(drive_pattern.search(note or "") for note in cpu_result["notes"]))
         self.assertGreater(int(cpu_result["best_config"]["workers"]), 0)
         self.assertGreater(int(cpu_result["best_config"]["tile_size"]), 0)
+        self.assertEqual(str(cpu_result["best_config"]["accumulation_precision"]), "fp32")
         self.assertEqual(int(cpu_result["best_config"]["autotune_repeats"]), DEFAULT_AUTOTUNE_REPEATS)
         self.assertEqual(int(cpu_result["best_config"]["measurement_repeats"]), DEFAULT_MEASUREMENT_REPEATS)
         self.assertTrue(str(cpu_result["autotune_result"]["checksum"]).startswith("fnv1a64:"))
@@ -252,8 +556,7 @@ class PerformanceMatricsTests(unittest.TestCase):
         self.assertGreater(float(cpu_result["best_result"]["effective_gflops"]), 0.0)
         self.assertIn("checksum", cpu_result["best_result"])
         self.assertIn("effective_gflops", cpu_result["best_result"])
-        self.assertTrue(bool(report["hardware_inventory"]["cpu"]["probe_available"]))
-        self.assertTrue(str(report["hardware_inventory"]["cpu"]["probe_message"]))
+        self.assertTrue(str(cpu_result["device_name"]))
 
     def test_cuda_backend_probe_returns_status(self) -> None:
         backend = CudaBackend()
@@ -268,6 +571,11 @@ class PerformanceMatricsTests(unittest.TestCase):
         self.assertIn("-gencode=arch=compute_86,code=sm_86", args)
         self.assertIn("-gencode=arch=compute_89,code=sm_89", args)
         self.assertIn("-gencode=arch=compute_90,code=sm_90", args)
+        self.assertIn("-gencode=arch=compute_120,code=sm_120", args)
+
+    def test_fmvm_dx12_backend_request_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, re.escape(DX12_BACKEND_DISABLED_REASON)):
+            backend_registry.build_backends(["dx12"])
 
     def test_cuda_backend_probe_accepts_prebuilt_windows_runner_without_nvcc(self) -> None:
         backend = CudaBackend()
@@ -279,10 +587,22 @@ class PerformanceMatricsTests(unittest.TestCase):
             source_path.write_text("// source placeholder\n", encoding="utf-8")
 
             with (
-                mock.patch("backends.cuda_backend.os.name", "nt"),
-                mock.patch("backends.cuda_backend.CUDA_EXECUTABLE_PATH", binary_path),
-                mock.patch("backends.cuda_backend.CUDA_SOURCE_PATH", source_path),
-                mock.patch("backends.cuda_backend._detect_compute_capability", return_value="89"),
+                mock.patch(
+                    "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.cuda_backend.os.name",
+                    "nt",
+                ),
+                mock.patch(
+                    "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.cuda_backend.CUDA_EXECUTABLE_PATH",
+                    binary_path,
+                ),
+                mock.patch(
+                    "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.cuda_backend.CUDA_SOURCE_PATH",
+                    source_path,
+                ),
+                mock.patch(
+                    "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.cuda_backend._detect_compute_capability",
+                    return_value="89",
+                ),
                 mock.patch.object(backend, "_toolchain_status", return_value=(False, "nvcc missing")),
             ):
                 available, message = backend.probe()
@@ -300,12 +620,76 @@ class PerformanceMatricsTests(unittest.TestCase):
             source_path.write_text("// source placeholder\n", encoding="utf-8")
 
             with (
-                mock.patch("backends.cuda_backend.CUDA_EXECUTABLE_PATH", binary_path),
-                mock.patch("backends.cuda_backend.CUDA_SOURCE_PATH", source_path),
+                mock.patch(
+                    "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.cuda_backend.CUDA_EXECUTABLE_PATH",
+                    binary_path,
+                ),
+                mock.patch(
+                    "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.cuda_backend.CUDA_SOURCE_PATH",
+                    source_path,
+                ),
                 mock.patch.object(backend, "_toolchain_status", return_value=(False, "nvcc missing")),
             ):
                 with self.assertRaises(FileNotFoundError):
                     backend._resolve_executable_path(force_rebuild=True)
+
+    def test_spatial_dx12_backend_request_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, re.escape(DX12_BACKEND_DISABLED_REASON)):
+            spatial_backend_registry.build_backends(["dx12"])
+
+    def test_spatial_cuda_runner_command_includes_batch_candidates_and_cooldown_flags(self) -> None:
+        backend = SpatialCudaBackend()
+        spec = SpatialBenchmarkSpec(
+            name="unit-test",
+            h=8,
+            w=8,
+            c_in=4,
+            c_out=8,
+            k=3,
+            pad=1,
+            ideal_seconds=1.0,
+            zero_score_seconds=5.0,
+            stride=1,
+        )
+        layout = build_conv_dataset_layout(Path("C:/tmp/generated"), prefix="test_")
+        captured: dict[str, list[str]] = {}
+
+        def fake_run(command, **kwargs):
+            captured["command"] = list(command)
+            return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+        with (
+            mock.patch(
+                "compute_node.performance_metrics.spatial_convolution.backends.cuda_backend.SPATIAL_CUDA_OUTPUT_CHANNEL_BATCH_OVERRIDE",
+                (8,),
+            ),
+            mock.patch(
+                "compute_node.performance_metrics.spatial_convolution.backends.cuda_backend.SPATIAL_CUDA_COOLDOWN_MS",
+                2.5,
+            ),
+            mock.patch(
+                "compute_node.performance_metrics.spatial_convolution.backends.cuda_backend.subprocess.run",
+                side_effect=fake_run,
+            ),
+        ):
+            backend._run_runner(
+                Path("C:/tmp/fake_runner.exe"),
+                spec,
+                layout,
+                block_sizes=[64],
+                tile_sizes=[8],
+                transpose_modes=[0],
+                output_channel_batches=[8],
+                autotune_repeats=1,
+                measurement_repeats=1,
+                timeout_seconds=30.0,
+            )
+
+        command = captured["command"]
+        self.assertIn("--output-channel-batches", command)
+        self.assertEqual(command[command.index("--output-channel-batches") + 1], "8")
+        self.assertIn("--cooldown-ms", command)
+        self.assertEqual(command[command.index("--cooldown-ms") + 1], "2.5")
 
     def test_metal_backend_probe_returns_status(self) -> None:
         backend = MetalBackend()
@@ -349,6 +733,7 @@ class PerformanceMatricsTests(unittest.TestCase):
         self.assertGreater(result.best_trial.effective_gflops, 0.0)
         self.assertTrue(result.best_trial.checksum.startswith("fnv1a64:"))
 
+    @require_integration("Cross-backend runner comparisons are reserved for integration runs.")
     def test_cpu_and_metal_match_within_fp32_tolerance_on_small_override(self) -> None:
         cpu_backend = CpuBackend()
         metal_backend = MetalBackend()
@@ -357,7 +742,10 @@ class PerformanceMatricsTests(unittest.TestCase):
         if not cpu_available or not metal_available:
             self.skipTest("CPU/Metal cross-implementation comparison is unavailable in this environment.")
 
-        with tempfile.TemporaryDirectory() as temp_dir, mock.patch("backends.cpu_backend.os.cpu_count", return_value=1):
+        with tempfile.TemporaryDirectory() as temp_dir, mock.patch(
+            "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.cpu_backend.os.cpu_count",
+            return_value=1,
+        ):
             spec = build_benchmark_spec(rows=8, cols=16)
             layout = build_dataset_layout(Path(temp_dir))
             generate_dataset(layout, spec)
@@ -419,6 +807,7 @@ class PerformanceMatricsTests(unittest.TestCase):
         self.assertLessEqual(max_abs_error, 1e-3)
         self.assertLessEqual(max_rel_error, 1e-2)
 
+    @require_integration("Cross-backend runner comparisons are reserved for integration runs.")
     def test_cpu_and_cuda_match_within_fp32_tolerance_on_small_override(self) -> None:
         cpu_backend = CpuBackend()
         cuda_backend = CudaBackend()
@@ -427,7 +816,10 @@ class PerformanceMatricsTests(unittest.TestCase):
         if not cpu_available or not cuda_available:
             self.skipTest("CPU/CUDA cross-implementation comparison is unavailable in this environment.")
 
-        with tempfile.TemporaryDirectory() as temp_dir, mock.patch("backends.cpu_backend.os.cpu_count", return_value=1):
+        with tempfile.TemporaryDirectory() as temp_dir, mock.patch(
+            "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.cpu_backend.os.cpu_count",
+            return_value=1,
+        ):
             spec = build_benchmark_spec(rows=8, cols=16)
             layout = build_dataset_layout(Path(temp_dir))
             generate_dataset(layout, spec)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import random
 import signal
 import time
 
@@ -28,6 +29,14 @@ class Supervisor:
         firewall_status: FirewallStatus,
         logger: logging.Logger,
     ) -> None:
+        """Store shared runtime services used during startup coordination.
+
+        Args:
+            config: Application configuration for discovery and runtime startup.
+            platform_info: Platform facts discovered during bootstrap.
+            firewall_status: Result of the startup firewall preparation step.
+            logger: Logger used for supervisor lifecycle messages.
+        """
         self.config = config
         self.platform_info = platform_info
         self.firewall_status = firewall_status
@@ -51,8 +60,24 @@ class Supervisor:
 
     @trace_function
     def _set_state(self, state: RuntimeState) -> None:
+        """Record and log one supervisor state transition."""
         self.state = state
         self.logger.info("Supervisor state -> %s", state.value)
+
+    def _next_discovery_retry_delay(self, attempt: int) -> float:
+        """Return a jittered retry delay for the next discovery attempt.
+
+        Args:
+            attempt: 1-based discovery attempt that just failed.
+
+        Returns:
+            A randomized delay in seconds derived from the configured base delay.
+        """
+        del attempt
+        base_delay = max(self.config.discovery_retry_delay, 0.0)
+        if base_delay <= 0:
+            return 0.0
+        return random.uniform(base_delay * 0.5, base_delay * 1.5)
 
     @trace_function
     def _discover_with_retries(self) -> DiscoveryResult:
@@ -79,7 +104,14 @@ class Supervisor:
                 last_result.message,
             )
             if attempt < self.config.discovery_attempts:
-                time.sleep(self.config.discovery_retry_delay)
+                retry_delay = self._next_discovery_retry_delay(attempt)
+                self.logger.info(
+                    "Waiting %.2fs before discovery retry %s/%s",
+                    retry_delay,
+                    attempt + 1,
+                    self.config.discovery_attempts,
+                )
+                time.sleep(retry_delay)
 
         return last_result
 

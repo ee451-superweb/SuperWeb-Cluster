@@ -1,10 +1,14 @@
-﻿"""Heartbeat tracking for compute-node runtime."""
+﻿"""Track the last scheduler heartbeat seen by the compute node.
+
+Use this module when the compute node needs a tiny state holder for the most
+recent heartbeat received from the main node.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from wire.runtime import Heartbeat
+from wire.internal_protocol.runtime_transport import Heartbeat
 from app.trace_utils import trace_function
 
 
@@ -16,6 +20,11 @@ class WorkerHeartbeat:
 
     @trace_function
     def respond(self, heartbeat: Heartbeat) -> None:
+        """Record the latest heartbeat received from the main node.
+
+        Args:
+            heartbeat: Heartbeat payload that just arrived from the scheduler.
+        """
         self.last_heartbeat = heartbeat
 
 

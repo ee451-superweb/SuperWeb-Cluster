@@ -1,16 +1,24 @@
-﻿"""Manual fallback when multicast discovery fails."""
+﻿"""Fallback helpers for manual peer entry when automatic discovery is unavailable.
+
+Use this module after multicast discovery has failed and the user should be
+allowed to type a host or ``host:port`` pair manually.
+"""
 
 from __future__ import annotations
 
 from common.types import DiscoveryResult
 from app.constants import MSG_MANUAL_CANCELLED, MSG_MANUAL_PROMPT
-from wire.discovery import normalize_manual_address
+from wire.discovery_protocol.discovery import normalize_manual_address
 from app.trace_utils import trace_function
 
 
 @trace_function
 def prompt_manual_address(default_port: int) -> DiscoveryResult:
-    """Prompt for a manual host or host:port value."""
+    """Use this when discovery should fall back to plain-text manual address input.
+
+    Args: default_port port to use when the user supplies only a host value.
+    Returns: A DiscoveryResult describing the chosen manual endpoint or why input failed.
+    """
 
     # Manual input is intentionally plain text in the kickoff version so the
     # user can recover even when automatic discovery is unavailable.

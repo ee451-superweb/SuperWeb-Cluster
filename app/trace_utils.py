@@ -17,6 +17,7 @@ def trace_function(func: Callable[P, R]) -> Callable[P, R]:
 
     @functools.wraps(func)
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        """Log or print one trace line before calling the wrapped function."""
         qualified_name = f"{func.__module__}.{func.__qualname__}"
         message = f"[TRACE] Entering {qualified_name}"
 
@@ -26,7 +27,10 @@ def trace_function(func: Callable[P, R]) -> Callable[P, R]:
         if logging.getLogger().handlers:
             logging.getLogger(LOGGER_NAME).info(message)
         else:
-            print(message, flush=True)
+            try:
+                print(message, flush=True)
+            except OSError:
+                logging.getLogger(LOGGER_NAME).debug(message)
 
         return func(*args, **kwargs)
 

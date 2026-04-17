@@ -10,14 +10,17 @@ from app.trace_utils import trace_function
 
 
 def _inbound_rule_name() -> str:
+    """Return the Windows firewall rule name for inbound UDP discovery traffic."""
     return f"{WINDOWS_FIREWALL_RULE_NAME}-Inbound"
 
 
 def _outbound_rule_name() -> str:
+    """Return the Windows firewall rule name for outbound UDP discovery traffic."""
     return f"{WINDOWS_FIREWALL_RULE_NAME}-Outbound"
 
 
 def _run_firewall_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+    """Run one Windows firewall command and capture its output."""
     return subprocess.run(command, capture_output=True, text=True, check=False)
 
 

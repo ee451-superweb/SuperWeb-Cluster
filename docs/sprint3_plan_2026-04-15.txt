@@ -1,0 +1,328 @@
+SuperWeb-Cluster Sprint 3 开发计划
+时间戳: 2026-04-15
+
+现状更新（2026-04-17）:
+
+- 本文中出现的 `wire/runtime.py`、`wire/runtime_codec.py`、
+  `wire/control_plane_message.py`、`wire/data_plane_message.py` 等名称，
+  现在应理解为更细化后的协议目录:
+  - `wire/internal_protocol/`
+  - `wire/external_protocol/`
+  - `wire/discovery_protocol/`
+- 当前任务与会话存活性也已从“任务级 hard timeout”进一步收敛到
+  heartbeat / update-reply 驱动的 failure counter 模型。
+- 下文保留 Sprint 3 规划与阶段性记录，但具体文件路径请以仓库当前目录结构为准。
+
+Sprint 3 总目标:
+
+- 把 `SuperWeb-Cluster` 从“只支持单一 FMVM 方法的分布式 runtime”
+  推进成“支持多种计算方法的集群计算平台”。
+- 在 runtime、benchmark、worker registration、main-node scheduling 这四层都引入
+  method-aware 设计。
+- 开发对应前端功能，不再只依赖 CLI 演示。
+- 扩大前端覆盖，优先支持 Windows 和 iOS。
+
+一、Sprint 3 范围
+
+1. 多计算方法
+   - 保留现有 `fixed_matrix_vector_multiplication`
+   - 新增至少一种新的计算方法，优先 `spatial_convolution` / `conv2d`
+   - 为后续继续增加 method 留出统一扩展点
+
+2. 前端功能
+   - 提供集群状态查看
+   - 提供 worker 硬件与 benchmark 结果查看
+   - 提供 client request 发起入口
+   - 提供 method 选择与运行结果查看
+
+3. 前端覆盖扩展
+   - 保留 CLI 作为开发/调试入口
+   - 增加 Windows 前端能力
+   - 增加 iOS 前端能力
+
+二、阶段目标拆解
+
+Phase 1. 多方法基础设施
+
+目标:
+- 在不破坏现有 FMVM 路径的前提下，为 runtime 引入 method-aware 架构。
+
+具体任务:
+
+1. 协议层支持多方法
+   - `ClientRequest` 保持 `method` 为一等字段
+   - `TaskAssign` / `TaskResult` 增加 method-specific payload 设计
+   - 避免把 `fmvm` 和 `conv2d` 的字段继续混在一个 flat 结构里
+
+2. worker registration 支持多方法 benchmark 摘要
+   - 每个 worker 同时上报:
+     - FMVM 的硬件排名和 GFLOPS
+     - Conv2D 的硬件排名和 GFLOPS
+   - main node 按 method 记录 worker 能力
+
+3. compute-node 主循环解耦
+   - 从 `compute_node/runtime.py` 中拆出 method-specific 执行逻辑
+   - 引入 method handler / task router 层
+   - 保留 heartbeat、accept/fail/result 这些通用控制流在 runtime 主循环里
+
+Phase 2. 新计算方法接入
+
+目标:
+- 把 `spatial_convolution` / `conv2d` 作为第二种 method 正式并列接入。
+
+具体任务:
+
+1. 新增 `compute_node/compute_methods/spatial_convolution/`
+   - 迁入 method-specific source tree
+   - 整理 runner、dataset、benchmark、handler
+
+2. benchmark 支持多方法
+   - `performance_metrics` 按 method 拆分目录
+   - 顶层 benchmark 增加:
+     - `--method fixed_matrix_vector_multiplication`
+     - `--method spatial_convolution`
+     - `--method all`
+
+3. main node 调度支持多方法
+   - 根据 `request.method` 选择 dispatcher
+   - 根据 method-specific GFLOPS 计算 worker 分发比例
+   - 根据 method 选择 aggregator
+
+Phase 3. 前端第一版
+
+目标:
+- 为 Sprint 3 的多方法 runtime 提供一套可演示、可观察、可操作的前端能力。
+
+第一版前端至少提供:
+
+1. 集群总览
+   - 当前 main node
+   - 在线 worker 数量
+   - 已注册 client 数量
+   - 总体 reported GFLOPS
+
+2. Worker 面板
+   - 每台 worker 的基本硬件信息
+   - 每种 method 下的 benchmark 结果
+   - 每种 method 的后端排名
+
+3. Request 面板
+   - 选择 method
+   - 填写基本请求参数
+   - 发起任务
+   - 查看 request 状态与返回结果元数据
+
+4. 调度可视化
+   - 当前请求使用了哪种 method
+   - worker 分片比例
+   - main node 如何根据 GFLOPS 做任务分配
+
+Phase 4. 前端平台扩展
+
+目标:
+- 让前端不只停留在单一 demo 页面，而是开始具备跨平台覆盖能力。
+
+优先级:
+
+1. Windows
+   - 作为课堂 demo、实验室展示、开发环境中的主力前端
+   - 优先承载较完整的操作和调试能力
+
+2. iOS
+   - 作为移动端监控与轻量控制入口
+   - 优先承载查看状态、触发请求、查看结果摘要
+
+建议策略:
+
+- 先定义稳定的前端接口层，再扩展具体平台实现
+- 前端与 runtime 之间尽量通过统一的 API / message contract 交互
+- 避免 Windows 和 iOS 各自演化出不兼容的独立逻辑
+
+三、推荐技术策略
+
+1. runtime 先 method-aware，再做前端
+   - 如果后端仍然只有 FMVM，前端很难真正展示 Sprint 3 的价值
+   - 所以前端开发应建立在多方法能力已经有稳定接口的基础上
+
+2. 前端先做“观测与控制”，再做“重数据回传”
+   - 先支持:
+     - 状态展示
+     - benchmark 展示
+     - method 选择
+     - request 发起
+     - 结果元数据展示
+   - 大体积 tensor / 文件结果回传留给后续 artifact channel
+
+3. Windows 和 iOS 共享同一套后端语义
+   - worker
+   - method
+   - benchmark summary
+   - request
+   - task status
+   - result metadata
+   这些概念必须统一
+
+四、Sprint 3 交付物建议
+
+最低交付:
+
+1. FMVM + Conv2D 两种 method 共存
+2. worker 注册时可同时上报两种 method 的性能
+3. main node 按 method 做任务分发
+4. 第一版前端可查看集群与 benchmark 信息
+5. 第一版前端可发起 method-aware request
+6. Windows 前端可用
+7. iOS 前端有最小可演示版本
+
+较完整交付:
+
+1. 多方法 benchmark CLI 与结果汇总完成
+2. compute-node handler 架构稳定
+3. main-node dispatcher / aggregator 按 method 解耦
+4. Windows 前端具备完整操作能力
+5. iOS 前端具备监控与轻量控制能力
+
+五、Sprint 3 暂不解决的问题
+
+1. 大结果文件回传
+   - worker -> main
+   - main -> client
+   当前先不在 Sprint 3 初版完成
+
+2. 全平台原生前端全覆盖
+   - 本轮优先 Windows 和 iOS
+   - 其他平台后续再扩展
+
+3. 所有 method 的统一结果可视化
+   - Sprint 3 先把基础链路打通
+   - 更复杂的 method-specific 结果展示可以分后续迭代
+
+六、建议实施顺序
+
+1. 完成多方法协议与 registration 设计
+2. 引入 compute-node method handler 架构
+3. 接入 `spatial_convolution`
+4. 改造 main node 调度与聚合为 method-aware
+5. 重构 benchmark 为多方法入口
+6. 开发第一版前端
+7. 扩展 Windows 前端
+8. 扩展 iOS 前端
+
+七、Sprint 3 成功标准
+
+1. main node 能同时管理多种 method 的 worker 性能摘要
+2. client request 的 `method` 真正影响任务调度和执行路径
+3. 新 method 可以通过统一 handler 机制接入，而不是继续往 runtime 主循环里堆逻辑
+4. 用户可以通过前端而不是只靠命令行观察和操作系统
+5. 项目在演示时能清楚展示:
+   - 集群状态
+   - 多方法支持
+   - 方法切换
+   - Windows 与 iOS 的前端覆盖
+
+八、完成情况更新
+
+更新时间戳: 2026-04-16
+
+截至目前，Sprint 3 中与“多计算方法基础设施”和“新计算方法接入”直接相关的主干目标已经完成或基本完成：
+
+1. 多方法 runtime 主链路已打通
+   - `fixed_matrix_vector_multiplication` 与 `spatial_convolution` 已可并列存在
+   - compute-node 主循环已从 method-specific 逻辑中解耦，改为 handler / task router 驱动
+   - main node 已可根据 `request.method` 选择对应 dispatcher、aggregator 和 worker 性能数据
+
+2. worker registration 已支持多方法 benchmark 摘要
+   - worker 现可同时上报 FMVM 与 spatial_convolution 的性能摘要
+   - main node 已按 method 记录 worker 的 hardware ranking 与 effective GFLOPS
+
+3. benchmark / dataset 体系已完成 method-aware 重构
+   - `performance_metrics` 与 `input_matrix` 已按 method 对称拆分目录
+   - 顶层 benchmark 与 dataset generation 已支持 `fixed_matrix_vector_multiplication`、`spatial_convolution` 和 `all`
+   - FMVM 与 spatial_convolution 都已支持 test/runtime 两阶段数据准备与 benchmark 汇总
+
+4. `spatial_convolution` 已作为第二种 method 正式接入
+   - compute-node 执行器、benchmark、dataset、main-node 调度与结果聚合都已接通
+   - CPU / CUDA 路径已纳入主流程
+   - DX12 路径因致命稳定性问题已明确禁用，不参与默认 benchmark 或 runtime 选择
+
+5. runtime 协议已推进到 method-specific payload 结构
+   - `ClientRequest`、`ClientResponse`、`TaskAssign`、`TaskResult` 已在 wire 层引入 typed method payload
+   - `.proto` 文档也已同步为“控制头 + method payload”的结构
+   - 兼容层仍保留原有常用字段访问方式，避免一次性打断现有 runtime 代码
+
+以下 Sprint 3 目标仍未完成，后续继续推进：
+
+1. 前端第一版
+   - 集群总览、worker 面板、request 面板、调度可视化尚未正式实现
+
+2. 前端平台扩展
+   - Windows 前端与 iOS 前端仍处于待开发状态
+
+3. 大结果数据面
+   - worker -> main / main -> client 的独立 TCP data plane 仍未接入主链路
+
+九、完成情况补充更新
+
+更新时间戳: 2026-04-16
+
+本轮继续完成了 Sprint 3 中“协议收敛”和“runtime 模块化”的两项关键收尾工作：
+
+1. runtime 编解码已切换到官方 protobuf 生成代码
+   - `wire/internal_protocol/runtime_transport.py` 不再继续维护手写 varint / field parser
+   - 运行时收发改为通过 `wire/proto/superweb_cluster_runtime_pb2.py` 与官方 `SerializeToString` / `ParseFromString`
+   - 旧的手写 protobuf 轮子已从主路径移除
+
+2. 协议基建已进一步按目录拆分
+   - protobuf 映射和 envelope 编解码现在位于 `wire/internal_protocol/control_plane_codec.py`
+   - framed transport 位于 `wire/internal_protocol/runtime_transport.py`
+   - 控制面 / 数据面类型分别位于 `wire/internal_protocol/` 与 `wire/external_protocol/`
+
+3. `main_node/runtime.py` 进一步模块化
+   - 心跳等待与重试已拆到 `main_node/heartbeat_service.py`
+   - worker task 下发与结果交换已拆到 `main_node/task_exchange.py`
+   - request 校验、调度、聚合响应构建已拆到 `main_node/request_handler.py`
+   - `main_node/runtime.py` 当前更接近 orchestration shell，而不是继续堆积协议细节与 method-specific 逻辑
+
+4. method payload 模式已贯穿 main/compute runtime 主链路
+   - main node 与 compute node 现在都会显式构造 typed payload
+   - 请求日志也已按 method 输出更准确的信息，不再默认把所有请求都按 `vector_length` 解释
+
+十、完成情况追加更新
+
+更新时间戳: 2026-04-16
+
+本轮按 4 月 15 日 implementation plan 又完成了三块关键目标：
+
+1. `main_node/runtime.py` 继续瘦身
+   - runtime connection registration / accept loop 已拆到 `main_node/connection_service.py`
+   - client request / response loop 已拆到 `main_node/client_session_service.py`
+   - `main_node/runtime.py` 现在更明确地只保留 orchestration、service 装配和生命周期控制
+
+2. 独立 TCP 大文件数据面已接入主链路
+   - 控制面新增 `ArtifactDescriptor`
+   - worker -> main 与 main -> client 均支持通过独立 TCP data plane 传输大结果
+   - 新增模块包括:
+     - `wire/internal_protocol/control_plane.py`
+     - `wire/internal_protocol/data_plane.py`
+     - `wire/internal_protocol/data_plane_codec.py`
+     - `transport/large_data_transfer.py`
+     - `transport/artifact_manager.py`
+   - spatial convolution 的大输出现在不再被 protobuf 单帧大小限制直接卡死
+
+3. Client 端已同步升级到新协议
+   - Python client 的 runtime wire 已切换到官方 protobuf codegen，不再维护手写 protobuf parser
+   - client 已支持 method-specific payload 和 `ArtifactDescriptor`
+   - client 已支持在收到大结果时通过独立 TCP 数据面自动拉取 artifact
+   - Windows terminal 共用的 Python interactive client 已新增 `spatial_convolution` 的 `test` / `runtime` 请求入口
+
+4. 当前已完成的 Sprint 3 目标
+   - 多方法基础设施
+   - 第二计算方法 `spatial_convolution`
+   - method payload 协议主链
+   - 大结果独立 TCP data plane
+   - Python / Windows terminal client 的协议同步
+
+5. 当前仍待完成的 Sprint 3 目标
+   - 更完整的前端可视化界面
+   - iOS 前端实现
+   - 如果后续要支持 artifact/data-plane 续传、背压和更细粒度数据流调度，还需要继续扩展当前 data plane

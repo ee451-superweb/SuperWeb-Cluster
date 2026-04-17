@@ -1,4 +1,9 @@
-﻿"""Main-node runtime loop for superweb-cluster Sprint 1."""
+﻿"""Run the main-node control plane for discovery, client sessions, and workers.
+
+Use this module when one process is acting as the cluster's main node. It
+accepts worker and client TCP sessions, answers discovery packets, dispatches
+requests, emits heartbeats, and updates scheduling state from worker reports.
+"""
 
 from __future__ import annotations
 
@@ -6,41 +11,38 @@ import logging
 import socket
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable
 
 from adapters import network
 from common.types import DiscoveryResult
+from compute_node.compute_methods.spatial_convolution import (
+    DEFAULT_DATASET_DIR as SPATIAL_DATASET_DIR,
+)
 from compute_node.input_matrix import build_input_matrix_spec
 from app.config import AppConfig
 from app.constants import (
     MAIN_NODE_NAME,
     METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
-    RUNTIME_MSG_CLIENT_JOIN,
-    RUNTIME_MSG_CLIENT_REQUEST,
-    RUNTIME_MSG_CLIENT_RESPONSE,
-    RUNTIME_MSG_HEARTBEAT,
-    RUNTIME_MSG_HEARTBEAT_OK,
-    RUNTIME_MSG_REGISTER_WORKER,
-    RUNTIME_MSG_TASK_ACCEPT,
-    RUNTIME_MSG_TASK_ASSIGN,
-    RUNTIME_MSG_TASK_FAIL,
-    RUNTIME_MSG_TASK_RESULT,
-    STATUS_BAD_REQUEST,
-    STATUS_INTERNAL_ERROR,
-    STATUS_NOT_FOUND,
-    STATUS_OK,
+    METHOD_SPATIAL_CONVOLUTION,
 )
 from discovery import multicast
+from main_node import client_session_service as client_session_service_module
+from main_node import connection_service as connection_service_module
+from main_node import handlers as runtime_handlers_module
 from main_node.aggregator import ResultAggregator
+from main_node.client_session_service import ClientSessionService
+from main_node.connection_service import RuntimeConnectionService
 from main_node.dispatcher import TaskDispatcher, WorkerTaskSlice
+from main_node.handlers import RuntimeConnectionHandler
+from main_node.heartbeat_service import HeartbeatCoordinator
+from main_node.request_handler import ClientRequestHandler
 from main_node.registry import ClusterRegistry, RuntimePeerConnection
-from wire.runtime import (
+from main_node.task_exchange import WorkerTaskExchange
+from transport.artifact_manager import ArtifactManager
+from wire.internal_protocol.runtime_transport import (
     MessageKind,
     build_client_response,
-    build_heartbeat,
     build_register_ok,
-    build_task_assign,
     describe_message_kind,
     recv_message,
     send_message,
@@ -49,7 +51,7 @@ from app.trace_utils import trace_function
 
 
 class MainNodeRuntime:
-    """Main-node loop that listens for multicast and responds to discovery."""
+    """Own the main-node runtime from startup through shutdown."""
 
     @trace_function
     def __init__(
@@ -58,6 +60,11 @@ class MainNodeRuntime:
         logger: logging.Logger,
         should_stop: Callable[[], bool] | None = None,
     ) -> None:
+        """Create the services that the main node needs for runtime orchestration.
+
+        Args: config runtime settings, logger diagnostics sink, and should_stop optional shutdown predicate.
+        Returns: None after the runtime wires registry, dispatcher, transfer, and session services together.
+        """
         self.config = config
         self.logger = logger
         self.should_stop = should_stop or (lambda: False)
@@ -65,7 +72,57 @@ class MainNodeRuntime:
         self.dispatcher = TaskDispatcher()
         self.aggregator = ResultAggregator()
         self.fixed_matvec_spec = build_input_matrix_spec()
+        self.spatial_dataset_dir = SPATIAL_DATASET_DIR
+        self.artifact_manager = ArtifactManager(
+            root_dir=self.spatial_dataset_dir / "artifacts",
+            public_host="127.0.0.1",
+            chunk_size=self.config.artifact_chunk_size,
+        )
         self._stop_event = threading.Event()
+        self.task_exchange = WorkerTaskExchange(
+            config=self.config,
+            spatial_dataset_dir=self.spatial_dataset_dir,
+            remove_worker_connection=self._remove_worker_connection,
+            artifact_manager=self.artifact_manager,
+        )
+        self.client_request_handler = ClientRequestHandler(
+            config=self.config,
+            registry=self.registry,
+            dispatcher=self.dispatcher,
+            aggregator=self.aggregator,
+            fixed_matvec_spec=self.fixed_matvec_spec,
+            spatial_dataset_dir=self.spatial_dataset_dir,
+            task_exchange=self.task_exchange,
+            artifact_manager=self.artifact_manager,
+            cluster_counts=self._cluster_counts,
+        )
+        self.heartbeat_coordinator = HeartbeatCoordinator(
+            config=self.config,
+            registry=self.registry,
+            remove_connection=self._remove_runtime_connection,
+        )
+        self.client_session_service = ClientSessionService(
+            config=self.config,
+            registry=self.registry,
+            build_client_response_for_request=self._build_client_response_for_request,
+            remove_client_connection=self._remove_client_connection,
+        )
+        self.connection_service = RuntimeConnectionService(
+            config=self.config,
+            registry=self.registry,
+            format_reported_hardware=self._format_reported_hardware,
+            print_cluster_compute_capacity=self._print_cluster_compute_capacity,
+            serve_client_connection=self._serve_client_connection,
+            cluster_counts=self._cluster_counts,
+            on_runtime_connection_registered=self._start_runtime_connection_reader,
+        )
+        self.runtime_connection_handler = RuntimeConnectionHandler(
+            config=self.config,
+            registry=self.registry,
+            format_reported_hardware=self._format_reported_hardware,
+            print_cluster_compute_capacity=self._print_cluster_compute_capacity,
+            runtime_should_stop=self._runtime_should_stop,
+        )
 
     @trace_function
     def _print_startup_banner(self, local_ip: str, local_mac: str) -> None:
@@ -88,7 +145,49 @@ class MainNodeRuntime:
         )
 
     def _runtime_should_stop(self) -> bool:
+        """Use this helper wherever long-running loops need a shared stop condition.
+
+        Args: self runtime instance being queried for shutdown state.
+        Returns: True when either the internal stop event or external predicate says to stop.
+        """
         return self._stop_event.is_set() or self.should_stop()
+
+    def _refresh_runtime_service_bindings(self) -> None:
+        """Refresh service references so tests and runtime code share the latest state.
+
+        Use this before delegating to helper services because tests often swap
+        ``runtime.registry`` or patched transport helpers after construction.
+
+        Args:
+            None.
+
+        Returns:
+            ``None`` after services and helper modules point at current bindings.
+        """
+        self.connection_service.registry = self.registry
+        self.client_session_service.registry = self.registry
+        self.heartbeat_coordinator.registry = self.registry
+        self.client_request_handler.registry = self.registry
+        self.runtime_connection_handler.registry = self.registry
+        self.connection_service.serve_client_connection = self._serve_client_connection
+        self.runtime_connection_handler.runtime_should_stop = self._runtime_should_stop
+        self.runtime_connection_handler.format_reported_hardware = self._format_reported_hardware
+        self.runtime_connection_handler.print_cluster_compute_capacity = self._print_cluster_compute_capacity
+
+        connection_service_module.recv_message = recv_message
+        connection_service_module.send_message = send_message
+        connection_service_module.build_register_ok = build_register_ok
+        connection_service_module.build_client_response = build_client_response
+        connection_service_module.MessageKind = MessageKind
+        connection_service_module.describe_message_kind = describe_message_kind
+
+        client_session_service_module.recv_message = recv_message
+        client_session_service_module.send_message = send_message
+        client_session_service_module.MessageKind = MessageKind
+        client_session_service_module.describe_message_kind = describe_message_kind
+
+        runtime_handlers_module.send_message = send_message
+        runtime_handlers_module.recv_message = recv_message
 
     @trace_function
     def _create_tcp_listener(self) -> socket.socket:
@@ -102,22 +201,75 @@ class MainNodeRuntime:
         return sock
 
     def _cluster_counts(self) -> tuple[int, int]:
+        """Use this when replies or logs need current worker/client totals.
+
+        Args: self runtime instance providing access to the cluster registry.
+        Returns: A ``(worker_count, client_count)`` tuple.
+        """
         return self.registry.count_workers(), self.registry.count_clients()
 
+    def _method_display_name(self, method: str) -> str:
+        """Return a short operator-facing label for one method name."""
+
+        if method == METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION:
+            return "fmvm"
+        if method == METHOD_SPATIAL_CONVOLUTION:
+            return "conv2d"
+        return method
+
     def _format_reported_hardware(self, connection: RuntimePeerConnection) -> str:
-        if connection.performance is None or not connection.performance.ranked_hardware:
+        """Use this for logs that should summarize a worker's abstract performance rows.
+
+        Args: connection registered worker/client connection whose performance should be formatted.
+        Returns: A compact string listing per-method hardware names and effective GFLOPS.
+        """
+        if connection.performance is None:
+            return "[]"
+        if connection.performance.method_summaries:
+            entries: list[str] = []
+            for method_summary in connection.performance.method_summaries:
+                method_name = self._method_display_name(method_summary.method)
+                if not method_summary.ranked_hardware:
+                    entries.append(f"{method_name}=<unavailable>")
+                    continue
+                entries.append(
+                    f"{method_name}="
+                    + ",".join(
+                        f"{item.hardware_type}:{item.effective_gflops:.3f}GFLOPS"
+                        for item in method_summary.ranked_hardware
+                    )
+                )
+            return "[" + ", ".join(entries) + "]"
+        if not connection.performance.ranked_hardware:
             return "[]"
         return "[" + ", ".join(
-            f"{item.hardware_type}:{item.effective_gflops:.3f}"
+            f"{item.hardware_type}:{item.effective_gflops:.3f}GFLOPS"
             for item in connection.performance.ranked_hardware
         ) + "]"
 
     def _print_cluster_compute_capacity(self) -> None:
+        """Use this after registry changes to print a coarse cluster-capacity summary.
+
+        Args: self runtime instance whose registry is being summarized.
+        Returns: None after the summary line is printed to stdout.
+        """
+        method_totals = self.registry.total_registered_gflops_by_method()
+        if not isinstance(method_totals, dict):
+            method_totals = {}
+
+        def _safe_method_total(method: str) -> float:
+            try:
+                return float(method_totals.get(method, 0.0) or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+
         print(
             "Current cluster compute capacity "
             f"total_effective_gflops={self.registry.total_registered_gflops():.3f} "
             f"worker_count={self.registry.count_workers()} "
-            f"hardware_count={self.registry.count_registered_hardware()}",
+            f"hardware_count={self.registry.count_registered_hardware()} "
+            f"fmvm_effective_gflops={_safe_method_total(METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION):.3f} "
+            f"conv2d_effective_gflops={_safe_method_total(METHOD_SPATIAL_CONVOLUTION):.3f}",
             flush=True,
         )
 
@@ -129,32 +281,13 @@ class MainNodeRuntime:
         main_node_ip: str,
         register_worker,
     ) -> RuntimePeerConnection:
-        payload = register_worker
-        connection = self.registry.register_worker(
-            node_name=payload.node_name,
-            peer_address=addr[0],
-            peer_port=addr[1],
-            hardware=payload.hardware,
-            performance=payload.performance,
-            sock=client_sock,
-        )
-        send_message(
-            client_sock,
-            build_register_ok(
-                main_node_ip=main_node_ip,
-                main_node_port=self.config.tcp_port,
-                main_node_name=MAIN_NODE_NAME,
-            ),
-        )
-        print(
-            f"Registered compute node {connection.node_name} from {connection.peer_address}:{connection.peer_port} "
-            f"cpu={connection.hardware.logical_cpu_count} memory_bytes={connection.hardware.memory_bytes} "
-            f"reported_hardware={connection.performance.hardware_count if connection.performance else 0} "
-            f"ranking={self._format_reported_hardware(connection)}",
-            flush=True,
-        )
-        self._print_cluster_compute_capacity()
-        return connection
+        """Use this helper when a REGISTER_WORKER handshake needs connection-service wiring.
+
+        Args: client_sock/addr accepted TCP socket tuple, main_node_ip listener address, register_worker decoded handshake payload.
+        Returns: The registered worker connection object created by the connection service.
+        """
+        self._refresh_runtime_service_bindings()
+        return self.connection_service.register_worker_connection(client_sock, addr, main_node_ip, register_worker)
 
     @trace_function
     def _register_client_connection(
@@ -163,34 +296,31 @@ class MainNodeRuntime:
         addr: tuple[str, int],
         client_join,
     ) -> RuntimePeerConnection:
-        connection = self.registry.register_client(
-            node_name=client_join.client_name,
-            peer_address=addr[0],
-            peer_port=addr[1],
-            sock=client_sock,
-        )
-        worker_count, client_count = self._cluster_counts()
-        send_message(
-            client_sock,
-            build_client_response(
-                request_id="join",
-                status_code=STATUS_OK,
-                worker_count=worker_count,
-                client_count=client_count,
-            ),
-        )
-        print(
-            f"Registered client {connection.node_name} from {connection.peer_address}:{connection.peer_port}",
-            flush=True,
-        )
-        client_thread = threading.Thread(
-            target=self._serve_client_connection,
-            args=(connection,),
-            name=f"superweb-client-{connection.node_name}",
-            daemon=True,
-        )
-        client_thread.start()
-        return connection
+        """Use this helper when a CLIENT_JOIN handshake needs connection-service wiring.
+
+        Args: client_sock/addr accepted TCP socket tuple and client_join decoded join payload.
+        Returns: The registered client connection object created by the connection service.
+        """
+        self._refresh_runtime_service_bindings()
+        return self.connection_service.register_client_connection(client_sock, addr, client_join)
+
+    def _start_runtime_connection_reader(self, connection: RuntimePeerConnection) -> None:
+        """Use this after registration so one background thread can read that socket.
+
+        Args: connection registered runtime peer whose mailbox reader should be started.
+        Returns: None after the daemon reader thread has been launched.
+        """
+        self._refresh_runtime_service_bindings()
+        self.runtime_connection_handler.start_runtime_connection_reader(connection)
+
+    def _runtime_connection_reader_loop(self, connection: RuntimePeerConnection) -> None:
+        """Use this background loop to keep one runtime socket drained into its mailbox.
+
+        Args: connection registered runtime peer whose socket should be continuously read.
+        Returns: None after the connection closes or the runtime stops.
+        """
+        self._refresh_runtime_service_bindings()
+        self.runtime_connection_handler.runtime_connection_reader_loop(connection)
 
     @trace_function
     def _register_runtime_connection(
@@ -199,322 +329,180 @@ class MainNodeRuntime:
         addr: tuple[str, int],
         main_node_ip: str,
     ) -> RuntimePeerConnection:
-        """Receive and accept one worker or client registration."""
+        """Use this generic helper when one accepted socket must identify itself first.
 
-        client_sock.settimeout(self.config.runtime_socket_timeout)
-        message = recv_message(client_sock, max_size=self.config.max_message_size)
-        if message is None:
-            raise ConnectionError("peer closed the TCP session before registration")
-
-        if message.kind == MessageKind.REGISTER_WORKER and message.register_worker is not None:
-            return self._register_worker_connection(client_sock, addr, main_node_ip, message.register_worker)
-        if message.kind == MessageKind.CLIENT_JOIN and message.client_join is not None:
-            return self._register_client_connection(client_sock, addr, message.client_join)
-
-        raise ValueError(
-            f"expected {RUNTIME_MSG_REGISTER_WORKER} or {RUNTIME_MSG_CLIENT_JOIN}, got {describe_message_kind(message.kind)}"
-        )
+        Args: client_sock/addr accepted TCP socket tuple and main_node_ip listener address to advertise back.
+        Returns: The registered worker or client connection selected by the handshake kind.
+        """
+        self._refresh_runtime_service_bindings()
+        return self.connection_service.register_runtime_connection(client_sock, addr, main_node_ip)
 
     @trace_function
     def _accept_runtime_connections(self, server_sock: socket.socket, main_node_ip: str) -> None:
-        """Accept worker and client TCP sessions in the background."""
+        """Use this background loop to accept and register new runtime TCP sessions.
 
-        while not self._runtime_should_stop():
-            try:
-                client_sock, addr = server_sock.accept()
-            except socket.timeout:
-                continue
-            except OSError:
-                if self._runtime_should_stop():
-                    return
-                raise
-
-            try:
-                self._register_runtime_connection(client_sock, addr, main_node_ip)
-            except (OSError, ValueError, ConnectionError) as exc:
-                print(f"Rejected superweb-cluster runtime connection from {addr[0]}:{addr[1]}: {exc}", flush=True)
-                network.safe_close(client_sock)
+        Args: server_sock main listening TCP socket and main_node_ip advertised host address.
+        Returns: None after the accept loop exits.
+        """
+        self._refresh_runtime_service_bindings()
+        self.connection_service.accept_runtime_connections(
+            server_sock,
+            main_node_ip,
+            runtime_should_stop=self._runtime_should_stop,
+        )
 
     @trace_function
     def _remove_worker_connection(self, connection: RuntimePeerConnection, reason: str) -> None:
-        removed = self.registry.remove_worker(connection.peer_id)
-        if removed is not None:
-            network.safe_close(removed.sock)
-        print(
-            f"Removed compute node {connection.node_name} at {connection.peer_address}:{connection.peer_port}: {reason}",
-            flush=True,
+        """Use this when a worker disconnects, times out, or must be removed.
+
+        Args: connection worker connection to remove and reason human-readable removal cause.
+        Returns: None after the registry, mailbox, socket, and logs are updated.
+        """
+        self._refresh_runtime_service_bindings()
+        self.runtime_connection_handler.remove_worker_connection(connection, reason)
+
+    def _handle_worker_update(self, connection: RuntimePeerConnection, worker_update) -> None:
+        """Use this when an idle worker sends refreshed abstract performance data.
+
+        Args: connection worker that sent the update and worker_update decoded WORKER_UPDATE payload.
+        Returns: None after the registry is updated and cluster capacity is reprinted.
+        """
+        self._refresh_runtime_service_bindings()
+        self.runtime_connection_handler.handle_worker_update(connection, worker_update)
+
+    def _handle_client_info_request(self, connection: RuntimePeerConnection, client_info_request) -> None:
+        """Use this when a client asks whether it still has active work on the main node.
+
+        Args: connection client session and client_info_request decoded polling payload.
+        Returns: None after one CLIENT_INFO_REPLY has been sent on that connection.
+        """
+        self._refresh_runtime_service_bindings()
+        self.runtime_connection_handler.handle_client_info_request(connection, client_info_request)
+
+    def _ensure_spatial_convolution_dataset_ready(self) -> None:
+        """Use this before convolution dispatch so the shared dataset files are ready.
+
+        Args: self runtime instance delegating dataset preparation to task exchange.
+        Returns: None after required spatial dataset files are ensured on disk.
+        """
+        self.task_exchange.ensure_spatial_convolution_dataset_ready()
+
+    def _spatial_weight_slice(self, *, variant: str, spec, start_oc: int, end_oc: int) -> bytes:
+        """Use this when one spatial task needs only a slice of the full weight tensor.
+
+        Args: variant workload name, spec convolution spec, and start_oc/end_oc output-channel bounds.
+        Returns: The serialized weight bytes for the requested output-channel slice.
+        """
+        return self.task_exchange.spatial_weight_slice(
+            variant=variant,
+            spec=spec,
+            start_oc=start_oc,
+            end_oc=end_oc,
         )
-        self._print_cluster_compute_capacity()
+
+    def _max_spatial_channels_per_task(self, spec) -> int:
+        """Use this when dispatch needs the largest in-band channel chunk for a spatial task.
+
+        Args: spec convolution workload spec whose wire-size limits are being checked.
+        Returns: The maximum output-channel count allowed in one task payload.
+        """
+        return self.task_exchange.max_spatial_channels_per_task(spec)
 
     @trace_function
     def _run_worker_task_slice(self, request, assignment: WorkerTaskSlice):
-        exchange_timeout = max(self.config.runtime_socket_timeout, 30.0)
-        sock = assignment.connection.sock
-        previous_timeout = sock.gettimeout()
-        task_assign = build_task_assign(
+        """Use this wrapper when one prepared assignment should run against its target worker.
+
+        Args: request original client request and assignment one worker slice produced by the dispatcher.
+        Returns: The completed worker task result returned by task exchange.
+        """
+        self.registry.mark_worker_task(
+            assignment.connection.peer_id,
             request_id=request.request_id,
-            node_id=assignment.connection.node_name,
             task_id=assignment.task_id,
             method=request.method,
-            object_id=request.object_id,
-            stream_id=request.stream_id,
-            row_start=assignment.row_start,
-            row_end=assignment.row_end,
-            vector_data=request.vector_data,
-            vector_length=request.vector_length,
         )
-
         try:
-            with assignment.connection.io_lock:
-                sock.settimeout(exchange_timeout)
-                send_message(sock, task_assign)
-                print(
-                    f"{RUNTIME_MSG_TASK_ASSIGN} to {assignment.connection.node_name} "
-                    f"task_id={assignment.task_id} rows={assignment.row_start}:{assignment.row_end}",
-                    flush=True,
-                )
-
-                accept_message = recv_message(sock, max_size=self.config.max_message_size)
-                if accept_message is None:
-                    raise ConnectionError("worker closed the TCP session before TASK_ACCEPT")
-                if accept_message.kind != MessageKind.TASK_ACCEPT or accept_message.task_accept is None:
-                    raise ValueError(
-                        f"expected {RUNTIME_MSG_TASK_ACCEPT}, got {describe_message_kind(accept_message.kind)}"
-                    )
-                task_accept = accept_message.task_accept
-                if task_accept.request_id != request.request_id or task_accept.task_id != assignment.task_id:
-                    raise ValueError("received TASK_ACCEPT for the wrong request or task id")
-
-                result_message = recv_message(sock, max_size=self.config.max_message_size)
-                if result_message is None:
-                    raise ConnectionError("worker closed the TCP session before TASK_RESULT")
-                if result_message.kind == MessageKind.TASK_FAIL and result_message.task_fail is not None:
-                    task_fail = result_message.task_fail
-                    raise RuntimeError(task_fail.error_message or "worker reported TASK_FAIL")
-                if result_message.kind != MessageKind.TASK_RESULT or result_message.task_result is None:
-                    raise ValueError(
-                        f"expected {RUNTIME_MSG_TASK_RESULT}, got {describe_message_kind(result_message.kind)}"
-                    )
-                task_result = result_message.task_result
-                if task_result.request_id != request.request_id or task_result.task_id != assignment.task_id:
-                    raise ValueError("received TASK_RESULT for the wrong request or task id")
-                return task_result
-        except (OSError, ValueError, ConnectionError, RuntimeError) as exc:
-            self._remove_worker_connection(assignment.connection, str(exc))
-            raise
+            return self.task_exchange.run_worker_task_slice(request, assignment)
         finally:
-            try:
-                sock.settimeout(previous_timeout)
-            except OSError:
-                pass
+            self.registry.clear_worker_task(
+                assignment.connection.peer_id,
+                task_id=assignment.task_id,
+            )
 
     @trace_function
     def _build_client_response_for_request(self, request):
-        worker_count, client_count = self._cluster_counts()
+        """Use this to delegate one client request into the request-handler pipeline.
 
-        if request.method != METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION:
-            return build_client_response(
-                request_id=request.request_id,
-                status_code=STATUS_BAD_REQUEST,
-                method=request.method,
-                object_id=request.object_id,
-                stream_id=request.stream_id,
-                error_message=f"unsupported method: {request.method}",
-                worker_count=worker_count,
-                client_count=client_count,
-            )
-
-        if request.vector_length != self.fixed_matvec_spec.cols:
-            return build_client_response(
-                request_id=request.request_id,
-                status_code=STATUS_BAD_REQUEST,
-                method=request.method,
-                object_id=request.object_id,
-                stream_id=request.stream_id,
-                error_message=(
-                    f"vector_length={request.vector_length} does not match "
-                    f"expected {self.fixed_matvec_spec.cols}"
-                ),
-                worker_count=worker_count,
-                client_count=client_count,
-            )
-
-        if len(request.vector_data) != request.vector_length * 4:
-            return build_client_response(
-                request_id=request.request_id,
-                status_code=STATUS_BAD_REQUEST,
-                method=request.method,
-                object_id=request.object_id,
-                stream_id=request.stream_id,
-                error_message="vector_data byte length does not match vector_length",
-                worker_count=worker_count,
-                client_count=client_count,
-            )
-
-        assignments = self.dispatcher.dispatch_fixed_matrix_vector_multiplication(
-            request_id=request.request_id,
-            rows=self.fixed_matvec_spec.rows,
-            workers=self.registry.list_workers(),
-            worker_hardware=self.registry.list_worker_hardware(),
-        )
-        if not assignments:
-            return build_client_response(
-                request_id=request.request_id,
-                status_code=STATUS_NOT_FOUND,
-                method=request.method,
-                object_id=request.object_id,
-                stream_id=request.stream_id,
-                error_message="no registered compute workers are currently available",
-                worker_count=worker_count,
-                client_count=client_count,
-            )
-
-        try:
-            with ThreadPoolExecutor(max_workers=len(assignments), thread_name_prefix="task-dispatch") as executor:
-                task_results = list(executor.map(lambda item: self._run_worker_task_slice(request, item), assignments))
-            output_vector = self.aggregator.collect_fixed_matrix_vector_result(
-                rows=self.fixed_matvec_spec.rows,
-                results=task_results,
-            )
-            worker_count, client_count = self._cluster_counts()
-            return build_client_response(
-                request_id=request.request_id,
-                status_code=STATUS_OK,
-                method=request.method,
-                object_id=request.object_id,
-                stream_id=request.stream_id,
-                output_vector=output_vector,
-                output_length=self.fixed_matvec_spec.rows,
-                worker_count=worker_count,
-                client_count=client_count,
-            )
-        except (OSError, ValueError, ConnectionError, RuntimeError) as exc:
-            worker_count, client_count = self._cluster_counts()
-            return build_client_response(
-                request_id=request.request_id,
-                status_code=STATUS_INTERNAL_ERROR,
-                method=request.method,
-                object_id=request.object_id,
-                stream_id=request.stream_id,
-                error_message=str(exc),
-                worker_count=worker_count,
-                client_count=client_count,
-            )
+        Args: request decoded client request payload from the client session service.
+        Returns: A ready-to-send client response envelope.
+        """
+        self.client_request_handler.registry = self.registry
+        self.client_request_handler.dispatcher = self.dispatcher
+        self.client_request_handler.aggregator = self.aggregator
+        self.client_request_handler.fixed_matvec_spec = self.fixed_matvec_spec
+        self.client_request_handler.spatial_dataset_dir = self.spatial_dataset_dir
+        self.client_request_handler.task_exchange = self.task_exchange
+        self.client_request_handler.artifact_manager = self.artifact_manager
+        self.client_request_handler.run_worker_task_slice = self._run_worker_task_slice
+        return self.client_request_handler.build_client_response_for_request(request)
 
     @trace_function
     def _remove_client_connection(self, connection: RuntimePeerConnection, reason: str) -> None:
-        removed = self.registry.remove_client(connection.peer_id)
-        if removed is not None:
-            network.safe_close(removed.sock)
-        print(
-            f"Removed client {connection.node_name} at {connection.peer_address}:{connection.peer_port}: {reason}",
-            flush=True,
-        )
+        """Use this when one client disconnects or its session must be forcibly removed.
+
+        Args: connection client connection to remove and reason human-readable removal cause.
+        Returns: None after the registry, mailbox, socket, and logs are updated.
+        """
+        self._refresh_runtime_service_bindings()
+        self.runtime_connection_handler.remove_client_connection(connection, reason)
+
+    def _remove_runtime_connection(self, connection: RuntimePeerConnection, reason: str) -> None:
+        """Use this role-aware helper when a runtime connection must be removed.
+
+        Args: connection runtime peer to remove and reason human-readable removal cause.
+        Returns: None after the connection is delegated to worker or client cleanup.
+        """
+        self._refresh_runtime_service_bindings()
+        self.runtime_connection_handler.remove_runtime_connection(connection, reason)
 
     @trace_function
     def _serve_client_connection(self, connection: RuntimePeerConnection) -> None:
         """Process client requests on a registered client session."""
 
-        while not self._runtime_should_stop():
-            try:
-                message = recv_message(connection.sock, max_size=self.config.max_message_size)
-            except socket.timeout:
-                continue
-            except (OSError, ValueError, ConnectionError) as exc:
-                self._remove_client_connection(connection, str(exc))
-                return
-
-            if message is None:
-                self._remove_client_connection(connection, "client closed the TCP session")
-                return
-
-            if message.kind != MessageKind.CLIENT_REQUEST or message.client_request is None:
-                print(
-                    f"Ignoring unexpected client runtime message from {connection.node_name}: "
-                    f"{describe_message_kind(message.kind)}",
-                    flush=True,
-                )
-                continue
-
-            request = message.client_request
-            self.registry.mark_client_request(connection.peer_id)
-            print(
-                f"{RUNTIME_MSG_CLIENT_REQUEST} from {request.client_name} "
-                f"request_id={request.request_id} method={request.method} "
-                f"vector_length={request.vector_length}",
-                flush=True,
-            )
-            response = self._build_client_response_for_request(request)
-            send_message(connection.sock, response)
-            print(
-                f"{RUNTIME_MSG_CLIENT_RESPONSE} to {request.client_name} "
-                f"request_id={request.request_id} status_code={response.client_response.status_code}",
-                flush=True,
-            )
+        self._refresh_runtime_service_bindings()
+        self.client_session_service.build_client_response_for_request = self._build_client_response_for_request
+        self.client_session_service.remove_client_connection = self._remove_client_connection
+        self.client_session_service.serve_client_connection(connection, self._runtime_should_stop)
 
     @trace_function
     def _await_heartbeat_ok(self, connection: RuntimePeerConnection, heartbeat_unix_time_ms: int) -> None:
-        """Wait for a matching heartbeat acknowledgement from a worker."""
+        """Use this to wait for the acknowledgement of one previously sent heartbeat.
 
-        message = recv_message(connection.sock, max_size=self.config.max_message_size)
-        if message is None:
-            raise ConnectionError("worker closed the TCP session during heartbeat")
-        if message.kind != MessageKind.HEARTBEAT_OK or message.heartbeat_ok is None:
-            raise ValueError(f"expected {RUNTIME_MSG_HEARTBEAT_OK}, got {describe_message_kind(message.kind)}")
-        if message.heartbeat_ok.heartbeat_unix_time_ms != heartbeat_unix_time_ms:
-            raise ValueError(
-                "received HEARTBEAT_OK for unexpected heartbeat timestamp "
-                f"{message.heartbeat_ok.heartbeat_unix_time_ms}"
-            )
-
-        ack_time = (
-            message.heartbeat_ok.received_unix_time_ms / 1000 if message.heartbeat_ok.received_unix_time_ms else time.time()
-        )
-        self.registry.mark_heartbeat(connection.peer_id, sent_at=ack_time)
-        print(
-            f"{RUNTIME_MSG_HEARTBEAT_OK} from {message.heartbeat_ok.node_name} for {heartbeat_unix_time_ms}",
-            flush=True,
-        )
+        Args: connection target peer and heartbeat_unix_time_ms timestamp used as the ack key.
+        Returns: None after the heartbeat coordinator confirms the acknowledgement.
+        """
+        self.heartbeat_coordinator.registry = self.registry
+        self.heartbeat_coordinator.await_heartbeat_ok(connection, heartbeat_unix_time_ms)
 
     @trace_function
     def _send_heartbeat_with_retry(self, connection: RuntimePeerConnection) -> None:
-        """Send heartbeat retries and remove dead workers when they stop replying."""
+        """Use this when one connection needs heartbeat retry logic applied.
 
-        total_attempts = self.config.heartbeat_retry_count + 1
-        last_error: Exception | None = None
-
-        for attempt in range(1, total_attempts + 1):
-            heartbeat = build_heartbeat(MAIN_NODE_NAME)
-            assert heartbeat.heartbeat is not None
-            heartbeat_unix_time_ms = heartbeat.heartbeat.unix_time_ms
-
-            try:
-                with connection.io_lock:
-                    send_message(connection.sock, heartbeat)
-                    print(
-                        f"{RUNTIME_MSG_HEARTBEAT} to {connection.node_name} "
-                        f"at {connection.peer_address}:{connection.peer_port} attempt={attempt}/{total_attempts}",
-                        flush=True,
-                    )
-                    self._await_heartbeat_ok(connection, heartbeat_unix_time_ms)
-                return
-            except (socket.timeout, OSError, ConnectionError, ValueError) as exc:
-                last_error = exc
-                if attempt < total_attempts:
-                    print(
-                        f"{RUNTIME_MSG_HEARTBEAT} retry for {connection.node_name} "
-                        f"at {connection.peer_address}:{connection.peer_port} after {exc}",
-                        flush=True,
-                    )
-
-        self._remove_worker_connection(connection, f"after heartbeat timeout: {last_error}")
+        Args: connection worker/client peer whose heartbeat should be sent with retries.
+        Returns: None after the heartbeat coordinator finishes the send flow.
+        """
+        self.heartbeat_coordinator.registry = self.registry
+        self.heartbeat_coordinator.send_heartbeat_with_retry(connection)
 
     @trace_function
     def _send_heartbeat_once(self) -> None:
-        """Send one main-node heartbeat cycle to all registered workers."""
+        """Use this when the periodic heartbeat loop should fan out one heartbeat round.
 
-        for connection in self.registry.list_workers():
-            self._send_heartbeat_with_retry(connection)
+        Args: self runtime instance delegating the send round to the heartbeat coordinator.
+        Returns: None after one heartbeat cycle has been attempted.
+        """
+        self.heartbeat_coordinator.registry = self.registry
+        self.heartbeat_coordinator.send_heartbeat_once()
 
     @trace_function
     def _heartbeat_loop(self) -> None:
@@ -537,12 +525,16 @@ class MainNodeRuntime:
     def _close_runtime_connections(self) -> None:
         """Best-effort close of all worker and client sessions."""
 
-        for connection in self.registry.clear():
-            network.safe_close(connection.sock)
+        self._refresh_runtime_service_bindings()
+        self.runtime_connection_handler.close_runtime_connections()
 
     @trace_function
     def _handle_packet(self, endpoint: multicast.MulticastSocket, addr: tuple[str, int], message: bytes) -> None:
-        """Reply to main-node browse queries."""
+        """Use this when one multicast packet may be a main-node discovery query.
+
+        Args: endpoint bound multicast socket, addr sender address tuple, and message raw packet bytes.
+        Returns: None after optionally sending one announce reply.
+        """
 
         if not multicast.parse_discover_message(message):
             return
@@ -554,7 +546,11 @@ class MainNodeRuntime:
 
     @trace_function
     def run(self) -> DiscoveryResult:
-        """Run the main-node multicast loop until shutdown is requested."""
+        """Use this as the main-node process entrypoint after configuration is ready.
+
+        Args: self runtime instance containing network settings and shared services.
+        Returns: A DiscoveryResult describing successful stop or startup/runtime failure.
+        """
 
         runtime_sock = None
         try:
@@ -579,6 +575,7 @@ class MainNodeRuntime:
 
             local_ip = network.resolve_local_ip()
             local_mac = network.get_local_mac_address()
+            self.artifact_manager.set_public_host(local_ip)
             self._print_startup_banner(local_ip, local_mac)
 
             accept_thread = threading.Thread(
@@ -614,6 +611,7 @@ class MainNodeRuntime:
             self._stop_event.set()
             if runtime_sock is not None:
                 network.safe_close(runtime_sock)
+            self.artifact_manager.close()
             self._close_runtime_connections()
             multicast.close(endpoint)
 

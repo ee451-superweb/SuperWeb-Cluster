@@ -1,5 +1,6 @@
 ﻿"""Compute-node runtime tests."""
 
+import threading
 import unittest
 from unittest import mock
 
@@ -14,7 +15,15 @@ from app.constants import (
     METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
     STATUS_OK,
 )
-from wire.runtime import Heartbeat, MessageKind, RegisterOk, RuntimeEnvelope, TaskAssign, TaskResult
+from wire.internal_protocol.runtime_transport import (
+    FixedMatrixVectorResultPayload,
+    Heartbeat,
+    MessageKind,
+    RegisterOk,
+    RuntimeEnvelope,
+    TaskAssign,
+    TaskResult,
+)
 
 
 class _FakeSession:
@@ -60,7 +69,54 @@ class _FakeExecutor:
             row_end=task.row_end,
             output_length=task.row_end - task.row_start,
             output_vector=pack_float32_values([1.0] * (task.row_end - task.row_start)),
+            iteration_count=task.iteration_count,
         )
+
+
+class _BlockingExecutor:
+    def __init__(self, release_event: threading.Event) -> None:
+        self.release_event = release_event
+        self.started = threading.Event()
+        self.tasks = []
+
+    def execute_task(self, task) -> TaskResult:
+        self.tasks.append(task)
+        self.started.set()
+        self.release_event.wait(timeout=1.0)
+        return TaskResult(
+            request_id=task.request_id,
+            node_id=task.node_id,
+            task_id=task.task_id,
+            timestamp_ms=task.timestamp_ms,
+            status_code=STATUS_OK,
+            row_start=task.row_start,
+            row_end=task.row_end,
+            output_length=task.row_end - task.row_start,
+            output_vector=pack_float32_values([1.0] * (task.row_end - task.row_start)),
+            iteration_count=task.iteration_count,
+        )
+
+
+class _TaskThenHeartbeatSession(_FakeSession):
+    def __init__(
+        self,
+        messages: list[RuntimeEnvelope | None],
+        register_ok: RegisterOk,
+        *,
+        task_started: threading.Event,
+        release_event: threading.Event,
+    ) -> None:
+        super().__init__(messages, register_ok)
+        self._task_started = task_started
+        self._release_event = release_event
+
+    def receive(self):
+        message = self.messages.pop(0)
+        if message is not None and message.kind == MessageKind.HEARTBEAT:
+            self._task_started.wait(timeout=1.0)
+        if message is None:
+            self._release_event.set()
+        return message
 
 
 class ComputeNodeRuntimeTests(unittest.TestCase):
@@ -107,6 +163,7 @@ class ComputeNodeRuntimeTests(unittest.TestCase):
                 row_end=2,
                 vector_length=4,
                 vector_data=pack_float32_values([1.0, 2.0, 3.0, 4.0]),
+                iteration_count=5,
             ),
         )
         fake_session = _FakeSession(
@@ -122,6 +179,7 @@ class ComputeNodeRuntimeTests(unittest.TestCase):
                 main_node_name=MAIN_NODE_NAME,
                 main_node_ip="10.0.0.5",
                 main_node_port=52020,
+                node_id="worker-1",
             ),
         )
         fake_executor = _FakeExecutor(inventory)
@@ -156,8 +214,101 @@ class ComputeNodeRuntimeTests(unittest.TestCase):
         self.assertEqual(fake_session.sent_messages[0].kind, MessageKind.HEARTBEAT_OK)
         self.assertEqual(fake_session.sent_messages[1].kind, MessageKind.TASK_ACCEPT)
         self.assertEqual(fake_session.sent_messages[2].kind, MessageKind.TASK_RESULT)
+        self.assertEqual(fake_session.sent_messages[1].task_accept.node_id, "worker-1")
+        self.assertEqual(fake_session.sent_messages[2].task_result.node_id, "worker-1")
+        self.assertEqual(fake_session.sent_messages[2].task_result.iteration_count, 5)
         self.assertEqual(fake_session.sent_messages[2].task_result.output_length, 2)
+        self.assertIsInstance(fake_session.sent_messages[2].task_result.result_payload, FixedMatrixVectorResultPayload)
         self.assertEqual(len(fake_executor.tasks), 1)
+        self.assertTrue(print_mock.called)
+
+    @mock.patch("builtins.print")
+    @mock.patch("compute_node.runtime.load_runtime_processor_inventory")
+    @mock.patch("compute_node.runtime.collect_hardware_profile")
+    def test_run_replies_to_heartbeat_while_task_is_still_running(
+        self,
+        collect_hardware_profile_mock: mock.Mock,
+        load_runtime_processor_inventory_mock: mock.Mock,
+        print_mock: mock.Mock,
+    ) -> None:
+        hardware = HardwareProfile(
+            hostname="worker-a",
+            local_ip="10.0.0.2",
+            mac_address="aa:bb:cc:dd:ee:ff",
+            system="Windows",
+            release="11",
+            machine="AMD64",
+            processor="x86_64",
+            logical_cpu_count=12,
+            memory_bytes=17179869184,
+        )
+        inventory = RuntimeProcessorInventory(
+            processors=(
+                RuntimeProcessorProfile(
+                    hardware_type="cpu",
+                    effective_gflops=24.0,
+                    rank=1,
+                    best_config={"workers": 8, "tile_size": 512},
+                ),
+            )
+        )
+        collect_hardware_profile_mock.return_value = hardware
+        load_runtime_processor_inventory_mock.return_value = inventory
+        task_assign = RuntimeEnvelope(
+            kind=MessageKind.TASK_ASSIGN,
+            task_assign=TaskAssign(
+                request_id="req-1",
+                node_id=COMPUTE_NODE_NAME,
+                task_id="task-1",
+                method=METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
+                object_id="input_matrix/default",
+                stream_id="stream-1",
+                timestamp_ms=123456,
+                row_start=0,
+                row_end=2,
+                vector_length=4,
+                vector_data=pack_float32_values([1.0, 2.0, 3.0, 4.0]),
+                iteration_count=5,
+            ),
+        )
+        release_event = threading.Event()
+        blocking_executor = _BlockingExecutor(release_event)
+        fake_session = _TaskThenHeartbeatSession(
+            messages=[
+                task_assign,
+                RuntimeEnvelope(
+                    kind=MessageKind.HEARTBEAT,
+                    heartbeat=Heartbeat(main_node_name=MAIN_NODE_NAME, unix_time_ms=123457),
+                ),
+                None,
+            ],
+            register_ok=RegisterOk(
+                main_node_name=MAIN_NODE_NAME,
+                main_node_ip="10.0.0.5",
+                main_node_port=52020,
+                node_id="worker-1",
+            ),
+            task_started=blocking_executor.started,
+            release_event=release_event,
+        )
+
+        runtime = ComputeNodeRuntime(
+            config=AppConfig(node_name=COMPUTE_NODE_NAME),
+            main_node_host="10.0.0.5",
+            main_node_port=52020,
+            logger=mock.Mock(),
+            session_factory=lambda *args, **kwargs: fake_session,
+            task_executor_factory=lambda runtime_inventory: blocking_executor,
+        )
+
+        result = runtime.run()
+
+        self.assertFalse(result.success)
+        self.assertEqual(len(fake_session.sent_messages), 2)
+        self.assertEqual(fake_session.sent_messages[0].kind, MessageKind.TASK_ACCEPT)
+        self.assertEqual(fake_session.sent_messages[1].kind, MessageKind.HEARTBEAT_OK)
+        self.assertEqual(fake_session.sent_messages[1].heartbeat_ok.active_task_ids, ("task-1",))
+        self.assertEqual(len(blocking_executor.tasks), 1)
         self.assertTrue(print_mock.called)
 
     @mock.patch("compute_node.runtime.load_runtime_processor_inventory")
@@ -191,7 +342,7 @@ class ComputeNodeRuntimeTests(unittest.TestCase):
             main_node_host="10.0.0.5",
             main_node_port=52020,
             logger=mock.Mock(),
-            session_factory=lambda *args, **kwargs: _BrokenSession([], RegisterOk("", "", 0)),
+            session_factory=lambda *args, **kwargs: _BrokenSession([], RegisterOk("", "", 0, "")),
         )
 
         result = runtime.run()

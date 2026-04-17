@@ -7,6 +7,7 @@ from unittest import mock
 
 from adapters import network
 from app.constants import DEFAULT_DISCOVERY_PORT, DEFAULT_MULTICAST_GROUP, DEFAULT_MULTICAST_TTL
+from tests.support import require_integration
 
 
 class NetworkTests(unittest.TestCase):
@@ -23,13 +24,12 @@ class NetworkTests(unittest.TestCase):
         if hasattr(socket, "SO_REUSEPORT"):
             fake_socket.setsockopt.assert_any_call(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
 
-    def test_print_actual_multicast_interface_ip(self) -> None:
+    @require_integration("Live network probing is reserved for integration runs.")
+    def test_resolve_multicast_interface_ip_in_live_environment(self) -> None:
         primary_ip = network.resolve_local_ip()
         interface_ip = network.resolve_multicast_interface_ip(DEFAULT_MULTICAST_GROUP, DEFAULT_DISCOVERY_PORT)
 
-        print(f"[LIVE] primary_local_ip={primary_ip}", flush=True)
-        print(f"[LIVE] multicast_interface_ip={interface_ip or '(default)'}", flush=True)
-
+        self.assertIsInstance(primary_ip, str)
         self.assertIsInstance(interface_ip, str)
 
     def test_configure_multicast_sender_sets_ttl_and_interface(self) -> None:

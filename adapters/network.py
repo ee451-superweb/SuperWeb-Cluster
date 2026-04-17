@@ -1,4 +1,9 @@
-﻿"""Network helpers used by multicast discovery."""
+﻿"""Create and configure sockets used by multicast discovery traffic.
+
+Use this module when discovery code needs low-level socket helpers for UDP
+creation, multicast membership, timeout setup, local-interface selection, and
+safe socket cleanup.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +16,11 @@ from app.trace_utils import trace_function
 
 @trace_function
 def create_udp_socket(*, reuse_addr: bool = True, reuse_port: bool = False) -> socket.socket:
-    """Create a UDP socket with common kickoff defaults."""
+    """Use this when discovery code needs a fresh UDP socket with reuse options.
+
+    Args: reuse_addr whether to enable ``SO_REUSEADDR`` and reuse_port whether to request ``SO_REUSEPORT`` when supported.
+    Returns: A newly created UDP socket configured with the requested reuse flags.
+    """
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     if reuse_addr:
@@ -23,7 +32,11 @@ def create_udp_socket(*, reuse_addr: bool = True, reuse_port: bool = False) -> s
 
 @trace_function
 def set_socket_timeout(sock: socket.socket, timeout: float) -> None:
-    """Apply a socket timeout."""
+    """Use this when a discovery socket should enforce bounded blocking calls.
+
+    Args: sock target socket and timeout timeout value in seconds.
+    Returns: None after the timeout is applied to the socket.
+    """
 
     sock.settimeout(timeout)
 
@@ -34,7 +47,11 @@ def configure_multicast_sender(
     ttl: int,
     interface_ip: str = "",
 ) -> None:
-    """Apply sender-side multicast settings."""
+    """Use this when one socket should send multicast traffic to the discovery group.
+
+    Args: sock UDP socket to configure, ttl multicast hop limit, and interface_ip optional outbound interface IP.
+    Returns: None after multicast sender options are applied.
+    """
 
     if not 0 <= ttl <= 255:
         raise ValueError("multicast TTL must be between 0 and 255")
@@ -51,7 +68,11 @@ def configure_multicast_receiver(
     bind_host: str = "",
     interface_ip: str = "",
 ) -> bytes:
-    """Bind a UDP socket and join the given multicast group."""
+    """Use this when one socket should listen for discovery traffic on a multicast group.
+
+    Args: sock UDP socket to bind, group multicast address, port UDP port, bind_host optional bind address, interface_ip optional join interface address.
+    Returns: The packed membership bytes needed later to leave the multicast group.
+    """
 
     # Binding on the discovery port makes the process eligible to receive the
     # multicast datagrams sent to that group.
@@ -71,7 +92,11 @@ def drop_multicast_membership(
     sock: socket.socket,
     membership: bytes | None,
 ) -> None:
-    """Leave the multicast group if membership is active."""
+    """Use this during cleanup when a multicast listener should leave its joined group.
+
+    Args: sock UDP socket and membership packed membership bytes returned by join setup.
+    Returns: None after the leave attempt completes or is skipped.
+    """
 
     if membership is None:
         return
@@ -83,7 +108,11 @@ def drop_multicast_membership(
 
 @trace_function
 def safe_close(sock: socket.socket | None) -> None:
-    """Best-effort socket close."""
+    """Use this helper whenever socket cleanup should ignore close-time errors.
+
+    Args: sock optional socket object to close.
+    Returns: None after the socket is closed when present.
+    """
 
     if sock is None:
         return
@@ -95,7 +124,11 @@ def safe_close(sock: socket.socket | None) -> None:
 
 @trace_function
 def resolve_local_ip(remote_host: str = "8.8.8.8", remote_port: int = 80) -> str:
-    """Best-effort local IP detection without sending user data."""
+    """Use this when discovery code needs a likely outbound local IPv4 address.
+
+    Args: remote_host and remote_port probe endpoint used only for interface selection.
+    Returns: The detected local IPv4 address, or ``127.0.0.1`` as a fallback.
+    """
 
     probe = None
     try:
@@ -112,7 +145,11 @@ def resolve_local_ip(remote_host: str = "8.8.8.8", remote_port: int = 80) -> str
 
 @trace_function
 def resolve_multicast_interface_ip(group: str, port: int) -> str:
-    """Pick a usable local interface IP for multicast traffic."""
+    """Use this when multicast sockets need the best available local interface IP.
+
+    Args: group multicast address and port UDP port used for the interface probe.
+    Returns: A non-loopback interface IP when found, otherwise an empty string.
+    """
 
     primary_ip = resolve_local_ip()
     if not primary_ip.startswith("127."):
@@ -127,7 +164,11 @@ def resolve_multicast_interface_ip(group: str, port: int) -> str:
 
 @trace_function
 def get_local_mac_address() -> str:
-    """Return the current machine MAC address in a printable form."""
+    """Use this when diagnostics or registration want a printable local MAC address.
+
+    Args: selfless helper with no caller-supplied inputs.
+    Returns: The local MAC address formatted as colon-separated lowercase hex octets.
+    """
 
     node = uuid.getnode()
     octets = [(node >> shift) & 0xFF for shift in range(40, -1, -8)]

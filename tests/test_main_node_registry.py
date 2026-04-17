@@ -3,7 +3,9 @@
 import unittest
 from unittest import mock
 
+from app.constants import METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION, METHOD_SPATIAL_CONVOLUTION
 from common.types import ComputeHardwarePerformance, ComputePerformanceSummary, HardwareProfile
+from common.types import MethodPerformanceSummary
 from main_node.registry import ClusterRegistry
 
 
@@ -44,6 +46,74 @@ class MainNodeRegistryTests(unittest.TestCase):
         self.assertAlmostEqual(registry.total_registered_gflops(), 149.0)
         self.assertEqual(hardware_entries[0].worker_peer_id, worker.peer_id)
         self.assertTrue(hardware_entries[0].hardware_id.startswith("hardware:"))
+
+    def test_total_registered_gflops_by_method_reports_method_breakdown(self) -> None:
+        registry = ClusterRegistry()
+        hardware = HardwareProfile(
+            hostname="worker-a",
+            local_ip="10.0.0.2",
+            mac_address="aa:bb:cc:dd:ee:ff",
+            system="Windows",
+            release="11",
+            machine="AMD64",
+            processor="x86_64",
+            logical_cpu_count=8,
+            memory_bytes=8589934592,
+        )
+        performance = ComputePerformanceSummary(
+            method_summaries=[
+                MethodPerformanceSummary(
+                    method=METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
+                    hardware_count=1,
+                    ranked_hardware=[
+                        ComputeHardwarePerformance(hardware_type="cpu", effective_gflops=24.0, rank=1),
+                    ],
+                ),
+                MethodPerformanceSummary(
+                    method=METHOD_SPATIAL_CONVOLUTION,
+                    hardware_count=1,
+                    ranked_hardware=[
+                        ComputeHardwarePerformance(hardware_type="cuda", effective_gflops=125.0, rank=1),
+                    ],
+                ),
+            ]
+        )
+
+        registry.register_worker("compute node", "10.0.0.2", 5000, hardware, performance, mock.Mock())
+
+        totals = registry.total_registered_gflops_by_method()
+
+        self.assertAlmostEqual(totals[METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION], 24.0)
+        self.assertAlmostEqual(totals[METHOD_SPATIAL_CONVOLUTION], 125.0)
+
+    def test_heartbeat_failure_counter_resets_after_success(self) -> None:
+        registry = ClusterRegistry()
+        hardware = HardwareProfile(
+            hostname="worker-a",
+            local_ip="10.0.0.2",
+            mac_address="aa:bb:cc:dd:ee:ff",
+            system="Windows",
+            release="11",
+            machine="AMD64",
+            processor="x86_64",
+            logical_cpu_count=8,
+            memory_bytes=8589934592,
+        )
+        performance = ComputePerformanceSummary(
+            ranked_hardware=[
+                ComputeHardwarePerformance(hardware_type="cpu", effective_gflops=24.0, rank=1),
+            ],
+        )
+
+        worker = registry.register_worker("compute node", "10.0.0.2", 5000, hardware, performance, mock.Mock())
+
+        self.assertEqual(registry.record_heartbeat_failure(worker.peer_id), 1)
+        self.assertEqual(registry.record_heartbeat_failure(worker.peer_id), 2)
+        self.assertEqual(registry.get_heartbeat_failure_count(worker.peer_id), 2)
+
+        registry.mark_heartbeat(worker.peer_id, sent_at=123.0)
+
+        self.assertEqual(registry.get_heartbeat_failure_count(worker.peer_id), 0)
 
 
 if __name__ == "__main__":

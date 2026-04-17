@@ -1,0 +1,841 @@
+"""Convert between Python runtime-envelope objects and generated protobuf messages.
+
+Use this module when runtime code needs the canonical protobuf serializer and
+parser for control-plane messages exchanged between clients, workers, and the
+main node.
+"""
+
+from __future__ import annotations
+
+from common.types import (
+    ComputeHardwarePerformance,
+    ComputePerformanceSummary,
+    HardwareProfile,
+    MethodPerformanceSummary,
+)
+from wire.external_protocol.data_plane import ArtifactDescriptor
+from wire.proto import superweb_cluster_runtime_pb2 as runtime_pb2
+
+
+def _runtime():
+    """Use this lazy import helper to avoid a runtime/runtime_codec circular import.
+
+    Args: no caller-supplied inputs.
+    Returns: The ``wire.internal_protocol.runtime_transport`` module object.
+    """
+    from wire.internal_protocol import runtime_transport as runtime_messages
+
+    return runtime_messages
+
+
+def _to_pb_hardware_profile(payload: HardwareProfile) -> runtime_pb2.HardwareProfile:
+    """Use this during protobuf encoding to convert a HardwareProfile into generated protobuf form.
+
+    Args: payload internal HardwareProfile object.
+    Returns: The generated protobuf HardwareProfile message.
+    """
+    return runtime_pb2.HardwareProfile(
+        hostname=payload.hostname,
+        local_ip=payload.local_ip,
+        mac_address=payload.mac_address,
+        system=payload.system,
+        release=payload.release,
+        machine=payload.machine,
+        processor=payload.processor,
+        logical_cpu_count=payload.logical_cpu_count,
+        memory_bytes=payload.memory_bytes,
+    )
+
+
+def _from_pb_hardware_profile(payload: runtime_pb2.HardwareProfile) -> HardwareProfile:
+    """Use this during protobuf parsing to convert a generated hardware profile into the internal model.
+
+    Args: payload generated protobuf HardwareProfile message.
+    Returns: The internal HardwareProfile object.
+    """
+    return HardwareProfile(
+        hostname=payload.hostname,
+        local_ip=payload.local_ip,
+        mac_address=payload.mac_address,
+        system=payload.system,
+        release=payload.release,
+        machine=payload.machine,
+        processor=payload.processor,
+        logical_cpu_count=payload.logical_cpu_count,
+        memory_bytes=payload.memory_bytes,
+    )
+
+
+def _to_pb_compute_hardware_performance(
+    payload: ComputeHardwarePerformance,
+) -> runtime_pb2.ComputeHardwarePerformance:
+    """Use this during protobuf encoding to convert one hardware-performance row.
+
+    Args: payload internal ComputeHardwarePerformance row.
+    Returns: The generated protobuf ComputeHardwarePerformance message.
+    """
+    return runtime_pb2.ComputeHardwarePerformance(
+        hardware_type=payload.hardware_type,
+        effective_gflops=payload.effective_gflops,
+        rank=payload.rank,
+    )
+
+
+def _from_pb_compute_hardware_performance(
+    payload: runtime_pb2.ComputeHardwarePerformance,
+) -> ComputeHardwarePerformance:
+    """Use this during protobuf parsing to convert one generated hardware-performance row.
+
+    Args: payload generated protobuf ComputeHardwarePerformance message.
+    Returns: The internal ComputeHardwarePerformance object.
+    """
+    return ComputeHardwarePerformance(
+        hardware_type=payload.hardware_type,
+        effective_gflops=payload.effective_gflops,
+        rank=payload.rank,
+    )
+
+
+def _to_pb_method_performance_summary(payload: MethodPerformanceSummary) -> runtime_pb2.MethodPerformanceSummary:
+    """Use this during protobuf encoding to convert one per-method performance summary.
+
+    Args: payload internal MethodPerformanceSummary object.
+    Returns: The generated protobuf MethodPerformanceSummary message.
+    """
+    message = runtime_pb2.MethodPerformanceSummary(
+        method=payload.method,
+        hardware_count=payload.hardware_count,
+    )
+    message.ranked_hardware.extend(_to_pb_compute_hardware_performance(item) for item in payload.ranked_hardware)
+    return message
+
+
+def _from_pb_method_performance_summary(payload: runtime_pb2.MethodPerformanceSummary) -> MethodPerformanceSummary:
+    """Use this during protobuf parsing to convert one generated method performance summary.
+
+    Args: payload generated protobuf MethodPerformanceSummary message.
+    Returns: The internal MethodPerformanceSummary object.
+    """
+    return MethodPerformanceSummary(
+        method=payload.method,
+        hardware_count=payload.hardware_count,
+        ranked_hardware=[_from_pb_compute_hardware_performance(item) for item in payload.ranked_hardware],
+    )
+
+
+def _to_pb_compute_performance_summary(payload: ComputePerformanceSummary) -> runtime_pb2.ComputePerformanceSummary:
+    """Use this during protobuf encoding to convert a full abstract performance summary.
+
+    Args: payload internal ComputePerformanceSummary object.
+    Returns: The generated protobuf ComputePerformanceSummary message.
+    """
+    message = runtime_pb2.ComputePerformanceSummary(hardware_count=payload.hardware_count)
+    message.ranked_hardware.extend(_to_pb_compute_hardware_performance(item) for item in payload.ranked_hardware)
+    message.method_summaries.extend(_to_pb_method_performance_summary(item) for item in payload.method_summaries)
+    return message
+
+
+def _from_pb_compute_performance_summary(payload: runtime_pb2.ComputePerformanceSummary) -> ComputePerformanceSummary:
+    """Use this during protobuf parsing to convert a generated performance summary.
+
+    Args: payload generated protobuf ComputePerformanceSummary message.
+    Returns: The internal ComputePerformanceSummary object.
+    """
+    return ComputePerformanceSummary(
+        hardware_count=payload.hardware_count,
+        ranked_hardware=[_from_pb_compute_hardware_performance(item) for item in payload.ranked_hardware],
+        method_summaries=[_from_pb_method_performance_summary(item) for item in payload.method_summaries],
+    )
+
+
+def _to_pb_artifact_descriptor(payload: ArtifactDescriptor) -> runtime_pb2.ArtifactDescriptor:
+    """Use this during protobuf encoding to convert an ArtifactDescriptor.
+
+    Args: payload internal artifact descriptor.
+    Returns: The generated protobuf ArtifactDescriptor message.
+    """
+    return runtime_pb2.ArtifactDescriptor(
+        artifact_id=payload.artifact_id,
+        content_type=payload.content_type,
+        size_bytes=payload.size_bytes,
+        checksum=payload.checksum,
+        producer_node_id=payload.producer_node_id,
+        transfer_host=payload.transfer_host,
+        transfer_port=payload.transfer_port,
+        chunk_size=payload.chunk_size,
+        ready=payload.ready,
+    )
+
+
+def _from_pb_artifact_descriptor(payload: runtime_pb2.ArtifactDescriptor) -> ArtifactDescriptor:
+    """Use this during protobuf parsing to convert a generated ArtifactDescriptor.
+
+    Args: payload generated protobuf ArtifactDescriptor message.
+    Returns: The internal ArtifactDescriptor object.
+    """
+    return ArtifactDescriptor(
+        artifact_id=payload.artifact_id,
+        content_type=payload.content_type,
+        size_bytes=payload.size_bytes,
+        checksum=payload.checksum,
+        producer_node_id=payload.producer_node_id,
+        transfer_host=payload.transfer_host,
+        transfer_port=payload.transfer_port,
+        chunk_size=payload.chunk_size,
+        ready=payload.ready,
+    )
+
+
+def _to_pb_fixed_matrix_vector_request_payload(payload) -> runtime_pb2.FixedMatrixVectorRequestPayload:
+    """Use this during protobuf encoding to convert an FMVM client-request payload.
+
+    Args: payload internal FixedMatrixVectorRequestPayload object.
+    Returns: The generated protobuf request payload message.
+    """
+    return runtime_pb2.FixedMatrixVectorRequestPayload(
+        vector_length=payload.vector_length,
+        vector_data=payload.vector_data,
+    )
+
+
+def _from_pb_fixed_matrix_vector_request_payload(payload: runtime_pb2.FixedMatrixVectorRequestPayload):
+    """Use this during protobuf parsing to convert a generated FMVM request payload.
+
+    Args: payload generated protobuf FixedMatrixVectorRequestPayload message.
+    Returns: The internal FixedMatrixVectorRequestPayload object.
+    """
+    runtime = _runtime()
+    return runtime.FixedMatrixVectorRequestPayload(
+        vector_length=payload.vector_length,
+        vector_data=payload.vector_data,
+    )
+
+
+def _to_pb_spatial_convolution_request_payload(payload) -> runtime_pb2.SpatialConvolutionRequestPayload:
+    """Use this during protobuf encoding to convert a spatial-convolution client-request payload.
+
+    Args: payload internal SpatialConvolutionRequestPayload object.
+    Returns: The generated protobuf request payload message.
+    """
+    return runtime_pb2.SpatialConvolutionRequestPayload(
+        tensor_h=payload.tensor_h,
+        tensor_w=payload.tensor_w,
+        channels_in=payload.channels_in,
+        channels_out=payload.channels_out,
+        kernel_size=payload.kernel_size,
+        padding=payload.padding,
+        stride=payload.stride,
+    )
+
+
+def _from_pb_spatial_convolution_request_payload(payload: runtime_pb2.SpatialConvolutionRequestPayload):
+    """Use this during protobuf parsing to convert a generated spatial-convolution request payload.
+
+    Args: payload generated protobuf SpatialConvolutionRequestPayload message.
+    Returns: The internal SpatialConvolutionRequestPayload object.
+    """
+    runtime = _runtime()
+    return runtime.SpatialConvolutionRequestPayload(
+        tensor_h=payload.tensor_h,
+        tensor_w=payload.tensor_w,
+        channels_in=payload.channels_in,
+        channels_out=payload.channels_out,
+        kernel_size=payload.kernel_size,
+        padding=payload.padding,
+        stride=payload.stride,
+    )
+
+
+def _to_pb_fixed_matrix_vector_response_payload(payload) -> runtime_pb2.FixedMatrixVectorResponsePayload:
+    """Use this during protobuf encoding to convert an FMVM client-response payload.
+
+    Args: payload internal FixedMatrixVectorResponsePayload object.
+    Returns: The generated protobuf response payload message.
+    """
+    return runtime_pb2.FixedMatrixVectorResponsePayload(
+        output_length=payload.output_length,
+        output_vector=payload.output_vector,
+    )
+
+
+def _from_pb_fixed_matrix_vector_response_payload(payload: runtime_pb2.FixedMatrixVectorResponsePayload):
+    """Use this during protobuf parsing to convert a generated FMVM response payload.
+
+    Args: payload generated protobuf FixedMatrixVectorResponsePayload message.
+    Returns: The internal FixedMatrixVectorResponsePayload object.
+    """
+    runtime = _runtime()
+    return runtime.FixedMatrixVectorResponsePayload(
+        output_length=payload.output_length,
+        output_vector=payload.output_vector,
+    )
+
+
+def _to_pb_spatial_convolution_response_payload(payload) -> runtime_pb2.SpatialConvolutionResponsePayload:
+    """Use this during protobuf encoding to convert a spatial-convolution client-response payload.
+
+    Args: payload internal SpatialConvolutionResponsePayload object.
+    Returns: The generated protobuf response payload message.
+    """
+    return runtime_pb2.SpatialConvolutionResponsePayload(
+        output_length=payload.output_length,
+        output_vector=payload.output_vector,
+        result_artifact_id=payload.result_artifact_id,
+    )
+
+
+def _from_pb_spatial_convolution_response_payload(payload: runtime_pb2.SpatialConvolutionResponsePayload):
+    """Use this during protobuf parsing to convert a generated spatial-convolution response payload.
+
+    Args: payload generated protobuf SpatialConvolutionResponsePayload message.
+    Returns: The internal SpatialConvolutionResponsePayload object.
+    """
+    runtime = _runtime()
+    return runtime.SpatialConvolutionResponsePayload(
+        output_length=payload.output_length,
+        output_vector=payload.output_vector,
+        result_artifact_id=payload.result_artifact_id,
+    )
+
+
+def _to_pb_fixed_matrix_vector_task_payload(payload) -> runtime_pb2.FixedMatrixVectorTaskPayload:
+    """Use this during protobuf encoding to convert an FMVM task payload.
+
+    Args: payload internal FixedMatrixVectorTaskPayload object.
+    Returns: The generated protobuf task payload message.
+    """
+    return runtime_pb2.FixedMatrixVectorTaskPayload(
+        row_start=payload.row_start,
+        row_end=payload.row_end,
+        vector_length=payload.vector_length,
+        vector_data=payload.vector_data,
+    )
+
+
+def _from_pb_fixed_matrix_vector_task_payload(payload: runtime_pb2.FixedMatrixVectorTaskPayload):
+    """Use this during protobuf parsing to convert a generated FMVM task payload.
+
+    Args: payload generated protobuf FixedMatrixVectorTaskPayload message.
+    Returns: The internal FixedMatrixVectorTaskPayload object.
+    """
+    runtime = _runtime()
+    return runtime.FixedMatrixVectorTaskPayload(
+        row_start=payload.row_start,
+        row_end=payload.row_end,
+        vector_length=payload.vector_length,
+        vector_data=payload.vector_data,
+    )
+
+
+def _to_pb_spatial_convolution_task_payload(payload) -> runtime_pb2.SpatialConvolutionTaskPayload:
+    """Use this during protobuf encoding to convert a spatial-convolution task payload.
+
+    Args: payload internal SpatialConvolutionTaskPayload object.
+    Returns: The generated protobuf task payload message.
+    """
+    return runtime_pb2.SpatialConvolutionTaskPayload(
+        start_oc=payload.start_oc,
+        end_oc=payload.end_oc,
+        tensor_h=payload.tensor_h,
+        tensor_w=payload.tensor_w,
+        channels_in=payload.channels_in,
+        channels_out=payload.channels_out,
+        kernel_size=payload.kernel_size,
+        padding=payload.padding,
+        stride=payload.stride,
+        weight_data=payload.weight_data,
+    )
+
+
+def _from_pb_spatial_convolution_task_payload(payload: runtime_pb2.SpatialConvolutionTaskPayload):
+    """Use this during protobuf parsing to convert a generated spatial-convolution task payload.
+
+    Args: payload generated protobuf SpatialConvolutionTaskPayload message.
+    Returns: The internal SpatialConvolutionTaskPayload object.
+    """
+    runtime = _runtime()
+    return runtime.SpatialConvolutionTaskPayload(
+        start_oc=payload.start_oc,
+        end_oc=payload.end_oc,
+        tensor_h=payload.tensor_h,
+        tensor_w=payload.tensor_w,
+        channels_in=payload.channels_in,
+        channels_out=payload.channels_out,
+        kernel_size=payload.kernel_size,
+        padding=payload.padding,
+        stride=payload.stride,
+        weight_data=payload.weight_data,
+    )
+
+
+def _to_pb_fixed_matrix_vector_result_payload(payload) -> runtime_pb2.FixedMatrixVectorResultPayload:
+    """Use this during protobuf encoding to convert an FMVM task-result payload.
+
+    Args: payload internal FixedMatrixVectorResultPayload object.
+    Returns: The generated protobuf result payload message.
+    """
+    return runtime_pb2.FixedMatrixVectorResultPayload(
+        row_start=payload.row_start,
+        row_end=payload.row_end,
+        output_length=payload.output_length,
+        output_vector=payload.output_vector,
+    )
+
+
+def _from_pb_fixed_matrix_vector_result_payload(payload: runtime_pb2.FixedMatrixVectorResultPayload):
+    """Use this during protobuf parsing to convert a generated FMVM result payload.
+
+    Args: payload generated protobuf FixedMatrixVectorResultPayload message.
+    Returns: The internal FixedMatrixVectorResultPayload object.
+    """
+    runtime = _runtime()
+    return runtime.FixedMatrixVectorResultPayload(
+        row_start=payload.row_start,
+        row_end=payload.row_end,
+        output_length=payload.output_length,
+        output_vector=payload.output_vector,
+    )
+
+
+def _to_pb_spatial_convolution_result_payload(payload) -> runtime_pb2.SpatialConvolutionResultPayload:
+    """Use this during protobuf encoding to convert a spatial-convolution task-result payload.
+
+    Args: payload internal SpatialConvolutionResultPayload object.
+    Returns: The generated protobuf result payload message.
+    """
+    return runtime_pb2.SpatialConvolutionResultPayload(
+        start_oc=payload.start_oc,
+        end_oc=payload.end_oc,
+        output_h=payload.output_h,
+        output_w=payload.output_w,
+        output_length=payload.output_length,
+        output_vector=payload.output_vector,
+        result_artifact_id=payload.result_artifact_id,
+    )
+
+
+def _from_pb_spatial_convolution_result_payload(payload: runtime_pb2.SpatialConvolutionResultPayload):
+    """Use this during protobuf parsing to convert a generated spatial-convolution result payload.
+
+    Args: payload generated protobuf SpatialConvolutionResultPayload message.
+    Returns: The internal SpatialConvolutionResultPayload object.
+    """
+    runtime = _runtime()
+    return runtime.SpatialConvolutionResultPayload(
+        start_oc=payload.start_oc,
+        end_oc=payload.end_oc,
+        output_h=payload.output_h,
+        output_w=payload.output_w,
+        output_length=payload.output_length,
+        output_vector=payload.output_vector,
+        result_artifact_id=payload.result_artifact_id,
+    )
+
+
+def encode_envelope(message) -> bytes:
+    """Use this when one internal RuntimeEnvelope should become wire protobuf bytes.
+
+    Args: message internal runtime envelope object to serialize.
+    Returns: The serialized protobuf payload bytes for that envelope.
+    """
+
+    runtime = _runtime()
+    envelope = runtime_pb2.RuntimeEnvelope(kind=int(message.kind))
+
+    if message.kind == runtime.MessageKind.REGISTER_WORKER:
+        if message.register_worker is None:
+            raise ValueError("REGISTER_WORKER envelope missing payload")
+        envelope.register_worker.node_name = message.register_worker.node_name
+        envelope.register_worker.hardware.CopyFrom(_to_pb_hardware_profile(message.register_worker.hardware))
+        envelope.register_worker.performance.CopyFrom(_to_pb_compute_performance_summary(message.register_worker.performance))
+    elif message.kind == runtime.MessageKind.REGISTER_OK:
+        if message.register_ok is None:
+            raise ValueError("REGISTER_OK envelope missing payload")
+        envelope.register_ok.main_node_name = message.register_ok.main_node_name
+        envelope.register_ok.main_node_ip = message.register_ok.main_node_ip
+        envelope.register_ok.main_node_port = message.register_ok.main_node_port
+        envelope.register_ok.node_id = message.register_ok.node_id
+    elif message.kind == runtime.MessageKind.HEARTBEAT:
+        if message.heartbeat is None:
+            raise ValueError("HEARTBEAT envelope missing payload")
+        envelope.heartbeat.main_node_name = message.heartbeat.main_node_name
+        envelope.heartbeat.unix_time_ms = message.heartbeat.unix_time_ms
+    elif message.kind == runtime.MessageKind.HEARTBEAT_OK:
+        if message.heartbeat_ok is None:
+            raise ValueError("HEARTBEAT_OK envelope missing payload")
+        envelope.heartbeat_ok.node_name = message.heartbeat_ok.node_name
+        envelope.heartbeat_ok.heartbeat_unix_time_ms = message.heartbeat_ok.heartbeat_unix_time_ms
+        envelope.heartbeat_ok.received_unix_time_ms = message.heartbeat_ok.received_unix_time_ms
+        envelope.heartbeat_ok.active_task_ids.extend(message.heartbeat_ok.active_task_ids)
+        envelope.heartbeat_ok.node_status = int(message.heartbeat_ok.node_status)
+        envelope.heartbeat_ok.completed_task_count = message.heartbeat_ok.completed_task_count
+        envelope.heartbeat_ok.node_id = message.heartbeat_ok.node_id
+    elif message.kind == runtime.MessageKind.CLIENT_JOIN:
+        if message.client_join is None:
+            raise ValueError("CLIENT_JOIN envelope missing payload")
+        envelope.client_join.client_name = message.client_join.client_name
+    elif message.kind == runtime.MessageKind.CLIENT_INFO_REQUEST:
+        if message.client_info_request is None:
+            raise ValueError("CLIENT_INFO_REQUEST envelope missing payload")
+        envelope.client_info_request.client_id = message.client_info_request.client_id
+        envelope.client_info_request.client_name = message.client_info_request.client_name
+        envelope.client_info_request.timestamp_ms = message.client_info_request.timestamp_ms
+    elif message.kind == runtime.MessageKind.CLIENT_INFO_REPLY:
+        if message.client_info_reply is None:
+            raise ValueError("CLIENT_INFO_REPLY envelope missing payload")
+        envelope.client_info_reply.client_id = message.client_info_reply.client_id
+        envelope.client_info_reply.request_timestamp_ms = message.client_info_reply.request_timestamp_ms
+        envelope.client_info_reply.reply_timestamp_ms = message.client_info_reply.reply_timestamp_ms
+        envelope.client_info_reply.timeout_ms = message.client_info_reply.timeout_ms
+        envelope.client_info_reply.has_active_tasks = message.client_info_reply.has_active_tasks
+        envelope.client_info_reply.active_request_ids.extend(message.client_info_reply.active_request_ids)
+    elif message.kind == runtime.MessageKind.CLIENT_REQUEST:
+        if message.client_request is None:
+            raise ValueError("CLIENT_REQUEST envelope missing payload")
+        envelope.client_request.request_id = message.client_request.request_id
+        envelope.client_request.client_name = message.client_request.client_name
+        envelope.client_request.method = message.client_request.method
+        envelope.client_request.object_id = message.client_request.object_id
+        envelope.client_request.stream_id = message.client_request.stream_id
+        envelope.client_request.timestamp_ms = message.client_request.timestamp_ms
+        envelope.client_request.iteration_count = message.client_request.iteration_count
+        if message.client_request.fixed_matrix_vector_multiplication_payload is not None:
+            envelope.client_request.fixed_matrix_vector_multiplication.CopyFrom(
+                _to_pb_fixed_matrix_vector_request_payload(
+                    message.client_request.fixed_matrix_vector_multiplication_payload
+                )
+            )
+        elif message.client_request.spatial_convolution_payload is not None:
+            envelope.client_request.spatial_convolution.CopyFrom(
+                _to_pb_spatial_convolution_request_payload(message.client_request.spatial_convolution_payload)
+            )
+    elif message.kind == runtime.MessageKind.CLIENT_RESPONSE:
+        if message.client_response is None:
+            raise ValueError("CLIENT_RESPONSE envelope missing payload")
+        envelope.client_response.request_id = message.client_response.request_id
+        envelope.client_response.method = message.client_response.method
+        envelope.client_response.object_id = message.client_response.object_id
+        envelope.client_response.stream_id = message.client_response.stream_id
+        envelope.client_response.timestamp_ms = message.client_response.timestamp_ms
+        envelope.client_response.status_code = message.client_response.status_code
+        envelope.client_response.error_message = message.client_response.error_message
+        envelope.client_response.worker_count = message.client_response.worker_count
+        envelope.client_response.client_count = message.client_response.client_count
+        envelope.client_response.client_id = message.client_response.client_id
+        envelope.client_response.iteration_count = message.client_response.iteration_count
+        if message.client_response.fixed_matrix_vector_multiplication_payload is not None:
+            envelope.client_response.fixed_matrix_vector_multiplication.CopyFrom(
+                _to_pb_fixed_matrix_vector_response_payload(
+                    message.client_response.fixed_matrix_vector_multiplication_payload
+                )
+            )
+        elif message.client_response.spatial_convolution_payload is not None:
+            envelope.client_response.spatial_convolution.CopyFrom(
+                _to_pb_spatial_convolution_response_payload(message.client_response.spatial_convolution_payload)
+            )
+        if message.client_response.result_artifact is not None:
+            envelope.client_response.result_artifact.CopyFrom(
+                _to_pb_artifact_descriptor(message.client_response.result_artifact)
+            )
+    elif message.kind == runtime.MessageKind.TASK_ASSIGN:
+        if message.task_assign is None:
+            raise ValueError("TASK_ASSIGN envelope missing payload")
+        envelope.task_assign.request_id = message.task_assign.request_id
+        envelope.task_assign.node_id = message.task_assign.node_id
+        envelope.task_assign.task_id = message.task_assign.task_id
+        envelope.task_assign.method = message.task_assign.method
+        envelope.task_assign.object_id = message.task_assign.object_id
+        envelope.task_assign.stream_id = message.task_assign.stream_id
+        envelope.task_assign.timestamp_ms = message.task_assign.timestamp_ms
+        envelope.task_assign.iteration_count = message.task_assign.iteration_count
+        envelope.task_assign.transfer_mode = int(message.task_assign.transfer_mode)
+        envelope.task_assign.artifact_id = message.task_assign.artifact_id
+        envelope.task_assign.artifact_timeout_ms = message.task_assign.artifact_timeout_ms
+        if message.task_assign.fixed_matrix_vector_multiplication_payload is not None:
+            envelope.task_assign.fixed_matrix_vector_multiplication.CopyFrom(
+                _to_pb_fixed_matrix_vector_task_payload(
+                    message.task_assign.fixed_matrix_vector_multiplication_payload
+                )
+            )
+        elif message.task_assign.spatial_convolution_payload is not None:
+            envelope.task_assign.spatial_convolution.CopyFrom(
+                _to_pb_spatial_convolution_task_payload(message.task_assign.spatial_convolution_payload)
+            )
+    elif message.kind == runtime.MessageKind.TASK_ACCEPT:
+        if message.task_accept is None:
+            raise ValueError("TASK_ACCEPT envelope missing payload")
+        envelope.task_accept.request_id = message.task_accept.request_id
+        envelope.task_accept.node_id = message.task_accept.node_id
+        envelope.task_accept.task_id = message.task_accept.task_id
+        envelope.task_accept.timestamp_ms = message.task_accept.timestamp_ms
+        envelope.task_accept.status_code = message.task_accept.status_code
+    elif message.kind == runtime.MessageKind.TASK_FAIL:
+        if message.task_fail is None:
+            raise ValueError("TASK_FAIL envelope missing payload")
+        envelope.task_fail.request_id = message.task_fail.request_id
+        envelope.task_fail.node_id = message.task_fail.node_id
+        envelope.task_fail.task_id = message.task_fail.task_id
+        envelope.task_fail.timestamp_ms = message.task_fail.timestamp_ms
+        envelope.task_fail.status_code = message.task_fail.status_code
+        envelope.task_fail.error_message = message.task_fail.error_message
+    elif message.kind == runtime.MessageKind.TASK_RESULT:
+        if message.task_result is None:
+            raise ValueError("TASK_RESULT envelope missing payload")
+        envelope.task_result.request_id = message.task_result.request_id
+        envelope.task_result.node_id = message.task_result.node_id
+        envelope.task_result.task_id = message.task_result.task_id
+        envelope.task_result.timestamp_ms = message.task_result.timestamp_ms
+        envelope.task_result.status_code = message.task_result.status_code
+        envelope.task_result.iteration_count = message.task_result.iteration_count
+        if message.task_result.fixed_matrix_vector_multiplication_payload is not None:
+            envelope.task_result.fixed_matrix_vector_multiplication.CopyFrom(
+                _to_pb_fixed_matrix_vector_result_payload(
+                    message.task_result.fixed_matrix_vector_multiplication_payload
+                )
+            )
+        elif message.task_result.spatial_convolution_payload is not None:
+            envelope.task_result.spatial_convolution.CopyFrom(
+                _to_pb_spatial_convolution_result_payload(message.task_result.spatial_convolution_payload)
+            )
+        if message.task_result.result_artifact is not None:
+            envelope.task_result.result_artifact.CopyFrom(
+                _to_pb_artifact_descriptor(message.task_result.result_artifact)
+            )
+    elif message.kind == runtime.MessageKind.ARTIFACT_RELEASE:
+        if message.artifact_release is None:
+            raise ValueError("ARTIFACT_RELEASE envelope missing payload")
+        envelope.artifact_release.node_id = message.artifact_release.node_id
+        envelope.artifact_release.task_id = message.artifact_release.task_id
+        envelope.artifact_release.artifact_id = message.artifact_release.artifact_id
+        envelope.artifact_release.timestamp_ms = message.artifact_release.timestamp_ms
+    elif message.kind == runtime.MessageKind.WORKER_UPDATE:
+        if message.worker_update is None:
+            raise ValueError("WORKER_UPDATE envelope missing payload")
+        envelope.worker_update.node_id = message.worker_update.node_id
+        envelope.worker_update.timestamp_ms = message.worker_update.timestamp_ms
+        envelope.worker_update.performance.CopyFrom(
+            _to_pb_compute_performance_summary(message.worker_update.performance)
+        )
+
+    return envelope.SerializeToString()
+
+
+def parse_envelope(payload: bytes):
+    """Use this when incoming protobuf bytes should be converted into the internal runtime model.
+
+    Args: payload raw protobuf bytes from the runtime TCP stream.
+    Returns: The decoded internal RuntimeEnvelope object.
+    """
+
+    runtime = _runtime()
+    envelope_pb = runtime_pb2.RuntimeEnvelope()
+    envelope_pb.ParseFromString(payload)
+
+    kind = runtime.MessageKind(envelope_pb.kind)
+    register_worker = None
+    register_ok = None
+    heartbeat = None
+    heartbeat_ok = None
+    client_join = None
+    client_info_request = None
+    client_info_reply = None
+    client_request = None
+    client_response = None
+    task_assign = None
+    task_accept = None
+    task_fail = None
+    task_result = None
+    artifact_release = None
+    worker_update = None
+
+    if envelope_pb.HasField("register_worker"):
+        register_worker = runtime.RegisterWorker(
+            node_name=envelope_pb.register_worker.node_name,
+            hardware=_from_pb_hardware_profile(envelope_pb.register_worker.hardware),
+            performance=_from_pb_compute_performance_summary(envelope_pb.register_worker.performance),
+        )
+    if envelope_pb.HasField("register_ok"):
+        register_ok = runtime.RegisterOk(
+            main_node_name=envelope_pb.register_ok.main_node_name,
+            main_node_ip=envelope_pb.register_ok.main_node_ip,
+            main_node_port=envelope_pb.register_ok.main_node_port,
+            node_id=envelope_pb.register_ok.node_id,
+        )
+    if envelope_pb.HasField("heartbeat"):
+        heartbeat = runtime.Heartbeat(
+            main_node_name=envelope_pb.heartbeat.main_node_name,
+            unix_time_ms=envelope_pb.heartbeat.unix_time_ms,
+        )
+    if envelope_pb.HasField("heartbeat_ok"):
+        heartbeat_ok = runtime.HeartbeatOk(
+            node_name=envelope_pb.heartbeat_ok.node_name,
+            heartbeat_unix_time_ms=envelope_pb.heartbeat_ok.heartbeat_unix_time_ms,
+            received_unix_time_ms=envelope_pb.heartbeat_ok.received_unix_time_ms,
+            active_task_ids=tuple(envelope_pb.heartbeat_ok.active_task_ids),
+            node_status=runtime.NodeStatus(envelope_pb.heartbeat_ok.node_status),
+            completed_task_count=envelope_pb.heartbeat_ok.completed_task_count,
+            node_id=envelope_pb.heartbeat_ok.node_id,
+        )
+    if envelope_pb.HasField("client_join"):
+        client_join = runtime.ClientJoin(client_name=envelope_pb.client_join.client_name)
+    if envelope_pb.HasField("client_info_request"):
+        client_info_request = runtime.ClientInfoRequest(
+            client_id=envelope_pb.client_info_request.client_id,
+            client_name=envelope_pb.client_info_request.client_name,
+            timestamp_ms=envelope_pb.client_info_request.timestamp_ms,
+        )
+    if envelope_pb.HasField("client_info_reply"):
+        client_info_reply = runtime.ClientInfoReply(
+            client_id=envelope_pb.client_info_reply.client_id,
+            request_timestamp_ms=envelope_pb.client_info_reply.request_timestamp_ms,
+            reply_timestamp_ms=envelope_pb.client_info_reply.reply_timestamp_ms,
+            timeout_ms=envelope_pb.client_info_reply.timeout_ms,
+            has_active_tasks=envelope_pb.client_info_reply.has_active_tasks,
+            active_request_ids=tuple(envelope_pb.client_info_reply.active_request_ids),
+        )
+    if envelope_pb.HasField("client_request"):
+        request_payload = None
+        if envelope_pb.client_request.HasField("fixed_matrix_vector_multiplication"):
+            request_payload = _from_pb_fixed_matrix_vector_request_payload(
+                envelope_pb.client_request.fixed_matrix_vector_multiplication
+            )
+        elif envelope_pb.client_request.HasField("spatial_convolution"):
+            request_payload = _from_pb_spatial_convolution_request_payload(
+                envelope_pb.client_request.spatial_convolution
+            )
+        client_request = runtime.ClientRequest(
+            request_id=envelope_pb.client_request.request_id,
+            client_name=envelope_pb.client_request.client_name,
+            method=envelope_pb.client_request.method,
+            object_id=envelope_pb.client_request.object_id,
+            stream_id=envelope_pb.client_request.stream_id,
+            timestamp_ms=envelope_pb.client_request.timestamp_ms,
+            iteration_count=envelope_pb.client_request.iteration_count,
+            request_payload=request_payload,
+        )
+    if envelope_pb.HasField("client_response"):
+        response_payload = None
+        if envelope_pb.client_response.HasField("fixed_matrix_vector_multiplication"):
+            response_payload = _from_pb_fixed_matrix_vector_response_payload(
+                envelope_pb.client_response.fixed_matrix_vector_multiplication
+            )
+        elif envelope_pb.client_response.HasField("spatial_convolution"):
+            response_payload = _from_pb_spatial_convolution_response_payload(
+                envelope_pb.client_response.spatial_convolution
+            )
+        client_response = runtime.ClientResponse(
+            request_id=envelope_pb.client_response.request_id,
+            method=envelope_pb.client_response.method,
+            object_id=envelope_pb.client_response.object_id,
+            stream_id=envelope_pb.client_response.stream_id,
+            timestamp_ms=envelope_pb.client_response.timestamp_ms,
+            status_code=envelope_pb.client_response.status_code,
+            error_message=envelope_pb.client_response.error_message,
+            worker_count=envelope_pb.client_response.worker_count,
+            client_count=envelope_pb.client_response.client_count,
+            client_id=envelope_pb.client_response.client_id,
+            iteration_count=envelope_pb.client_response.iteration_count,
+            response_payload=response_payload,
+            result_artifact=(
+                _from_pb_artifact_descriptor(envelope_pb.client_response.result_artifact)
+                if envelope_pb.client_response.HasField("result_artifact")
+                else None
+            ),
+        )
+    if envelope_pb.HasField("task_assign"):
+        task_payload = None
+        if envelope_pb.task_assign.HasField("fixed_matrix_vector_multiplication"):
+            task_payload = _from_pb_fixed_matrix_vector_task_payload(
+                envelope_pb.task_assign.fixed_matrix_vector_multiplication
+            )
+        elif envelope_pb.task_assign.HasField("spatial_convolution"):
+            task_payload = _from_pb_spatial_convolution_task_payload(
+                envelope_pb.task_assign.spatial_convolution
+            )
+        task_assign = runtime.TaskAssign(
+            request_id=envelope_pb.task_assign.request_id,
+            node_id=envelope_pb.task_assign.node_id,
+            task_id=envelope_pb.task_assign.task_id,
+            method=envelope_pb.task_assign.method,
+            object_id=envelope_pb.task_assign.object_id,
+            stream_id=envelope_pb.task_assign.stream_id,
+            timestamp_ms=envelope_pb.task_assign.timestamp_ms,
+            iteration_count=envelope_pb.task_assign.iteration_count,
+            transfer_mode=runtime.TransferMode(envelope_pb.task_assign.transfer_mode),
+            artifact_id=envelope_pb.task_assign.artifact_id,
+            artifact_timeout_ms=envelope_pb.task_assign.artifact_timeout_ms,
+            task_payload=task_payload,
+        )
+    if envelope_pb.HasField("task_accept"):
+        task_accept = runtime.TaskAccept(
+            request_id=envelope_pb.task_accept.request_id,
+            node_id=envelope_pb.task_accept.node_id,
+            task_id=envelope_pb.task_accept.task_id,
+            timestamp_ms=envelope_pb.task_accept.timestamp_ms,
+            status_code=envelope_pb.task_accept.status_code,
+        )
+    if envelope_pb.HasField("task_fail"):
+        task_fail = runtime.TaskFail(
+            request_id=envelope_pb.task_fail.request_id,
+            node_id=envelope_pb.task_fail.node_id,
+            task_id=envelope_pb.task_fail.task_id,
+            timestamp_ms=envelope_pb.task_fail.timestamp_ms,
+            status_code=envelope_pb.task_fail.status_code,
+            error_message=envelope_pb.task_fail.error_message,
+        )
+    if envelope_pb.HasField("task_result"):
+        result_payload = None
+        if envelope_pb.task_result.HasField("fixed_matrix_vector_multiplication"):
+            result_payload = _from_pb_fixed_matrix_vector_result_payload(
+                envelope_pb.task_result.fixed_matrix_vector_multiplication
+            )
+        elif envelope_pb.task_result.HasField("spatial_convolution"):
+            result_payload = _from_pb_spatial_convolution_result_payload(
+                envelope_pb.task_result.spatial_convolution
+            )
+        task_result = runtime.TaskResult(
+            request_id=envelope_pb.task_result.request_id,
+            node_id=envelope_pb.task_result.node_id,
+            task_id=envelope_pb.task_result.task_id,
+            timestamp_ms=envelope_pb.task_result.timestamp_ms,
+            status_code=envelope_pb.task_result.status_code,
+            iteration_count=envelope_pb.task_result.iteration_count,
+            result_payload=result_payload,
+            result_artifact=(
+                _from_pb_artifact_descriptor(envelope_pb.task_result.result_artifact)
+                if envelope_pb.task_result.HasField("result_artifact")
+                else None
+            ),
+        )
+    if envelope_pb.HasField("artifact_release"):
+        artifact_release = runtime.ArtifactRelease(
+            node_id=envelope_pb.artifact_release.node_id,
+            task_id=envelope_pb.artifact_release.task_id,
+            artifact_id=envelope_pb.artifact_release.artifact_id,
+            timestamp_ms=envelope_pb.artifact_release.timestamp_ms,
+        )
+    if envelope_pb.HasField("worker_update"):
+        worker_update = runtime.WorkerUpdate(
+            node_id=envelope_pb.worker_update.node_id,
+            timestamp_ms=envelope_pb.worker_update.timestamp_ms,
+            performance=_from_pb_compute_performance_summary(envelope_pb.worker_update.performance),
+        )
+
+    return runtime.RuntimeEnvelope(
+        kind=kind,
+        register_worker=register_worker,
+        register_ok=register_ok,
+        heartbeat=heartbeat,
+        heartbeat_ok=heartbeat_ok,
+        client_join=client_join,
+        client_info_request=client_info_request,
+        client_info_reply=client_info_reply,
+        client_request=client_request,
+        client_response=client_response,
+        task_assign=task_assign,
+        task_accept=task_accept,
+        task_fail=task_fail,
+        task_result=task_result,
+        artifact_release=artifact_release,
+        worker_update=worker_update,
+    )

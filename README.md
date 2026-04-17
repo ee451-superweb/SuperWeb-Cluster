@@ -2,7 +2,87 @@
 
 ## Status
 
-`superweb-cluster` has completed Sprint 1 and is moving into Sprint 2.
+`superweb-cluster` has completed the Sprint 1 and Sprint 2 foundation work and
+is now entering Sprint 3.
+
+Sprint 1 established the baseline runtime: bootstrap, discovery, registration,
+protobuf messaging, heartbeat, and the first end-to-end distributed compute
+path.
+
+Sprint 2 hardened that baseline around the first production method, expanded
+hardware benchmark coverage, and reshaped the repository so new compute methods
+can be added without collapsing everything back into one runtime path.
+
+## Features
+
+| Capability | Description |
+|---|---|
+| **Auto-Discovery** | Zero-configuration LAN discovery via mDNS, with `discover` and `announce` bootstrap roles |
+| **Method-Aware Benchmarking** | Each node benchmarks supported methods locally and reports per-method GFLOPS summaries during registration |
+| **GFLOPS-Aware Scheduling** | The main node tracks benchmark-derived processor inventories and partitions work proportionally to measured throughput |
+| **Deterministic Input Data** | Shared fixed-seed generators create byte-stable FMVM and spatial-convolution datasets on every machine |
+| **Native Runner Stack** | In-tree CPU, CUDA, and Metal runners back both benchmarking and compute-node task execution |
+| **Structured Runtime Protocol** | Registration, heartbeat, client requests, task assignment, worker updates, and task results all flow through framed protobuf messages, with large artifacts moved onto a separate TCP data plane |
+| **Crash-Survivable Benchmark Tracing** | Benchmark progress is persisted to `result_status.json` and `result_trace.jsonl` for postmortem analysis |
+
+## System Picture
+
+```text
+Client
+  |
+  |  CLIENT_REQUEST(method, object_id, iteration_count, payload)
+  v
+Main Node
+  |
+  |  before accepting work:
+  |  1. prepare local dataset cache
+  |  2. run local benchmark for supported methods
+  |  3. collect worker registrations and method summaries
+  |
+  |  runtime responsibilities:
+  |  - choose method-aware scheduler
+  |  - partition work by benchmarked GFLOPS
+  |  - aggregate task results into one client response
+  v
+Compute Nodes
+  |
+  |  on startup:
+  |  1. prepare deterministic dataset cache
+  |  2. run local method benchmarks
+  |  3. register per-method hardware summaries
+  |
+  |  on task receipt:
+  |  - dispatch to the selected native runner
+  |  - execute the local slice
+  |  - return a structured task result
+```
+
+## Method Workloads
+
+The project currently uses two representative methods:
+
+| Method | Autotune Workload | Reported Workload | Primary Partition |
+|---|---|---|---|
+| `fixed_matrix_vector_multiplication` | `4096 x 8192` | `16384 x 32768` (`2 GiB` matrix) | contiguous row ranges |
+| `spatial_convolution` | `512 x 512`, `64 -> 128`, `k=3`, `pad=1`, `stride=1` | `2048 x 2048`, `128 -> 256`, `k=3`, `pad=1`, `stride=1` | contiguous output-channel ranges |
+
+We use them as two different workload styles:
+
+- `fixed_matrix_vector_multiplication`
+  - represents a more bandwidth-sensitive, inference-like proxy workload
+- `spatial_convolution`
+  - represents a more compute-dense, training-like proxy workload
+
+The benchmark autotunes on the smaller workload, then reports speed on the
+larger workload. For `spatial_convolution`, protocol and runtime plumbing are
+already in-tree, while the large-result data-plane path is still being
+hardened for very large outputs. This is also a deliberate fallback tradeoff:
+Windows places practical constraints on very large Python memory materialization,
+home devices usually have much less RAM than disk capacity, and widespread SSD
+adoption means sequential disk I/O is now fast enough that a disk-first artifact
+path is often the safer choice when we are forced to choose.
+
+## Progress Through Sprint 2
 
 Sprint 1 delivered:
 
@@ -11,15 +91,58 @@ Sprint 1 delivered:
 - mDNS main-node discovery
 - TCP runtime registration between main node and compute node
 - protobuf runtime messaging
-- worker heartbeat and removal on timeout
+- worker heartbeat with failure-counter-based liveness eviction
 - structured client request / response messaging
 - task assignment / accept / fail / result messaging
 - local CPU/CUDA benchmark generation and ranking
 - compute-node performance summary upload during worker registration
 - main-node tracking of total reported cluster GFLOPS
-- fixed-matrix-vector task distribution and result aggregation
 
-Sprint 2 will build on that with broader workload scheduling and more methods.
+Sprint 2 delivered the current baseline:
+
+- fixed-matrix-vector task distribution and result aggregation
+- initial Windows DX12 compute benchmarking experiments for non-CUDA GPU paths
+- a cleaner repository split across `app/`, `common/`, `wire/`, `main_node/`, and `compute_node/`
+- explicit separation between `setup.py` environment preparation and `bootstrap.py` runtime startup
+- shared compute-method source trees under `compute_node/compute_methods/`
+- a deterministic shared FMVM dataset workspace under `compute_node/input_matrix/`
+- three active in-tree FMVM backend families: CPU, CUDA, and Metal
+- the DX12 source tree is retained for debugging, but its entry points are disabled because the module can trigger fatal system instability
+- Windows GPU backend routing now defaults to the routine-safe CUDA path when an NVIDIA adapter is present
+- a two-phase benchmark flow with autotune plus measurement for the reported result
+- runtime use of benchmark summaries to register worker compute capacity
+- expanded tests and documentation for the reorganized runtime model
+- planning groundwork for method-aware runtime evolution beyond FMVM
+
+## Sprint 3 Plan
+
+Sprint 3 will focus on turning `superweb-cluster` from a single-method cluster
+into a multi-method platform, while also exposing more of the system through
+user-facing frontends.
+
+Compute-method goals:
+
+- add more executable methods beyond `fixed_matrix_vector_multiplication`
+- start with `spatial_convolution` / `conv2d` as the next major method
+- make worker registration method-aware so one worker can report different GFLOPS summaries for different methods
+- make main-node dispatch and aggregation method-aware so scheduling follows the client-requested method
+- continue restructuring the compute-node runtime around method handlers and reusable task routing
+
+Frontend goals:
+
+- build corresponding frontend features for cluster visibility, request submission, method selection, and result inspection
+- expose worker inventory, benchmark rankings, active method, and scheduler decisions in a human-friendly way
+- reduce reliance on terminal-only workflows for demos, debugging, and operator control
+
+Frontend coverage goals:
+
+- expand beyond the current CLI-first experience
+- add Windows frontend coverage for desktop demos and operator workflows
+- add iOS frontend coverage for mobile monitoring and lightweight control scenarios
+- keep shared backend contracts so web, Windows, and iOS surfaces can evolve against the same runtime concepts
+
+A detailed Sprint 3 planning document lives at
+`docs/sprint3_plan_2026-04-15.txt`.
 
 ## Project Entry
 
@@ -74,18 +197,23 @@ The repository is now organized by responsibility:
   - mDNS discovery, packet handling, and manual fallback
 - `wire/proto/`
   - `.proto` source definitions
-- `wire/discovery.py`
+- `wire/discovery_protocol/`
   - discovery wire-format helpers
-- `wire/runtime.py`
-  - framed protobuf runtime wire-format helpers
+- `wire/internal_protocol/`
+  - main-node <-> compute-node control plane, transport framing, and data-plane helpers
+- `wire/external_protocol/`
+  - client-facing control-plane and data-plane models
 - `main_node/`
   - scheduler-side registry, dispatch, aggregation, heartbeat, and runtime loop
 - `compute_node/`
   - worker-side runtime session, benchmark summary loading, and task execution
+- `compute_node/compute_methods/`
+  - shared method implementations and hardware-specific runners
+  - used by both runtime task execution and local benchmarking
 - `compute_node/input_matrix/`
   - shared deterministic dataset generator and local dataset cache
 - `compute_node/performance_metrics/`
-  - local CPU/CUDA/Metal benchmark workspace
+  - local benchmark orchestration, ranking, and result reporting
 - `experiments/networking/`
   - standalone networking experiments kept outside the main runtime path
 - `docs/`
@@ -116,10 +244,12 @@ The current startup flow is:
     - host hardware profile
     - filtered hardware backend count
     - ranked backend GFLOPS summary from the benchmark
-14. The main node assigns per-hardware ids, updates total cluster GFLOPS, then replies with `REGISTER_OK`.
-15. Clients send structured `CLIENT_REQUEST` messages.
-16. The main node emits `TASK_ASSIGN` slices to workers and waits for `TASK_RESULT` or `TASK_FAIL`.
-17. The main node aggregates row slices and returns one `CLIENT_RESPONSE`.
+14. The main node assigns a runtime id to the compute node, assigns per-hardware ids, updates total cluster GFLOPS, then replies with `REGISTER_OK`.
+15. Clients join, receive their own runtime ids, and send structured `CLIENT_REQUEST` messages.
+16. Each `CLIENT_REQUEST` can include an `iteration_count`, and the main node emits matching `TASK_ASSIGN` slices to workers.
+17. While a request is active, clients can poll `CLIENT_INFO_REQUEST` / `CLIENT_INFO_REPLY` for active-request visibility.
+18. Workers send periodic `HEARTBEAT_OK` and optional idle `WORKER_UPDATE` performance refreshes.
+19. The main node aggregates worker slices and returns one `CLIENT_RESPONSE`, using artifact descriptors plus the TCP data plane for large outputs.
 
 ## Local Vs Networked Steps
 
@@ -136,8 +266,9 @@ The current startup flow is:
   - TCP runtime registration between nodes
 
 `bootstrap.py` itself is not responsible for creating `.venv` or installing
-dependencies anymore. If the local environment is not ready, it will stop and
-ask you to run `python setup.py` first.
+dependencies manually anymore. If the local environment is missing or stale,
+`bootstrap.py` now runs `python setup.py` itself, then relaunches under the
+project `.venv`.
 
 ## Current Runtime Model
 
@@ -160,20 +291,48 @@ The main runtime protobuf messages are:
 - `HEARTBEAT`
 - `HEARTBEAT_OK`
 - `CLIENT_JOIN`
+- `CLIENT_INFO_REQUEST`
+- `CLIENT_INFO_REPLY`
 - `CLIENT_REQUEST`
 - `CLIENT_RESPONSE`
 - `TASK_ASSIGN`
 - `TASK_ACCEPT`
 - `TASK_FAIL`
 - `TASK_RESULT`
+- `ARTIFACT_RELEASE`
+- `WORKER_UPDATE`
 
-Right now the active executable method is:
+The runtime and benchmark stack now recognize two methods:
 
 - `fixed_matrix_vector_multiplication`
+- `spatial_convolution`
 
-The client sends one 32K-length FP32 vector, the main node splits matrix rows
-across workers in proportion to registered GFLOPS, and compute nodes execute
-their assigned row ranges on the processors they kept after local filtering.
+`fixed_matrix_vector_multiplication` is the most mature end-to-end path today:
+
+- the client sends one FP32 vector payload
+- the main node partitions matrix rows by registered GFLOPS
+- compute nodes execute their assigned row ranges on the processors that
+  survived local benchmark filtering
+- the main node aggregates row slices into one `CLIENT_RESPONSE`
+
+`spatial_convolution` is already integrated into the method registry, benchmark
+workspace, and runtime handler structure:
+
+- the benchmark path is fully method-aware and uses test/runtime dataset pairs
+- the runtime protocol and executors understand output-channel slicing
+- large-result transport is the remaining hardening area for the biggest
+  outputs, so that path is still under active development
+
+Across both methods, `iteration_count` is a compute-side loop count for one
+structured request, not a request-resend count at the client or main-node
+layer.
+
+Worker liveness is now driven by the periodic heartbeat loop and a consecutive
+failure counter. The main node no longer applies an additional hard task-result
+deadline on top of heartbeat-based liveness. Client-side liveness works the
+same way: once a client has an active request in flight, it periodically sends
+`CLIENT_INFO_REQUEST`, treats each matching `CLIENT_INFO_REPLY` as a successful
+refresh, and only marks the cluster dead after repeated missed replies.
 
 ## Quick Start
 
@@ -195,6 +354,9 @@ Run only the benchmark workspace:
 python "compute_node/performance_metrics/benchmark.py"
 ```
 
+That default benchmark now runs both supported methods in sequence and writes a
+combined report plus crash-survivable progress files.
+
 Generate only the shared matrix/vector dataset:
 
 ```bash
@@ -211,12 +373,25 @@ python "compute_node/input_matrix/generate.py"
 - Standalone networking experiments now live under `experiments/networking/`.
 - Tree and planning documents now live under `docs/`.
 - Generated datasets under `compute_node/input_matrix/generated/` and benchmark
-  reports such as `compute_node/performance_metrics/result.json` are local
-  machine artifacts and stay git-ignored.
+  reports such as `compute_node/performance_metrics/result.json`,
+  `compute_node/performance_metrics/result_status.json`, and
+  `compute_node/performance_metrics/result_trace.jsonl` are local machine
+  artifacts and stay git-ignored.
+- Shared compute-method implementations now live under
+  `compute_node/compute_methods/`, so runtime executors and benchmark backends
+  no longer hide method source trees inside `performance_metrics/`.
+- The FMVM compute method currently exposes three routine-safe native backend
+  families in-tree: CPU, CUDA, and Metal.
+- The DX12 module is currently disabled in this build. Repeated
+  `spatial_convolution` benchmark runs on the AMD Radeon 780M path caused
+  system-level crashes severe enough to require a BIOS power reset before the
+  machine would respond to the power button again.
+- DX12 source files are still kept in-tree for postmortem debugging, but
+  benchmark and runtime entry points now reject DX12 requests with a fatal
+  warning instead of attempting to run them.
 - The fixed FMVM benchmark uses a two-phase workload:
   autotune each candidate config with `3` repeats, then measure the winning
   config with `20` repeats for the reported result.
 - The dataset generator is independent from `performance_metrics/`; the
   benchmark workspace consumes `compute_node/input_matrix/` rather than owning
   the input-file format itself.
-
