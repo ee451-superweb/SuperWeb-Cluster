@@ -51,32 +51,50 @@ superweb-cluster/
 │
 ├── wire/
 │   ├── __init__.py
-│   ├── discovery.py
-│   ├── runtime.py
+│   ├── discovery_protocol/
+│   │   └── discovery.py
+│   ├── external_protocol/
+│   │   ├── control_plane.py
+│   │   └── data_plane.py
+│   ├── internal_protocol/
+│   │   ├── common.py
+│   │   ├── control_plane.py
+│   │   ├── control_plane_codec.py
+│   │   ├── data_plane.py
+│   │   ├── data_plane_codec.py
+│   │   └── runtime_transport.py
 │   └── proto/
 │       └── superweb_cluster_runtime.proto
-│   - Discovery and runtime wire-format helpers plus protobuf schema sources
+│   - Discovery, internal protocol, and external protocol helpers plus protobuf schema sources
 │
 ├── main_node/
 │   ├── __init__.py
 │   ├── aggregator.py
+│   ├── client_session_service.py
+│   ├── connection_service.py
 │   ├── dispatcher.py
 │   ├── handlers.py
 │   ├── heartbeat.py
+│   ├── heartbeat_service.py
 │   ├── registry.py
+│   ├── request_handler.py
 │   └── runtime.py
-│   - Main-node scheduling, registry, and runtime loop
+│   ├── runtime_mailbox.py
+│   └── task_exchange.py
+│   - Main-node scheduling, registry, heartbeat coordination, request handling, and runtime orchestration
 │
 ├── compute_node/
 │   ├── __init__.py
 │   ├── executor.py
 │   ├── handlers.py
 │   ├── heartbeat.py
+│   ├── performance_refresh.py
 │   ├── performance_summary.py
 │   ├── runtime.py
+│   ├── runtime_services.py
 │   ├── session.py
 │   ├── task_executor.py
-│   - Compute-node runtime, task execution, and benchmark-summary upload
+│   - Compute-node runtime orchestration, idle refresh, task execution, and benchmark-summary upload
 │   │
 │   ├── compute_methods/
 │   │   ├── __init__.py
@@ -149,7 +167,10 @@ superweb-cluster/
 │
 ├── docs/
 │   ├── file_system_tree.txt
-│   └── implementation_plan.txt
+│   ├── implementation_plan.txt
+│   ├── implementation_plan_2026-04-15.txt
+│   ├── large_data_transfer_plan_2026-04-15.txt
+│   └── sprint3_plan_2026-04-15.txt
 │   - Human-facing structure notes and planning docs
 │
 ├── tests/
@@ -178,8 +199,9 @@ superweb-cluster/
 Notes:
 - `bootstrap.py` stays at the repository root intentionally so the human entrypoint is obvious.
 - `compute_node/compute_methods/` owns the native implementations; `compute_node/performance_metrics/` measures and ranks them.
-- On Windows, benchmark backend routing now inspects display adapters:
-  NVIDIA adapters map to CUDA, and non-NVIDIA adapters map to DX12.
+- `wire/` is now split by protocol role: discovery, internal control/data plane, and external control/data plane.
+- On Windows, benchmark backend routing prefers the routine-safe CUDA path when an NVIDIA adapter is present.
+- DX12 source remains in-tree for debugging, but its runtime and benchmark entry points are currently disabled.
 - `compute_node/input_matrix/generated/` and `compute_node/performance_metrics/result.json`
   are local machine artifacts and should never be committed.
 - DX12 build outputs are local-only by default; CPU/CUDA/Metal prebuilt runners may

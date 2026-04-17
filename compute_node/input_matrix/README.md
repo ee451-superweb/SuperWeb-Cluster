@@ -35,12 +35,25 @@ avoids coupling the dataset generator to one benchmark implementation.
 - `spatial_convolution/generated/`
   - Conv2D test/runtime dataset cache
 
-## Default Dataset
+## Default Datasets
 
-The current production-sized dataset is:
+The shared dataset workspace now keeps method-specific workload presets:
 
-- `A`: `16384 x 32768` float32, exactly `2 GiB`
-- `x`: `32768` float32
+- FMVM large workload:
+  - `A`: `16384 x 32768` float32, exactly `2 GiB`
+  - `x`: `32768` float32
+- FMVM small workload:
+  - `A`: `4096 x 8192` float32
+  - `x`: `8192` float32
+- spatial-convolution small workload:
+  - input: `512 x 512 x 64`
+  - weights: `128 x 64 x 3 x 3`
+- spatial-convolution medium workload:
+  - input: `1024 x 1024 x 96`
+  - weights: `192 x 96 x 3 x 3`
+- spatial-convolution large workload:
+  - input: `2048 x 2048 x 128`
+  - weights: `256 x 128 x 3 x 3`
 
 The files themselves are generic binary assets:
 
@@ -57,6 +70,18 @@ Generate the default FMVM dataset:
 
 ```bash
 python "compute_node/input_matrix/fixed_matrix_vector_multiplication/generate.py"
+```
+
+Generate only the small spatial-convolution dataset:
+
+```bash
+python "compute_node/input_matrix/spatial_convolution/generate.py" --skip-medium --skip-large
+```
+
+Generate only the large spatial-convolution dataset:
+
+```bash
+python "compute_node/input_matrix/spatial_convolution/generate.py" --skip-small --skip-medium
 ```
 
 Force a rebuild of the default dataset:

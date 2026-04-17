@@ -1,4 +1,8 @@
-"""Helpers for turning benchmark results into runtime-ready processor inventories."""
+"""Turn benchmark reports into runtime-ready local processor inventories.
+
+Use this module when the compute node needs to convert benchmark output into
+the abstract performance summaries used for registration and task execution.
+"""
 
 from __future__ import annotations
 
@@ -17,7 +21,7 @@ DISABLED_RUNTIME_BACKENDS = frozenset({"dx12"})
 
 @dataclass(frozen=True, slots=True)
 class RuntimeProcessorProfile:
-    """One locally executable processor plus its best benchmark config."""
+    """Describe one locally executable processor and its best benchmark config."""
 
     hardware_type: str
     effective_gflops: float
@@ -27,15 +31,24 @@ class RuntimeProcessorProfile:
 
 @dataclass(frozen=True, slots=True)
 class RuntimeProcessorInventory:
-    """Filtered local processor inventory used by one compute method."""
+    """Store the filtered local processor inventory for one compute method."""
 
     processors: tuple[RuntimeProcessorProfile, ...]
 
     @property
     def total_effective_gflops(self) -> float:
+        """Return the combined effective performance of all retained processors."""
         return sum(processor.effective_gflops for processor in self.processors)
 
     def to_method_summary(self, method: str) -> MethodPerformanceSummary:
+        """Convert this runtime inventory into a registration-ready method summary.
+
+        Args:
+            method: Logical method name that owns this inventory.
+
+        Returns:
+            A ``MethodPerformanceSummary`` built from the retained processors.
+        """
         ranked_hardware = [
             ComputeHardwarePerformance(
                 hardware_type=processor.hardware_type,
@@ -51,6 +64,7 @@ class RuntimeProcessorInventory:
         )
 
     def to_legacy_summary(self) -> ComputePerformanceSummary:
+        """Build the legacy single-method registration summary for FMVM."""
         method_summary = self.to_method_summary(METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION)
         return ComputePerformanceSummary(
             hardware_count=method_summary.hardware_count,
@@ -61,14 +75,16 @@ class RuntimeProcessorInventory:
 
 @dataclass(frozen=True, slots=True)
 class RuntimeMethodCatalog:
-    """Method-indexed local processor inventories used during registration and execution."""
+    """Store method-indexed inventories used during registration and execution."""
 
     method_inventories: dict[str, RuntimeProcessorInventory]
 
     def inventory_for(self, method: str) -> RuntimeProcessorInventory:
+        """Return the runtime inventory for one method, or an empty fallback."""
         return self.method_inventories.get(method, RuntimeProcessorInventory(processors=()))
 
     def to_summary(self) -> ComputePerformanceSummary:
+        """Convert the full method catalog into the advertised performance summary."""
         ordered_methods = sorted(
             self.method_inventories,
             key=lambda name: (0 if name == METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION else 1, name),
@@ -94,11 +110,20 @@ class RuntimeMethodCatalog:
 
 
 def _read_result_payload(result_path: Path | None = None) -> dict[str, Any]:
+    """Read the benchmark result payload that seeds runtime processor inventory."""
     resolved_path = DEFAULT_RESULT_PATH if result_path is None else Path(result_path)
     return json.loads(resolved_path.read_text(encoding="utf-8"))
 
 
 def _iter_ranked_backend_entries(payload: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    """Yield ranked backend entries that are usable for runtime execution.
+
+    Args:
+        payload: Method or combined benchmark-report payload.
+
+    Returns:
+        Ranked backend entries with normalized runtime metadata.
+    """
     backend_results = payload.get("backends")
     if not isinstance(backend_results, dict):
         backend_results = payload.get("backend_results")
@@ -148,6 +173,14 @@ def _iter_ranked_backend_entries(payload: dict[str, Any]) -> list[tuple[str, dic
 
 
 def _filter_weak_processors(processors: list[RuntimeProcessorProfile]) -> list[RuntimeProcessorProfile]:
+    """Drop processors whose performance is too weak compared with the group.
+
+    Args:
+        processors: Discovered runtime processor profiles.
+
+    Returns:
+        The retained processor profiles re-ranked by effective GFLOPS.
+    """
     retained = list(sorted(processors, key=lambda item: item.rank))
     while len(retained) > 1:
         average = sum(item.effective_gflops for item in retained) / len(retained)
@@ -173,6 +206,7 @@ def _filter_weak_processors(processors: list[RuntimeProcessorProfile]) -> list[R
 
 
 def _build_inventory_from_method_payload(payload: dict[str, Any]) -> RuntimeProcessorInventory:
+    """Build a runtime inventory from one method section of the benchmark report."""
     discovered_processors = [
         RuntimeProcessorProfile(
             hardware_type=str(entry["hardware_type"]),
@@ -187,6 +221,7 @@ def _build_inventory_from_method_payload(payload: dict[str, Any]) -> RuntimeProc
 
 
 def _iter_method_payloads(payload: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    """Extract per-method payloads from combined or method-local benchmark reports."""
     methods = payload.get("methods")
     if isinstance(methods, dict):
         entries: list[tuple[str, dict[str, Any]]] = []
@@ -208,6 +243,14 @@ def _iter_method_payloads(payload: dict[str, Any]) -> list[tuple[str, dict[str, 
 
 
 def load_runtime_method_catalog(result_path: Path | None = None) -> RuntimeMethodCatalog:
+    """Load the method-indexed runtime inventory catalog from benchmark output.
+
+    Args:
+        result_path: Optional benchmark-result path override.
+
+    Returns:
+        The runtime method catalog derived from the report.
+    """
     payload = _read_result_payload(result_path)
     inventories = {
         method: _build_inventory_from_method_payload(method_payload)
@@ -221,12 +264,27 @@ def load_runtime_processor_inventory(
     *,
     method: str = METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
 ) -> RuntimeProcessorInventory:
-    """Load local processor configs for one method and filter out weak processors."""
+    """Load local processor configs for one method and filter out weak processors.
+
+    Args:
+        result_path: Optional benchmark-result path override.
+        method: Logical method name whose processors should be loaded.
+
+    Returns:
+        The filtered runtime processor inventory for the selected method.
+    """
 
     return load_runtime_method_catalog(result_path).inventory_for(method)
 
 
 def load_compute_performance_summary(result_path: Path | None = None) -> ComputePerformanceSummary:
-    """Load the filtered runtime summary that compute-node registration should advertise."""
+    """Load the filtered runtime summary that compute-node registration should advertise.
+
+    Args:
+        result_path: Optional benchmark-result path override.
+
+    Returns:
+        The compute-performance summary advertised during worker registration.
+    """
 
     return load_runtime_method_catalog(result_path).to_summary()

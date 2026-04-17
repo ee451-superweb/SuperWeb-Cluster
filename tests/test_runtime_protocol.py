@@ -2,6 +2,7 @@
 
 import socket
 import unittest
+from unittest import mock
 
 from common.float32_codec import pack_float32_values, unpack_float32_bytes
 from common.types import ComputeHardwarePerformance, ComputePerformanceSummary, HardwareProfile
@@ -9,12 +10,18 @@ from app.constants import (
     COMPUTE_NODE_NAME,
     MAIN_NODE_NAME,
     METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
+    METHOD_SPATIAL_CONVOLUTION,
     STATUS_ACCEPTED,
     STATUS_OK,
     SUPERWEB_CLIENT_NAME,
 )
-from wire.runtime import (
+from wire.internal_protocol.control_plane_codec import encode_envelope, parse_envelope
+from wire.internal_protocol.runtime_transport import (
     MessageKind,
+    SpatialConvolutionRequestPayload,
+    SpatialConvolutionResultPayload,
+    SpatialConvolutionTaskPayload,
+    TransferMode,
     build_client_join,
     build_client_request,
     build_client_response,
@@ -26,8 +33,6 @@ from wire.runtime import (
     build_task_assign,
     build_task_fail,
     build_task_result,
-    encode_envelope,
-    parse_envelope,
     recv_message,
     send_message,
 )
@@ -81,7 +86,14 @@ class RuntimeProtocolTests(unittest.TestCase):
         self.assertEqual(decoded.register_ok.node_id, "worker-1")
 
     def test_heartbeat_ok_round_trip(self) -> None:
-        encoded = encode_envelope(build_heartbeat_ok(COMPUTE_NODE_NAME, 123456, 123999))
+        encoded = encode_envelope(
+            build_heartbeat_ok(
+                COMPUTE_NODE_NAME,
+                123456,
+                123999,
+                active_task_ids=["task-1", "task-2"],
+            )
+        )
         decoded = parse_envelope(encoded)
 
         self.assertEqual(decoded.kind, MessageKind.HEARTBEAT_OK)
@@ -90,6 +102,7 @@ class RuntimeProtocolTests(unittest.TestCase):
         self.assertEqual(decoded.heartbeat_ok.node_name, COMPUTE_NODE_NAME)
         self.assertEqual(decoded.heartbeat_ok.heartbeat_unix_time_ms, 123456)
         self.assertEqual(decoded.heartbeat_ok.received_unix_time_ms, 123999)
+        self.assertEqual(decoded.heartbeat_ok.active_task_ids, ("task-1", "task-2"))
 
     def test_client_join_request_response_round_trip(self) -> None:
         vector_data = pack_float32_values([1.0, 2.0, 3.0, 4.0])
@@ -184,6 +197,7 @@ class RuntimeProtocolTests(unittest.TestCase):
         self.assertEqual(assign.task_assign.row_start, 10)
         self.assertEqual(assign.task_assign.row_end, 12)
         self.assertEqual(assign.task_assign.iteration_count, 11)
+        self.assertEqual(assign.task_assign.transfer_mode, TransferMode.UNSPECIFIED)
         self.assertEqual(unpack_float32_bytes(assign.task_assign.vector_data), [1.0, 2.0, 3.0, 4.0])
         self.assertEqual(accept.kind, MessageKind.TASK_ACCEPT)
         self.assertEqual(accept.task_accept.status_code, STATUS_ACCEPTED)
@@ -193,6 +207,92 @@ class RuntimeProtocolTests(unittest.TestCase):
         self.assertEqual(result.task_result.output_length, 2)
         self.assertEqual(result.task_result.iteration_count, 11)
         self.assertEqual(unpack_float32_bytes(result.task_result.output_vector), [9.0, 10.0])
+
+    def test_spatial_convolution_messages_use_typed_payloads(self) -> None:
+        weight_data = pack_float32_values([0.5] * (3 * 3 * 4 * 2))
+        output_vector = pack_float32_values([1.0] * (8 * 8 * 2))
+        request = parse_envelope(
+            encode_envelope(
+                build_client_request(
+                    SUPERWEB_CLIENT_NAME,
+                    "req-spatial",
+                    METHOD_SPATIAL_CONVOLUTION,
+                    b"",
+                    object_id="spatial_convolution/test",
+                    stream_id="stream-spatial",
+                    tensor_h=8,
+                    tensor_w=8,
+                    channels_in=4,
+                    channels_out=8,
+                    kernel_size=3,
+                    padding=1,
+                    stride=1,
+                )
+            )
+        )
+        assign = parse_envelope(
+            encode_envelope(
+                build_task_assign(
+                    request_id="req-spatial",
+                    node_id=COMPUTE_NODE_NAME,
+                    task_id="req-spatial:worker-a:0",
+                    method=METHOD_SPATIAL_CONVOLUTION,
+                    row_start=0,
+                    row_end=0,
+                    vector_data=b"",
+                    object_id="spatial_convolution/test",
+                    stream_id="stream-spatial",
+                    iteration_count=3,
+                    transfer_mode=TransferMode.ARTIFACT_PREFERRED,
+                    start_oc=2,
+                    end_oc=4,
+                    tensor_h=8,
+                    tensor_w=8,
+                    channels_in=4,
+                    channels_out=8,
+                    kernel_size=3,
+                    padding=1,
+                    stride=1,
+                    weight_data=weight_data,
+                )
+            )
+        )
+        result = parse_envelope(
+            encode_envelope(
+                build_task_result(
+                    "req-spatial",
+                    COMPUTE_NODE_NAME,
+                    "req-spatial:worker-a:0",
+                    STATUS_OK,
+                    row_start=0,
+                    row_end=0,
+                    output_vector=output_vector,
+                    output_length=8 * 8 * 2,
+                    iteration_count=3,
+                    start_oc=2,
+                    end_oc=4,
+                    output_h=8,
+                    output_w=8,
+                    result_artifact_id="",
+                )
+            )
+        )
+
+        self.assertIsInstance(request.client_request.request_payload, SpatialConvolutionRequestPayload)
+        self.assertEqual(request.client_request.tensor_h, 8)
+        self.assertEqual(request.client_request.channels_out, 8)
+        self.assertEqual(request.client_request.vector_length, 0)
+        self.assertIsInstance(assign.task_assign.task_payload, SpatialConvolutionTaskPayload)
+        self.assertEqual(assign.task_assign.transfer_mode, TransferMode.ARTIFACT_PREFERRED)
+        self.assertEqual(assign.task_assign.start_oc, 2)
+        self.assertEqual(assign.task_assign.end_oc, 4)
+        self.assertEqual(assign.task_assign.channels_in, 4)
+        self.assertEqual(assign.task_assign.weight_data, weight_data)
+        self.assertIsInstance(result.task_result.result_payload, SpatialConvolutionResultPayload)
+        self.assertEqual(result.task_result.output_h, 8)
+        self.assertEqual(result.task_result.output_w, 8)
+        self.assertEqual(result.task_result.output_length, 8 * 8 * 2)
+        self.assertEqual(result.task_result.start_oc, 2)
 
     def test_framed_send_receive_round_trip(self) -> None:
         left, right = socket.socketpair()
@@ -212,6 +312,13 @@ class RuntimeProtocolTests(unittest.TestCase):
         finally:
             left.close()
             right.close()
+
+    def test_recv_message_rejects_non_bytes_socket_chunks(self) -> None:
+        sock = mock.Mock()
+        sock.recv.return_value = mock.Mock()
+
+        with self.assertRaisesRegex(TypeError, "socket\\.recv\\(\\) must return bytes-like data"):
+            recv_message(sock, max_size=4096)
 
 
 if __name__ == "__main__":

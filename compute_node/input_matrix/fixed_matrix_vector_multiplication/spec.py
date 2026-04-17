@@ -7,8 +7,10 @@ from pathlib import Path
 
 DEFAULT_ROWS = 16_384
 DEFAULT_COLS = 32_768
-TEST_ROWS = 2_048
-TEST_COLS = 4_096
+TEST_ROWS = 4_096
+TEST_COLS = 8_192
+MEDIUM_ROWS = 8_192
+MEDIUM_COLS = 16_384
 DEFAULT_MATRIX_SEED = 0x123456789ABCDEF0
 DEFAULT_VECTOR_SEED = 0x0FEDCBA987654321
 DEFAULT_CHUNK_VALUES = 8_388_608  # 32 MiB per batch
@@ -26,10 +28,12 @@ class InputMatrixSpec:
 
     @property
     def matrix_bytes(self) -> int:
+        """Return the byte size of the FMVM matrix file for this spec."""
         return self.rows * self.cols * 4
 
     @property
     def vector_bytes(self) -> int:
+        """Return the byte size of the FMVM vector file for this spec."""
         return self.cols * 4
 
 
@@ -44,10 +48,17 @@ class DatasetLayout:
 
 
 def get_test_input_matrix_spec() -> InputMatrixSpec:
+    """Return the canonical small FMVM dataset specification."""
     return InputMatrixSpec(rows=TEST_ROWS, cols=TEST_COLS)
 
 
+def get_medium_input_matrix_spec() -> InputMatrixSpec:
+    """Return the canonical medium FMVM dataset specification."""
+    return InputMatrixSpec(rows=MEDIUM_ROWS, cols=MEDIUM_COLS)
+
+
 def get_runtime_input_matrix_spec() -> InputMatrixSpec:
+    """Return the canonical large runtime FMVM dataset specification."""
     return InputMatrixSpec(rows=DEFAULT_ROWS, cols=DEFAULT_COLS)
 
 
@@ -60,25 +71,40 @@ def build_input_matrix_spec(
     """Return a runtime or test FMVM dataset shape."""
 
     if rows is None and cols is None:
-        base_spec = (
-            get_test_input_matrix_spec()
-            if default_variant == "test"
-            else get_runtime_input_matrix_spec()
-        )
+        if default_variant in {"test", "small"}:
+            base_spec = get_test_input_matrix_spec()
+        elif default_variant == "medium":
+            base_spec = get_medium_input_matrix_spec()
+        else:
+            base_spec = get_runtime_input_matrix_spec()
         return InputMatrixSpec(rows=base_spec.rows, cols=base_spec.cols)
 
-    resolved_rows = rows if rows is not None else (
-        TEST_ROWS if default_variant == "test" else DEFAULT_ROWS
-    )
-    resolved_cols = cols if cols is not None else (
-        TEST_COLS if default_variant == "test" else DEFAULT_COLS
-    )
+    if default_variant in {"test", "small"}:
+        default_rows = TEST_ROWS
+        default_cols = TEST_COLS
+    elif default_variant == "medium":
+        default_rows = MEDIUM_ROWS
+        default_cols = MEDIUM_COLS
+    else:
+        default_rows = DEFAULT_ROWS
+        default_cols = DEFAULT_COLS
+    resolved_rows = rows if rows is not None else default_rows
+    resolved_cols = cols if cols is not None else default_cols
     if resolved_rows <= 0 or resolved_cols <= 0:
         raise ValueError("rows and cols must be positive")
     return InputMatrixSpec(rows=resolved_rows, cols=resolved_cols)
 
 
 def build_dataset_layout(root_dir: Path, prefix: str = "") -> DatasetLayout:
+    """Build the file layout for one FMVM dataset variant.
+
+    Args:
+        root_dir: Directory that should contain the dataset files.
+        prefix: Optional filename prefix such as ``test_`` or ``runtime_``.
+
+    Returns:
+        The dataset layout describing matrix, vector, and metadata paths.
+    """
     return DatasetLayout(
         root_dir=root_dir,
         matrix_path=root_dir / f"{prefix}A.bin",

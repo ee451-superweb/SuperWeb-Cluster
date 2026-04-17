@@ -1,4 +1,8 @@
-﻿"""Runtime task execution for compute-node processors."""
+﻿"""Execute FMVM runtime tasks across the local compute-node processors.
+
+Use this module when a compute node receives an FMVM ``TaskAssign`` and needs
+to split the row range across its locally benchmarked processors.
+"""
 
 from __future__ import annotations
 
@@ -13,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.constants import DX12_BACKEND_DISABLED_REASON
+from app.compute_resource_policy import resolve_capped_cpu_worker_count
 from common.work_partition import partition_contiguous_range
 from compute_node.compute_methods.fixed_matrix_vector_multiplication import (
     CPU_MACOS_EXECUTABLE_PATH,
@@ -28,7 +33,7 @@ from compute_node.input_matrix.fixed_matrix_vector_multiplication import (
 from compute_node.performance_metrics.fixed_matrix_vector_multiplication.config import DATASET_DIR as FMVM_DATASET_DIR
 from compute_node.performance_summary import RuntimeProcessorInventory, RuntimeProcessorProfile, load_runtime_processor_inventory
 from app.constants import METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION
-from wire.runtime import TaskAssign, TaskResult
+from wire.internal_protocol.runtime_transport import TaskAssign, TaskResult
 
 ROOT_DIR = Path(__file__).resolve().parent
 INPUT_MATRIX_GENERATED_DIR = FMVM_DATASET_DIR
@@ -36,7 +41,7 @@ INPUT_MATRIX_GENERATED_DIR = FMVM_DATASET_DIR
 
 @dataclass(frozen=True, slots=True)
 class ProcessorTaskSlice:
-    """One local processor plus the rows it should compute."""
+    """Describe one local processor and the FMVM rows assigned to it."""
 
     processor: RuntimeProcessorProfile
     row_start: int
@@ -44,9 +49,16 @@ class ProcessorTaskSlice:
 
 
 class _Dx12ResidentRunner:
-    """Keep the DX12 matrix resident for the full compute-node process lifetime."""
+    """Hold a DX12 matrix resident across multiple local task slices."""
 
     def __init__(self, dataset_layout, spec, processors: tuple[RuntimeProcessorProfile, ...]) -> None:
+        """Start the DX12 resident runner for all local DX12 processors.
+
+        Args:
+            dataset_layout: Runtime FMVM dataset layout shared by the compute node.
+            spec: Runtime FMVM benchmark specification.
+            processors: Local processor profiles that use the DX12 backend.
+        """
         thread_group_sizes = sorted(
             {
                 int(processor.best_config.get("thread_group_size") or 256)
@@ -97,6 +109,20 @@ class _Dx12ResidentRunner:
         rows_per_thread: int,
         iteration_count: int,
     ) -> dict[str, object]:
+        """Execute one FMVM slice through the resident DX12 runner.
+
+        Args:
+            vector_path: Temporary vector file for this task.
+            output_path: Destination file for the slice output.
+            row_start: Inclusive starting row for the slice.
+            row_end: Exclusive ending row for the slice.
+            thread_group_size: DX12 thread-group size to use.
+            rows_per_thread: DX12 rows-per-thread setting.
+            iteration_count: Number of times to repeat the math locally.
+
+        Returns:
+            Parsed JSON metrics reported by the DX12 resident runner.
+        """
         with self._lock:
             self._ensure_running()
             command = "\t".join(
@@ -122,6 +148,7 @@ class _Dx12ResidentRunner:
             raise RuntimeError(f"unexpected DX12 resident runner response: {response_line}")
 
     def close(self) -> None:
+        """Shut down the resident DX12 runner process if it is still alive."""
         process = getattr(self, "_process", None)
         if process is None:
             return
@@ -139,11 +166,13 @@ class _Dx12ResidentRunner:
         self._process = None
 
     def _ensure_running(self) -> None:
+        """Raise if the resident DX12 runner exited unexpectedly."""
         if self._process.poll() is not None:
             stderr = self._process.stderr.read().strip() if self._process.stderr is not None else ""
             raise RuntimeError(f"DX12 resident runner exited unexpectedly: {stderr or self._process.returncode}")
 
     def _read_response_line(self) -> str:
+        """Read one protocol line from the resident DX12 runner."""
         assert self._process.stdout is not None
         line = self._process.stdout.readline()
         if not line:
@@ -161,6 +190,12 @@ class FixedMatrixVectorTaskExecutor:
         *,
         dataset_root: Path | None = None,
     ) -> None:
+        """Load the local processor inventory and runtime dataset paths.
+
+        Args:
+            inventory: Optional local processor inventory override.
+            dataset_root: Optional runtime dataset directory override.
+        """
         self.inventory = inventory or load_runtime_processor_inventory()
         self.spec = build_input_matrix_spec(default_variant="runtime")
         self.dataset_root = INPUT_MATRIX_GENERATED_DIR if dataset_root is None else Path(dataset_root)
@@ -168,12 +203,20 @@ class FixedMatrixVectorTaskExecutor:
         self._dx12_runner = self._build_dx12_resident_runner()
 
     def close(self) -> None:
+        """Release any long-lived helper processes owned by the executor."""
         if self._dx12_runner is not None:
             self._dx12_runner.close()
             self._dx12_runner = None
 
     def execute_task(self, task: TaskAssign) -> TaskResult:
-        """Run one assigned row slice and return its output bytes."""
+        """Run one assigned row slice and return its output bytes.
+
+        Args:
+            task: FMVM task assignment received from the main node.
+
+        Returns:
+            A ``TaskResult`` containing the merged FMVM output slice.
+        """
 
         self._validate_task(task)
         processor_slices = self._build_local_processor_slices(task)
@@ -209,6 +252,14 @@ class FixedMatrixVectorTaskExecutor:
         )
 
     def _validate_task(self, task: TaskAssign) -> None:
+        """Validate that an FMVM task matches the local runtime dataset.
+
+        Args:
+            task: FMVM task assignment to validate.
+
+        Returns:
+            ``None`` when the task is valid for local execution.
+        """
         if task.method != METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION:
             raise ValueError(f"unsupported task method: {task.method}")
         if task.row_start < 0 or task.row_end > self.spec.rows or task.row_end <= task.row_start:
@@ -227,6 +278,14 @@ class FixedMatrixVectorTaskExecutor:
             raise RuntimeError("no locally registered processors are available for task execution")
 
     def _build_local_processor_slices(self, task: TaskAssign) -> list[ProcessorTaskSlice]:
+        """Partition the FMVM row range across local processor profiles.
+
+        Args:
+            task: FMVM task assignment received from the main node.
+
+        Returns:
+            Processor-task slices ordered by local inventory.
+        """
         partitions = partition_contiguous_range(
             task.row_start,
             task.row_end,
@@ -252,6 +311,17 @@ class FixedMatrixVectorTaskExecutor:
         vector_path: Path,
         temp_root: Path,
     ) -> bytes:
+        """Run one processor-specific FMVM slice and return raw output bytes.
+
+        Args:
+            processor_slice: Local processor slice to execute.
+            iteration_count: Number of times to repeat the local computation.
+            vector_path: Temporary vector file for this task.
+            temp_root: Temporary directory for per-slice outputs.
+
+        Returns:
+            Raw float32 output bytes for the requested row slice.
+        """
         output_path = temp_root / (
             f"{processor_slice.processor.hardware_type}_{processor_slice.row_start}_{processor_slice.row_end}.bin"
         )
@@ -290,6 +360,11 @@ class FixedMatrixVectorTaskExecutor:
         return raw
 
     def _build_dx12_resident_runner(self) -> _Dx12ResidentRunner | None:
+        """Create the DX12 resident runner when the local inventory supports it.
+
+        Returns:
+            A resident DX12 runner instance, or ``None`` when not used.
+        """
         dx12_processors = tuple(
             processor for processor in self.inventory.processors if processor.hardware_type == "dx12"
         )
@@ -303,11 +378,27 @@ class FixedMatrixVectorTaskExecutor:
         iteration_count: int,
         vector_path: Path,
         output_path: Path,
-    ) -> list[str]:
+) -> list[str]:
+        """Build the native runtime command for one local processor slice.
+
+        Args:
+            processor_slice: Local processor slice to execute.
+            iteration_count: Number of times to repeat the local computation.
+            vector_path: Temporary vector file for this task.
+            output_path: Destination file for the slice output.
+
+        Returns:
+            The subprocess command list for the selected backend.
+        """
         processor = processor_slice.processor
         if processor.hardware_type == "cpu":
             executable_path = CPU_WINDOWS_EXECUTABLE_PATH if sys.platform == "win32" else CPU_MACOS_EXECUTABLE_PATH
-            workers = int(processor.best_config.get("workers") or processor.best_config.get("requested_workers") or 1)
+            configured_workers = int(
+                processor.best_config.get("workers")
+                or processor.best_config.get("requested_workers")
+                or resolve_capped_cpu_worker_count()
+            )
+            workers = max(1, min(resolve_capped_cpu_worker_count(), configured_workers))
             tile_size = int(processor.best_config.get("tile_size") or self.spec.cols)
             accumulation_precision = str(processor.best_config.get("accumulation_precision") or "fp32")
             return [

@@ -1,4 +1,8 @@
-"""Linear scoring helpers for performance benchmarks."""
+"""Define the linear scoring rule used by benchmark reports.
+
+Use this module when a benchmark needs to convert latency into a bounded score
+that can be compared across backends for the same workload.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +16,17 @@ def linear_time_score(
     zero_score_seconds: float,
     max_score: float = MAX_SCORE,
 ) -> float:
-    """Map runtime to a linear score where lower runtime means higher score."""
+    """Map runtime to a linear score where lower runtime means higher score.
+
+    Args:
+        elapsed_seconds: Measured wall-clock runtime for one trial.
+        ideal_seconds: Runtime that should receive the maximum score.
+        zero_score_seconds: Runtime at or above which the score becomes zero.
+        max_score: Upper bound of the scoring range.
+
+    Returns:
+        The linearly interpolated score for the measured runtime.
+    """
 
     if elapsed_seconds < 0:
         raise ValueError("elapsed_seconds must be non-negative")
@@ -32,7 +46,14 @@ def linear_time_score(
 
 
 def scoring_formula_description() -> str:
-    """Return a human-readable explanation of the scoring rule."""
+    """Return a human-readable explanation of the scoring rule.
+
+    Args:
+        None.
+
+    Returns:
+        A short formula string describing the scoring function.
+    """
 
     return (
         "score = clamp(max_score * (zero_score_seconds - elapsed_seconds) / "

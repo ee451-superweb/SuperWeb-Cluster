@@ -1,4 +1,8 @@
-"""FMVM benchmark implementation used by the top-level multi-method runner."""
+"""Run the FMVM benchmark and emit the raw method-local report.
+
+Use this module when the FMVM method should benchmark its backends directly,
+either from the top-level runner or through the FMVM-only wrapper CLI.
+"""
 
 from __future__ import annotations
 
@@ -30,6 +34,14 @@ from compute_node.performance_metrics.fixed_matrix_vector_multiplication.reporti
 )
 from compute_node.performance_metrics.fixed_matrix_vector_multiplication.workloads import build_benchmark_spec
 from compute_node.performance_metrics.path_utils import to_relative_string
+from compute_node.performance_metrics.workload_modes import (
+    BENCHMARK_WORKLOAD_MODE_CHOICES,
+    WORKLOAD_MODE_CUSTOM,
+    WORKLOAD_MODE_FULL,
+    WORKLOAD_MODE_LARGE,
+    WORKLOAD_MODE_MEDIUM,
+    WORKLOAD_MODE_SMALL,
+)
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_DATASET_DIR = METHOD_DATASET_DIR
@@ -38,7 +50,14 @@ GENERATE_SCRIPT_PATH = METHOD_GENERATE_SCRIPT_PATH
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Describe the CLI surface for the FMVM benchmark runner."""
+    """Build the CLI parser for the FMVM benchmark runner.
+
+    Args:
+        None.
+
+    Returns:
+        The configured ``ArgumentParser`` for the FMVM benchmark entrypoint.
+    """
 
     parser = argparse.ArgumentParser(description="Benchmark fixed matrix-vector multiplication backends.")
     parser.add_argument(
@@ -78,11 +97,129 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--rows", type=int, help="Optional test-only override for the matrix row count.")
     parser.add_argument("--cols", type=int, help="Optional test-only override for the matrix column count.")
+    parser.add_argument(
+        "--workload-mode",
+        choices=BENCHMARK_WORKLOAD_MODE_CHOICES,
+        default=WORKLOAD_MODE_FULL,
+        help="Benchmark only the small, medium, or large dataset, or run the default small->large flow.",
+    )
     return parser
 
 
+def _has_custom_workload(args: argparse.Namespace) -> bool:
+    """Return whether CLI overrides requested a custom FMVM shape.
+
+    Args:
+        args: Parsed benchmark CLI arguments.
+
+    Returns:
+        ``True`` when rows or cols were overridden explicitly.
+    """
+    return args.rows is not None or args.cols is not None
+
+
+def _resolve_workload_plan(
+    args: argparse.Namespace,
+    *,
+    accumulation_precision: str,
+) -> tuple[str, str, str, object, object]:
+    """Resolve autotune and measurement plans from CLI workload choices.
+
+    Use this before dataset generation so the runner knows which benchmark spec
+    and dataset variant to use for autotune and final measurement.
+
+    Args:
+        args: Parsed benchmark CLI arguments.
+        accumulation_precision: Numeric accumulation mode for FMVM.
+
+    Returns:
+        A tuple containing workload mode, autotune variant, measurement variant,
+        autotune spec, and measurement spec.
+    """
+    requested_mode = getattr(args, "workload_mode", WORKLOAD_MODE_FULL)
+    if _has_custom_workload(args):
+        custom_spec = build_benchmark_spec(
+            default_variant="test",
+            rows=args.rows,
+            cols=args.cols,
+            accumulation_precision=accumulation_precision,
+        )
+        return (
+            WORKLOAD_MODE_CUSTOM,
+            WORKLOAD_MODE_CUSTOM,
+            WORKLOAD_MODE_CUSTOM,
+            custom_spec,
+            custom_spec,
+        )
+
+    if requested_mode == WORKLOAD_MODE_SMALL:
+        small_spec = build_benchmark_spec(
+            default_variant="test",
+            accumulation_precision=accumulation_precision,
+        )
+        return (
+            WORKLOAD_MODE_SMALL,
+            WORKLOAD_MODE_SMALL,
+            WORKLOAD_MODE_SMALL,
+            small_spec,
+            small_spec,
+        )
+
+    if requested_mode == WORKLOAD_MODE_MEDIUM:
+        medium_spec = build_benchmark_spec(
+            default_variant="medium",
+            accumulation_precision=accumulation_precision,
+        )
+        return (
+            WORKLOAD_MODE_MEDIUM,
+            WORKLOAD_MODE_MEDIUM,
+            WORKLOAD_MODE_MEDIUM,
+            medium_spec,
+            medium_spec,
+        )
+
+    if requested_mode == WORKLOAD_MODE_LARGE:
+        large_spec = build_benchmark_spec(
+            default_variant="runtime",
+            accumulation_precision=accumulation_precision,
+        )
+        return (
+            WORKLOAD_MODE_LARGE,
+            WORKLOAD_MODE_LARGE,
+            WORKLOAD_MODE_LARGE,
+            large_spec,
+            large_spec,
+        )
+
+    small_spec = build_benchmark_spec(
+        default_variant="test",
+        accumulation_precision=accumulation_precision,
+    )
+    large_spec = build_benchmark_spec(
+        default_variant="runtime",
+        accumulation_precision=accumulation_precision,
+    )
+    return (
+        WORKLOAD_MODE_FULL,
+        WORKLOAD_MODE_SMALL,
+        WORKLOAD_MODE_LARGE,
+        small_spec,
+        large_spec,
+    )
+
+
 def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
-    """Run the FMVM benchmark and return the JSON-serializable report."""
+    """Run the FMVM benchmark and return the JSON-serializable report.
+
+    Use this from the top-level benchmark runner or tests when the caller wants
+    the FMVM method report as a Python dictionary.
+
+    Args:
+        args: Parsed benchmark CLI arguments.
+
+    Returns:
+        The raw FMVM method report dictionary.
+    """
 
     emit_status(
         "method.fmvm.start",
@@ -90,6 +227,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
         method="fixed_matrix_vector_multiplication",
         requested_backends=args.backend or ["auto"],
         rebuild=bool(getattr(args, "rebuild", False)),
+        workload_mode=getattr(args, "workload_mode", WORKLOAD_MODE_FULL),
         rows=args.rows,
         cols=args.cols,
         accumulation_precision=getattr(args, "accumulation_precision", "fp32"),
@@ -104,28 +242,32 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
     ]
 
     accumulation_precision = getattr(args, "accumulation_precision", "fp32")
-    spec = build_benchmark_spec(
-        default_variant="test",
-        rows=args.rows,
-        cols=args.cols,
+    (
+        workload_mode,
+        autotune_dataset_variant,
+        measurement_dataset_variant,
+        spec,
+        measurement_spec,
+    ) = _resolve_workload_plan(
+        args,
         accumulation_precision=accumulation_precision,
     )
-    use_runtime_measurement = args.rows is None and args.cols is None
-    measurement_spec = (
-        build_benchmark_spec(
-            default_variant="runtime",
-            accumulation_precision=accumulation_precision,
-        )
-        if use_runtime_measurement
-        else spec
-    )
     dataset_dir = resolve_dataset_dir(args, spec, default_dataset_dir=DEFAULT_DATASET_DIR)
-    autotune_dataset = build_dataset_layout(dataset_dir, prefix="test_")
-    measurement_dataset = (
-        build_dataset_layout(dataset_dir, prefix="runtime_")
-        if use_runtime_measurement
-        else autotune_dataset
-    )
+    small_dataset = build_dataset_layout(dataset_dir, prefix="test_")
+    medium_dataset = build_dataset_layout(dataset_dir, prefix="medium_")
+    large_dataset = build_dataset_layout(dataset_dir, prefix="runtime_")
+    if autotune_dataset_variant == WORKLOAD_MODE_LARGE:
+        autotune_dataset = large_dataset
+    elif autotune_dataset_variant == WORKLOAD_MODE_MEDIUM:
+        autotune_dataset = medium_dataset
+    else:
+        autotune_dataset = small_dataset
+    if measurement_dataset_variant == WORKLOAD_MODE_LARGE:
+        measurement_dataset = large_dataset
+    elif measurement_dataset_variant == WORKLOAD_MODE_MEDIUM:
+        measurement_dataset = medium_dataset
+    else:
+        measurement_dataset = autotune_dataset
     dataset_was_generated = False
     if detected_backends:
         emit_status(
@@ -133,13 +275,24 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
             status="running",
             method="fixed_matrix_vector_multiplication",
             dataset_dir=str(dataset_dir),
-            require_runtime_measurement=use_runtime_measurement,
+            workload_mode=workload_mode,
+            generate_small_dataset=autotune_dataset_variant != WORKLOAD_MODE_LARGE,
+            generate_medium_dataset=(
+                autotune_dataset_variant == WORKLOAD_MODE_MEDIUM
+                or measurement_dataset_variant == WORKLOAD_MODE_MEDIUM
+            ),
+            generate_large_dataset=measurement_dataset_variant == WORKLOAD_MODE_LARGE,
         )
         dataset_was_generated = generate_dataset_if_missing(
             dataset_dir,
             spec.rows,
             spec.cols,
-            require_runtime_measurement=use_runtime_measurement,
+            generate_small_dataset=autotune_dataset_variant != WORKLOAD_MODE_LARGE,
+            generate_medium_dataset=(
+                autotune_dataset_variant == WORKLOAD_MODE_MEDIUM
+                or measurement_dataset_variant == WORKLOAD_MODE_MEDIUM
+            ),
+            generate_large_dataset=measurement_dataset_variant == WORKLOAD_MODE_LARGE,
             root_dir=ROOT_DIR,
             generate_script_path=GENERATE_SCRIPT_PATH,
         )
@@ -228,7 +381,10 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
         measurement_dataset=measurement_dataset,
         autotune_spec=spec,
         measurement_spec=measurement_spec,
-        full_runtime_measurement=use_runtime_measurement,
+        workload_mode=workload_mode,
+        autotune_dataset_variant=autotune_dataset_variant,
+        measurement_dataset_variant=measurement_dataset_variant,
+        full_runtime_measurement=workload_mode == WORKLOAD_MODE_FULL,
         dataset_was_generated=dataset_was_generated,
         hardware_inventory=hardware_inventory,
         detected_backends=detected_backends,
@@ -240,7 +396,14 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI wrapper around `run_benchmark()`."""
+    """CLI wrapper around ``run_benchmark()``.
+
+    Args:
+        argv: Optional CLI argument override. Defaults to ``sys.argv[1:]``.
+
+    Returns:
+        Process exit code ``0`` on success.
+    """
 
     args = build_parser().parse_args(argv)
     report = run_benchmark(args)

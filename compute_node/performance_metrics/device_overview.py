@@ -1,4 +1,8 @@
-"""Best-effort host and accelerator inventory for benchmark reports."""
+"""Collect a lightweight host and accelerator overview for benchmark reports.
+
+Use this module when benchmark output should include a human-readable snapshot
+of the machine that produced the measurements without exposing deep internals.
+"""
 
 from __future__ import annotations
 
@@ -15,6 +19,17 @@ from compute_node.performance_metrics.fixed_matrix_vector_multiplication.backend
 
 
 def _run_powershell_json(script: str) -> Any | None:
+    """Execute a short PowerShell query and parse JSON output.
+
+    Use this helper on Windows when CIM or GPU inventory data is easiest to
+    obtain through PowerShell instead of reimplementing the query in Python.
+
+    Args:
+        script: PowerShell command that prints JSON to stdout.
+
+    Returns:
+        The parsed JSON payload, or ``None`` when the command fails.
+    """
     if os.name != "nt":
         return None
     completed = subprocess.run(
@@ -35,6 +50,17 @@ def _run_powershell_json(script: str) -> Any | None:
 
 
 def detect_cpu_name() -> str:
+    """Return the best-effort CPU model name for the current host.
+
+    Use this in benchmark reports so readers can quickly identify which machine
+    produced the measurements without inspecting raw OS inventory output.
+
+    Args:
+        None.
+
+    Returns:
+        A CPU model string, or a generic platform fallback.
+    """
     payload = _run_powershell_json(
         "Get-CimInstance Win32_Processor | Select-Object -ExpandProperty Name | ConvertTo-Json -Compress"
     )
@@ -48,6 +74,17 @@ def detect_cpu_name() -> str:
 
 
 def detect_memory_modules() -> list[dict[str, object]]:
+    """Return best-effort physical memory-module information.
+
+    Use this on Windows benchmark hosts when reports should include DIMM size
+    and clock information in addition to total system memory.
+
+    Args:
+        None.
+
+    Returns:
+        A list of dictionaries describing detected memory modules.
+    """
     payload = _run_powershell_json(
         "Get-CimInstance Win32_PhysicalMemory | "
         "Select-Object Manufacturer,PartNumber,Capacity,ConfiguredClockSpeed | "
@@ -70,6 +107,17 @@ def detect_memory_modules() -> list[dict[str, object]]:
 
 
 def detect_gpu_devices() -> list[dict[str, object]]:
+    """Return display-adapter inventory for the local host.
+
+    Use this in benchmark reports when a lightweight GPU list is enough and the
+    benchmark does not need to expose backend-specific internal details.
+
+    Args:
+        None.
+
+    Returns:
+        A list of detected GPU or display-adapter descriptors.
+    """
     adapters, _message = list_windows_display_adapters()
     devices: list[dict[str, object]] = []
     for adapter in adapters:
@@ -84,6 +132,17 @@ def detect_gpu_devices() -> list[dict[str, object]]:
 
 
 def collect_device_overview() -> dict[str, object]:
+    """Assemble the host summary stored in benchmark report headers.
+
+    Use this once per benchmark run so normalized reports include CPU, memory,
+    GPU, and Python-version context for later comparison.
+
+    Args:
+        None.
+
+    Returns:
+        A dictionary describing the current host at a high level.
+    """
     memory_bytes = _detect_total_memory_bytes()
     return {
         "system": platform.system(),

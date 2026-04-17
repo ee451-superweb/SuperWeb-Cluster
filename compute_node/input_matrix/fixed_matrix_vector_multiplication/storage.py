@@ -9,6 +9,15 @@ from .spec import DatasetLayout, GENERATOR_ALGORITHM, InputMatrixSpec, build_dat
 
 
 def dataset_is_generated(layout: DatasetLayout, spec: InputMatrixSpec) -> bool:
+    """Return whether the FMVM dataset layout already matches the requested spec.
+
+    Args:
+        layout: Dataset layout to validate.
+        spec: FMVM spec that the dataset is expected to match.
+
+    Returns:
+        ``True`` when all files and metadata match the requested spec.
+    """
     if not layout.matrix_path.exists() or not layout.vector_path.exists() or not layout.meta_path.exists():
         return False
     if layout.matrix_path.stat().st_size != spec.matrix_bytes:
@@ -39,12 +48,22 @@ def dataset_is_generated(layout: DatasetLayout, spec: InputMatrixSpec) -> bool:
 
 
 def load_float32_file(path: Path) -> list[float]:
+    """Load a float32 binary file into a Python float list."""
     with path.open("rb") as handle:
         raw = handle.read()
     return list(memoryview(raw).cast("f"))
 
 
 def compare_float32_vectors(reference: list[float], candidate: list[float]) -> tuple[float, float, int, int]:
+    """Compare two float vectors and report max absolute and relative errors.
+
+    Args:
+        reference: Expected float values.
+        candidate: Observed float values to compare.
+
+    Returns:
+        ``(max_abs_error, max_rel_error, max_abs_index, max_rel_index)``.
+    """
     if len(reference) != len(candidate):
         raise ValueError("vector lengths do not match")
 

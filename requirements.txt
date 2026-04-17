@@ -1,4 +1,6 @@
 # Core project stays mostly stdlib; standalone ZeroMQ benchmarks need pyzmq.
 numpy>=2.3.0
+protobuf>=6.31.1
+grpcio-tools>=1.74.0
 pyzmq>=27.1.0
 tqdm>=4.67.0

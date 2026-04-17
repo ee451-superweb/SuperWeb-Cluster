@@ -1,6 +1,20 @@
 SuperWeb-Cluster 大数据传输侧通道实施计划
 时间戳: 2026-04-15
 
+现状更新（2026-04-17）:
+
+- 文中提到的 `wire/control_plane_message.py` 与 `wire/data_plane_message.py`
+  已不再是当前仓库中的实际文件名。
+- 当前实现按协议角色拆分为:
+  - `wire/internal_protocol/`
+  - `wire/external_protocol/`
+  - `wire/discovery_protocol/`
+- 控制面 protobuf 编解码与 framed transport 也已拆到:
+  - `wire/internal_protocol/control_plane_codec.py`
+  - `wire/internal_protocol/runtime_transport.py`
+  - `wire/internal_protocol/data_plane_codec.py`
+- 本文保留为当时的数据面设计记录；阅读时请以上述目录名替代旧文件名。
+
 背景:
 
 - 当前 runtime 通道使用 length-prefixed protobuf over TCP。
@@ -8,7 +22,7 @@ SuperWeb-Cluster 大数据传输侧通道实施计划
   artifact 数据。
 - 目前 `conv2d` 已经作为第二种 method 接入，但 runtime 级输出会迅速超过当前控制通道的实用
   负载范围。
-- 本轮目标不是立刻实现完整 side-channel，而是先明确一个不破坏现有架构的实现方案。
+- 本轮目标不是立刻实现完整 artifact/data plane，而是先明确一个不破坏现有架构的实现方案。
 
 问题定义:
 
@@ -31,7 +45,7 @@ SuperWeb-Cluster 大数据传输侧通道实施计划
    - protobuf 继续负责控制信息
    - 大体积二进制结果走独立数据面
 
-2. 第一版 side-channel 推荐继续使用独立 TCP。
+2. 第一版 artifact/data plane 推荐继续使用独立 TCP。
    - 原因是实现成本低
    - 调试成本低
    - 与现有 runtime 兼容性最好
@@ -49,7 +63,7 @@ SuperWeb-Cluster 大数据传输侧通道实施计划
 
 本轮目标:
 
-1. 定义 side-channel 的模块划分。
+1. 定义 artifact/data plane 的模块划分。
 2. 定义控制面协商字段。
 3. 定义数据面消息格式。
 4. 定义 `worker -> main` 与 `main -> client` 两条时序。
@@ -60,16 +74,16 @@ SuperWeb-Cluster 大数据传输侧通道实施计划
 1. 不实现 QUIC 版本的数据面。
 2. 不实现断点续传或多源并发下载。
 3. 不实现加密认证层的完整设计。
-4. 不实现跨版本 side-channel 协议兼容。
+4. 不实现跨版本 artifact/data plane 协议兼容。
 
 推荐目录与模块:
 
-1. `wire/control_plane_message.py`
+1. `wire/internal_protocol/control_plane.py`
    职责:
    - 定义控制面需要新增的 artifact 协商结构
-   - 负责控制面 side-channel 相关字段的编解码辅助
+   - 由 `wire/internal_protocol/control_plane_codec.py` 负责控制面 artifact 协商字段的 protobuf 编解码辅助
 
-2. `wire/data_plane_message.py`
+2. `wire/internal_protocol/data_plane.py`
    职责:
    - 定义数据面自己的轻量 header
    - 不强制使用 protobuf
@@ -89,7 +103,7 @@ SuperWeb-Cluster 大数据传输侧通道实施计划
 建议的职责边界:
 
 1. `runtime.py` 负责:
-   - 判断结果是否需要 side-channel
+   - 判断结果是否需要 artifact/data plane
    - 在控制面协商 `artifact_id`
    - 调用 artifact manager 发布或拉取数据
 
@@ -105,7 +119,7 @@ SuperWeb-Cluster 大数据传输侧通道实施计划
    - chunk 化接收
    - checksum 校验
 
-4. `data_plane_message.py` 负责:
+4. `wire/internal_protocol/data_plane_codec.py` 负责:
    - transfer header
    - chunk header
    - complete / error header
@@ -155,7 +169,7 @@ SuperWeb-Cluster 大数据传输侧通道实施计划
    - 保留小结果直返
    - 大结果改为返回:
      - `result_artifact_id`
-     - side-channel 元数据
+     - artifact/data plane 元数据
 
 3. 当前已有的 `result_artifact_id` 字段可以继续沿用，
    但需要补齐 artifact 元数据协商流程。
@@ -264,8 +278,9 @@ Phase 4. 可靠性增强
 
 对现有代码的落点建议:
 
-1. `wire/runtime.py`
-   - 只补充控制面 side-channel 所需字段和辅助 builder
+1. `wire/internal_protocol/control_plane.py`
+   - 只补充控制面 artifact/data plane 所需字段和类型定义
+   - 具体 builder 与 framed transport 由 `wire/internal_protocol/runtime_transport.py` 承担
 
 2. `main_node/runtime.py`
    - 判断何时切到 artifact 模式
@@ -335,7 +350,8 @@ Phase 4. 可靠性增强
 1. 方向上，应该做独立 TCP 数据面。
 2. 第一版不应直接上 QUIC。
 3. 主循环应只保留 abstraction。
-4. `control_plane_message.py`、`data_plane_message.py`、`large_data_transfer.py`
+4. `wire/internal_protocol/control_plane.py`、`wire/internal_protocol/data_plane.py`、
+   `wire/internal_protocol/data_plane_codec.py` 与 `large_data_transfer.py`
    这组拆分是合理的。
 5. 如果希望主循环更干净，建议额外加入 `artifact_manager.py`。
 

@@ -22,7 +22,7 @@ can be added without collapsing everything back into one runtime path.
 | **GFLOPS-Aware Scheduling** | The main node tracks benchmark-derived processor inventories and partitions work proportionally to measured throughput |
 | **Deterministic Input Data** | Shared fixed-seed generators create byte-stable FMVM and spatial-convolution datasets on every machine |
 | **Native Runner Stack** | In-tree CPU, CUDA, and Metal runners back both benchmarking and compute-node task execution |
-| **Structured Runtime Protocol** | Registration, heartbeat, client requests, task assignment, and task results all flow through framed protobuf messages |
+| **Structured Runtime Protocol** | Registration, heartbeat, client requests, task assignment, worker updates, and task results all flow through framed protobuf messages, with large artifacts moved onto a separate TCP data plane |
 | **Crash-Survivable Benchmark Tracing** | Benchmark progress is persisted to `result_status.json` and `result_trace.jsonl` for postmortem analysis |
 
 ## System Picture
@@ -63,8 +63,8 @@ The project currently uses two representative methods:
 
 | Method | Autotune Workload | Reported Workload | Primary Partition |
 |---|---|---|---|
-| `fixed_matrix_vector_multiplication` | `2048 x 4096` | `16384 x 32768` (`2 GiB` matrix) | contiguous row ranges |
-| `spatial_convolution` | `256 x 256`, `32 -> 64`, `k=3`, `pad=1`, `stride=1` | `2048 x 2048`, `128 -> 256`, `k=3`, `pad=1`, `stride=1` | contiguous output-channel ranges |
+| `fixed_matrix_vector_multiplication` | `4096 x 8192` | `16384 x 32768` (`2 GiB` matrix) | contiguous row ranges |
+| `spatial_convolution` | `512 x 512`, `64 -> 128`, `k=3`, `pad=1`, `stride=1` | `2048 x 2048`, `128 -> 256`, `k=3`, `pad=1`, `stride=1` | contiguous output-channel ranges |
 
 We use them as two different workload styles:
 
@@ -76,7 +76,11 @@ We use them as two different workload styles:
 The benchmark autotunes on the smaller workload, then reports speed on the
 larger workload. For `spatial_convolution`, protocol and runtime plumbing are
 already in-tree, while the large-result data-plane path is still being
-hardened for very large outputs.
+hardened for very large outputs. This is also a deliberate fallback tradeoff:
+Windows places practical constraints on very large Python memory materialization,
+home devices usually have much less RAM than disk capacity, and widespread SSD
+adoption means sequential disk I/O is now fast enough that a disk-first artifact
+path is often the safer choice when we are forced to choose.
 
 ## Progress Through Sprint 2
 
@@ -87,7 +91,7 @@ Sprint 1 delivered:
 - mDNS main-node discovery
 - TCP runtime registration between main node and compute node
 - protobuf runtime messaging
-- worker heartbeat and removal on timeout
+- worker heartbeat with failure-counter-based liveness eviction
 - structured client request / response messaging
 - task assignment / accept / fail / result messaging
 - local CPU/CUDA benchmark generation and ranking
@@ -193,10 +197,12 @@ The repository is now organized by responsibility:
   - mDNS discovery, packet handling, and manual fallback
 - `wire/proto/`
   - `.proto` source definitions
-- `wire/discovery.py`
+- `wire/discovery_protocol/`
   - discovery wire-format helpers
-- `wire/runtime.py`
-  - framed protobuf runtime wire-format helpers
+- `wire/internal_protocol/`
+  - main-node <-> compute-node control plane, transport framing, and data-plane helpers
+- `wire/external_protocol/`
+  - client-facing control-plane and data-plane models
 - `main_node/`
   - scheduler-side registry, dispatch, aggregation, heartbeat, and runtime loop
 - `compute_node/`
@@ -241,7 +247,9 @@ The current startup flow is:
 14. The main node assigns a runtime id to the compute node, assigns per-hardware ids, updates total cluster GFLOPS, then replies with `REGISTER_OK`.
 15. Clients join, receive their own runtime ids, and send structured `CLIENT_REQUEST` messages.
 16. Each `CLIENT_REQUEST` can include an `iteration_count`, and the main node emits matching `TASK_ASSIGN` slices to workers.
-17. The main node aggregates row slices and returns one `CLIENT_RESPONSE`.
+17. While a request is active, clients can poll `CLIENT_INFO_REQUEST` / `CLIENT_INFO_REPLY` for active-request visibility.
+18. Workers send periodic `HEARTBEAT_OK` and optional idle `WORKER_UPDATE` performance refreshes.
+19. The main node aggregates worker slices and returns one `CLIENT_RESPONSE`, using artifact descriptors plus the TCP data plane for large outputs.
 
 ## Local Vs Networked Steps
 
@@ -258,8 +266,9 @@ The current startup flow is:
   - TCP runtime registration between nodes
 
 `bootstrap.py` itself is not responsible for creating `.venv` or installing
-dependencies anymore. If the local environment is not ready, it will stop and
-ask you to run `python setup.py` first.
+dependencies manually anymore. If the local environment is missing or stale,
+`bootstrap.py` now runs `python setup.py` itself, then relaunches under the
+project `.venv`.
 
 ## Current Runtime Model
 
@@ -282,12 +291,16 @@ The main runtime protobuf messages are:
 - `HEARTBEAT`
 - `HEARTBEAT_OK`
 - `CLIENT_JOIN`
+- `CLIENT_INFO_REQUEST`
+- `CLIENT_INFO_REPLY`
 - `CLIENT_REQUEST`
 - `CLIENT_RESPONSE`
 - `TASK_ASSIGN`
 - `TASK_ACCEPT`
 - `TASK_FAIL`
 - `TASK_RESULT`
+- `ARTIFACT_RELEASE`
+- `WORKER_UPDATE`
 
 The runtime and benchmark stack now recognize two methods:
 
@@ -313,6 +326,13 @@ workspace, and runtime handler structure:
 Across both methods, `iteration_count` is a compute-side loop count for one
 structured request, not a request-resend count at the client or main-node
 layer.
+
+Worker liveness is now driven by the periodic heartbeat loop and a consecutive
+failure counter. The main node no longer applies an additional hard task-result
+deadline on top of heartbeat-based liveness. Client-side liveness works the
+same way: once a client has an active request in flight, it periodically sends
+`CLIENT_INFO_REQUEST`, treats each matching `CLIENT_INFO_REPLY` as a successful
+refresh, and only marks the cluster dead after repeated missed replies.
 
 ## Quick Start
 

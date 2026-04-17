@@ -388,6 +388,21 @@ class MetalBackend:
         measurement_repeats: int,
         timeout_seconds: float,
     ) -> dict[str, object]:
+        """Invoke the native Metal runner and parse its JSON metrics.
+
+        Args:
+            executable_path: Runner binary to execute.
+            spec: Benchmark spec being measured.
+            dataset: Dataset layout read by the runner.
+            block_sizes: Metal block-size candidates to sweep.
+            tile_sizes: Tile-size candidates to sweep.
+            autotune_repeats: Repeat count for autotune trials.
+            measurement_repeats: Repeat count for the selected configuration.
+            timeout_seconds: Subprocess timeout for the native runner.
+
+        Returns:
+            The parsed JSON metrics emitted by the native runner.
+        """
         command = [
             str(executable_path),
             "--matrix",

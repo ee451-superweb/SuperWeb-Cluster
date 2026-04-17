@@ -13,6 +13,16 @@ def dataset_is_generated(
     *,
     skip_weight: bool = False,
 ) -> bool:
+    """Return whether the spatial dataset layout already matches the requested spec.
+
+    Args:
+        layout: Dataset layout to validate.
+        spec: Spatial spec that the dataset is expected to match.
+        skip_weight: Whether the weight file may be absent intentionally.
+
+    Returns:
+        ``True`` when all required files and metadata match the requested spec.
+    """
     if not layout.input_path.exists() or not layout.meta_path.exists():
         return False
     if not skip_weight and not layout.weight_path.exists():

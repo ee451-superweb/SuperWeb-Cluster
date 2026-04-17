@@ -1,6 +1,18 @@
 SuperWeb-Cluster 多计算方法集成实施计划
 时间戳: 2026-04-15
 
+现状更新（2026-04-17）:
+
+- 本文是 2026-04-15 的实施计划，保留了当时的命名与拆分建议。
+- 当前仓库里的协议文件已经进一步收敛为:
+  - `wire/internal_protocol/`
+  - `wire/external_protocol/`
+  - `wire/discovery_protocol/`
+- 任务等待也已不再依赖固定式 task-result timeout；worker 侧由 heartbeat
+  failure counter 驱动移除，client 侧由 `CLIENT_INFO_REPLY` failure counter
+  驱动判死。
+- 因此，下文若提到旧的 `wire/runtime.py` 或 artifact/data plane 旧文件名，请将其视为历史规划上下文，而不是当前最终结构。
+
 背景:
 
 - 当前 `SuperWeb-Cluster` 的 runtime、调度器、聚合器、task 协议和性能摘要默认都只面向
@@ -20,7 +32,7 @@ SuperWeb-Cluster 多计算方法集成实施计划
 
 明确不在本轮实现范围:
 
-1. 不实现最终大结果文件回传给 client 的 side-channel。
+1. 不实现最终大结果文件回传给 client 的 artifact/data plane。
 2. 不在本轮解决 `worker -> main` / `main -> client` 的大文件传输协议。
 3. 不追求跨版本 runtime 协议兼容；允许 main/worker 同步升级。
 
@@ -202,11 +214,13 @@ SuperWeb-Cluster 多计算方法集成实施计划
   混合字段
 
 实现提醒:
-- 仓库里虽然保留了 `.proto`，但当前 Python 侧仍有手写编解码器。
+- 仓库里虽然保留了 `.proto`，但当前 Python 侧还需要同步更新协议基建模块。
 - 因此协议调整需要同步更新:
   - `wire/proto/superweb_cluster_runtime.proto`
-  - `wire/runtime.py`
-- 两边必须一起演进，不能只改 schema 文件。
+  - `wire/internal_protocol/control_plane.py`
+  - `wire/internal_protocol/control_plane_codec.py`
+  - `wire/internal_protocol/runtime_transport.py`
+- 这些层必须一起演进，不能只改 schema 文件。
 
 compute node 重构计划:
 
@@ -344,7 +358,7 @@ Phase 8. benchmark 输出格式
 3. 再重构 performance summary 为多 method
 4. 再改 main node 的 registry / dispatch / aggregation
 5. 最后接入 `spatial_convolution`
-6. 大文件 side-channel 放到下一阶段
+6. 大文件 artifact/data plane 放到下一阶段
 
 本计划对应的第一批落地文件:
 
@@ -359,7 +373,7 @@ Phase 8. benchmark 输出格式
 9. `main_node/aggregator.py`
 10. `main_node/registry.py`
 11. `wire/proto/superweb_cluster_runtime.proto`
-12. `wire/runtime.py`
+12. `wire/internal_protocol/control_plane.py`
 
 检查口径:
 

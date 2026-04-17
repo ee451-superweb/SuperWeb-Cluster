@@ -1,4 +1,4 @@
-"""Benchmark constants for the fixed matrix-vector workload.
+"""Describe default workload sizes for the FMVM benchmark.
 
 This module is intentionally small. Its whole job is to answer:
 
@@ -23,6 +23,8 @@ if str(PROJECT_ROOT) not in sys.path:
 from compute_node.input_matrix.fixed_matrix_vector_multiplication import (
     DEFAULT_COLS,
     DEFAULT_ROWS,
+    MEDIUM_COLS,
+    MEDIUM_ROWS,
     TEST_COLS,
     TEST_ROWS,
 )
@@ -49,17 +51,41 @@ def build_benchmark_spec(
 ) -> BenchmarkSpec:
     """Return the benchmark shape.
 
-    The benchmark defaults to the fixed 2 GiB matrix. `rows` and `cols` stay as
-    optional overrides so tests can use a tiny dataset without allocating the
-    full production-sized matrix.
+    Use this when the FMVM benchmark needs the resolved matrix shape and scoring
+    window for either a named workload size or a custom override.
+
+    The benchmark defaults to the fixed 2 GiB matrix. ``rows`` and ``cols``
+    stay as optional overrides so tests can use a tiny dataset without
+    allocating the full production-sized matrix.
+
+    Args:
+        rows: Optional row-count override.
+        cols: Optional column-count override.
+        default_variant: Named workload variant such as ``test`` or ``runtime``.
+        ideal_seconds: Runtime that should receive the maximum score.
+        zero_score_seconds: Runtime at or above which the score becomes zero.
+        accumulation_precision: Numeric accumulation mode for the workload.
+
+    Returns:
+        The resolved FMVM benchmark specification.
     """
 
     if rows is None:
-        resolved_rows = TEST_ROWS if default_variant == "test" else DEFAULT_ROWS
+        if default_variant in {"test", "small"}:
+            resolved_rows = TEST_ROWS
+        elif default_variant == "medium":
+            resolved_rows = MEDIUM_ROWS
+        else:
+            resolved_rows = DEFAULT_ROWS
     else:
         resolved_rows = rows
     if cols is None:
-        resolved_cols = TEST_COLS if default_variant == "test" else DEFAULT_COLS
+        if default_variant in {"test", "small"}:
+            resolved_cols = TEST_COLS
+        elif default_variant == "medium":
+            resolved_cols = MEDIUM_COLS
+        else:
+            resolved_cols = DEFAULT_COLS
     else:
         resolved_cols = cols
 

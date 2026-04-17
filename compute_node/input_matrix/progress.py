@@ -12,6 +12,7 @@ except ModuleNotFoundError:
 
 
 def _format_binary_size(num_bytes: int) -> str:
+    """Format a byte count with a human-readable binary unit suffix."""
     kib = 1024
     mib = kib * 1024
     gib = mib * 1024
@@ -30,6 +31,7 @@ def build_progress_reporter() -> tuple[Callable[[str, int, int], None], Callable
     bars: dict[str, object] = {}
 
     def report(label: str, written_bytes: int, total_bytes: int) -> None:
+        """Update or print progress for one labeled generation stream."""
         if tqdm is None:
             print(
                 f"{label}: wrote {_format_binary_size(written_bytes)} / {_format_binary_size(total_bytes)}",
@@ -59,6 +61,7 @@ def build_progress_reporter() -> tuple[Callable[[str, int, int], None], Callable
             bars.pop(label, None)
 
     def close() -> None:
+        """Close any open progress bars created by this reporter pair."""
         for bar in list(bars.values()):
             bar.close()
         bars.clear()

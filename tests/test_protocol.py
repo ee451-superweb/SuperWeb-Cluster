@@ -8,7 +8,7 @@ from app.constants import (
     MAIN_NODE_NAME,
     MDNS_SERVICE_TYPE,
 )
-from wire.discovery import (
+from wire.discovery_protocol.discovery import (
     describe_discovery_message,
     build_announce_message,
     build_discover_message,

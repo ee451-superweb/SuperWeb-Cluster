@@ -26,6 +26,16 @@ def generate_dataset(
     generator_workers: int | None = None,
     chunk_values: int | None = None,
 ) -> None:
+    """Generate one spatial dataset variant and write its metadata.
+
+    Args:
+        layout: Dataset layout that should receive the generated files.
+        spec: Spatial dataset specification to generate.
+        skip_weight: Whether the weight file may be omitted intentionally.
+        progress: Optional progress callback for streaming writes.
+        generator_workers: Optional worker count for parallel generation.
+        chunk_values: Optional chunk size in float32 values.
+    """
     layout.root_dir.mkdir(parents=True, exist_ok=True)
     chunk_values = max(1, chunk_values or DEFAULT_CHUNK_VALUES)
 

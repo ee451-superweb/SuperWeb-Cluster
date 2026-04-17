@@ -57,11 +57,14 @@ The default FMVM problem is:
 
 The default Conv2D problem uses:
 
-- autotune workload: `256 x 256`, `32 -> 64`, `k=3`, `pad=1`, `stride=1`
-- runtime workload: `2048 x 2048`, `128 -> 256`, `k=3`, `pad=1`, `stride=1`
+- small workload: `512 x 512`, `64 -> 128`, `k=3`, `pad=1`, `stride=1`
+- medium workload: `1024 x 1024`, `96 -> 192`, `k=3`, `pad=1`, `stride=1`
+- large workload: `2048 x 2048`, `128 -> 256`, `k=3`, `pad=1`, `stride=1`
 
 The production benchmark keeps these shapes fixed so different machines compare
-the same work.
+the same work. By default it autotunes on the small workload and then measures
+the winning configuration on the large workload. `small`, `medium`, `large`,
+and `full` workload modes are available from the CLI.
 
 The fixed FMVM workload now runs in two stages:
 
@@ -217,6 +220,18 @@ Run only the CUDA backend:
 
 ```bash
 python "compute_node/performance_metrics/benchmark.py" --backend cuda
+```
+
+Run only the small workload:
+
+```bash
+python "compute_node/performance_metrics/benchmark.py" --workload-mode small
+```
+
+Run only the large workload:
+
+```bash
+python "compute_node/performance_metrics/benchmark.py" --workload-mode large
 ```
 
 Run only the Metal backend:

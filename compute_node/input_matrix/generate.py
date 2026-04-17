@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Unified input-dataset generation entrypoint for all compute methods."""
+"""Generate input datasets for one or more compute methods.
+
+Use this module as the top-level dataset-generation CLI when the project should
+prepare FMVM, spatial-convolution, or both datasets in one invocation.
+"""
 
 from __future__ import annotations
 
@@ -22,6 +26,11 @@ DEFAULT_CHUNK_MIB = 8
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI parser for the top-level dataset generator.
+
+    Returns:
+        The configured ``ArgumentParser`` for dataset generation.
+    """
     parser = argparse.ArgumentParser(description="Generate input datasets for one or more compute methods.")
     parser.add_argument(
         "--method",
@@ -47,7 +56,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_CHUNK_MIB,
         help="Chunk size in MiB used while streaming data.",
     )
-    parser.add_argument("--skip-runtime", action="store_true", help="Generate only the test dataset.")
+    parser.add_argument("--skip-small", action="store_true", help="Skip the small dataset.")
+    parser.add_argument("--skip-medium", action="store_true", help="Skip the medium dataset.")
+    parser.add_argument("--skip-large", action="store_true", help="Skip the large dataset.")
+    parser.add_argument("--skip-test", action="store_true", help="Alias for --skip-small.")
+    parser.add_argument("--skip-runtime", action="store_true", help="Alias for --skip-large.")
     parser.add_argument("--rows", type=int, help="FMVM test-only row-count override.")
     parser.add_argument("--cols", type=int, help="FMVM test-only column-count override.")
     parser.add_argument("--role", choices=("compute", "main"), default="compute", help="Spatial-convolution runtime dataset role.")
@@ -63,6 +76,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _selected_methods(method_arg: str) -> list[str]:
+    """Expand the CLI method selector into an ordered method list.
+
+    Args:
+        method_arg: CLI ``--method`` value.
+
+    Returns:
+        The ordered list of methods whose datasets should be generated.
+    """
     if method_arg == "all":
         return [
             METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
@@ -72,6 +93,14 @@ def _selected_methods(method_arg: str) -> list[str]:
 
 
 def _common_flags(args: argparse.Namespace) -> list[str]:
+    """Build the shared CLI flags forwarded to method-local generators.
+
+    Args:
+        args: Parsed top-level dataset-generation CLI arguments.
+
+    Returns:
+        The list of shared flags to forward to method-local generators.
+    """
     argv: list[str] = []
     if args.force:
         argv.append("--force")
@@ -79,12 +108,24 @@ def _common_flags(args: argparse.Namespace) -> list[str]:
         argv.extend(["--workers", str(args.workers)])
     if args.chunk_mib is not None:
         argv.extend(["--chunk-mib", str(args.chunk_mib)])
-    if args.skip_runtime:
-        argv.append("--skip-runtime")
+    if args.skip_small or args.skip_test:
+        argv.append("--skip-small")
+    if args.skip_medium:
+        argv.append("--skip-medium")
+    if args.skip_large or args.skip_runtime:
+        argv.append("--skip-large")
     return argv
 
 
 def _build_fmvm_args(args: argparse.Namespace) -> list[str]:
+    """Build the forwarded CLI argument list for the FMVM generator.
+
+    Args:
+        args: Parsed top-level dataset-generation CLI arguments.
+
+    Returns:
+        The FMVM-specific forwarded CLI argument list.
+    """
     argv = _common_flags(args)
     if args.output_dir is not None:
         argv.extend(["--output-dir", str(args.output_dir)])
@@ -96,6 +137,14 @@ def _build_fmvm_args(args: argparse.Namespace) -> list[str]:
 
 
 def _build_spatial_args(args: argparse.Namespace) -> list[str]:
+    """Build the forwarded CLI argument list for the spatial generator.
+
+    Args:
+        args: Parsed top-level dataset-generation CLI arguments.
+
+    Returns:
+        The spatial-specific forwarded CLI argument list.
+    """
     argv = _common_flags(args)
     if args.output_dir is not None:
         argv.extend(["--output-dir", str(args.output_dir)])
@@ -118,6 +167,14 @@ def _build_spatial_args(args: argparse.Namespace) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI entrypoint for unified input-dataset generation.
+
+    Args:
+        argv: Optional CLI argument override. Defaults to ``sys.argv[1:]``.
+
+    Returns:
+        Process exit code ``0`` on success.
+    """
     relaunch_result = relaunch_with_project_python_if_needed(
         argv,
         script_path=Path(__file__),

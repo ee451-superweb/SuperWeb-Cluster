@@ -1,4 +1,8 @@
-"""Normalize raw benchmark outputs into one human-friendly schema."""
+"""Normalize raw benchmark outputs into one human-friendly schema.
+
+Use this module when method-specific benchmark reports need to be transformed
+into the shared result format consumed by the rest of the project.
+"""
 
 from __future__ import annotations
 
@@ -14,6 +18,7 @@ from typing import Any
 from app.constants import METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION, METHOD_SPATIAL_CONVOLUTION
 from compute_node.performance_metrics.fixed_matrix_vector_multiplication.config import DISPLAY_NAME as FMVM_DISPLAY_NAME
 from compute_node.performance_metrics.spatial_convolution.config import DISPLAY_NAME as SPATIAL_DISPLAY_NAME
+from compute_node.performance_metrics.workload_modes import WORKLOAD_MODE_LARGE
 
 _DEVICE_NOTE_PATTERN = re.compile(r"device=(.+)")
 _QUOTED_DEVICE_PATTERN = re.compile(r"'([^']+)'")
@@ -44,6 +49,17 @@ _CUDA_ARCHITECTURE_BY_SM = {
 
 
 def _literal_list(text: str) -> list[object]:
+    """Safely parse a Python-style list literal embedded in a note string.
+
+    Use this when backend notes store search-space descriptions as text and the
+    normalizer wants to recover the structured values.
+
+    Args:
+        text: String that may contain a literal list or tuple.
+
+    Returns:
+        A list of parsed values, or an empty list if parsing fails.
+    """
     try:
         parsed = ast.literal_eval(text)
     except (SyntaxError, ValueError):
@@ -52,6 +68,17 @@ def _literal_list(text: str) -> list[object]:
 
 
 def _compact_note(note: str) -> str | None:
+    """Reduce one verbose backend note to a portable short summary.
+
+    Use this while normalizing raw backend output so final reports stay readable
+    and avoid storing large amounts of noisy build or probe text.
+
+    Args:
+        note: Raw note emitted by a backend or probe step.
+
+    Returns:
+        A shortened note string, or ``None`` when the note is unhelpful.
+    """
     lowered = note.lower()
     if "cuda backend available" in lowered or "nvcc detected on path" in lowered:
         return None
@@ -111,6 +138,17 @@ def _compact_note(note: str) -> str | None:
 
 
 def _compact_notes(*note_lists: list[str]) -> list[str]:
+    """Compact and deduplicate notes gathered from several backend sources.
+
+    Use this when building normalized backend summaries so the final report only
+    keeps the most useful note fragments.
+
+    Args:
+        *note_lists: One or more note lists from raw benchmark data.
+
+    Returns:
+        Up to three compacted note strings.
+    """
     compacted: list[str] = []
     for notes in note_lists:
         for note in notes:
@@ -121,6 +159,14 @@ def _compact_notes(*note_lists: list[str]) -> list[str]:
 
 
 def _cuda_architecture_name(sm_digits: str | None) -> str | None:
+    """Map an SM version string to a human-readable CUDA architecture name.
+
+    Args:
+        sm_digits: SM version with punctuation removed, such as ``89``.
+
+    Returns:
+        A CUDA architecture family name, or ``None`` if unknown.
+    """
     if not sm_digits:
         return None
     if sm_digits in _CUDA_ARCHITECTURE_BY_SM:
@@ -136,6 +182,17 @@ def _cuda_architecture_name(sm_digits: str | None) -> str | None:
 
 @lru_cache(maxsize=1)
 def _detect_cuda_gpu_inventory() -> list[dict[str, str]]:
+    """Query local NVIDIA GPUs through ``nvidia-smi`` when available.
+
+    Use this only during report normalization to enrich CUDA backend summaries
+    with driver and compute-capability information.
+
+    Args:
+        None.
+
+    Returns:
+        A list of detected NVIDIA GPU descriptors.
+    """
     nvidia_smi = shutil.which("nvidia-smi")
     if not nvidia_smi:
         return []
@@ -172,6 +229,17 @@ def _detect_cuda_gpu_inventory() -> list[dict[str, str]]:
 
 @lru_cache(maxsize=1)
 def _detect_nvcc_version() -> str:
+    """Return the detected CUDA toolkit version reported by ``nvcc``.
+
+    Use this when normalizing CUDA results so reports can mention the compiler
+    environment that likely produced or rebuilt the CUDA runner.
+
+    Args:
+        None.
+
+    Returns:
+        A version string, or ``not detected`` when unavailable.
+    """
     nvcc = shutil.which("nvcc")
     if not nvcc:
         return "not detected"
@@ -192,6 +260,15 @@ def _detect_nvcc_version() -> str:
 
 
 def _extract_sm_digits(raw_backend: dict[str, Any], probe_message: str) -> str | None:
+    """Extract the best-effort SM version from raw backend notes.
+
+    Args:
+        raw_backend: Raw backend report dictionary.
+        probe_message: Probe message emitted before the benchmark ran.
+
+    Returns:
+        The detected SM digits string, or ``None``.
+    """
     note_sources = [
         *[str(item) for item in raw_backend.get("trial_notes", [])],
         *[str(item) for item in raw_backend.get("notes", [])],
@@ -205,6 +282,15 @@ def _extract_sm_digits(raw_backend: dict[str, Any], probe_message: str) -> str |
 
 
 def _cuda_binary_status(raw_backend: dict[str, Any], probe_message: str) -> str:
+    """Summarize whether the CUDA runner binary was reused or rebuilt.
+
+    Args:
+        raw_backend: Raw backend report dictionary.
+        probe_message: Probe message emitted before the benchmark ran.
+
+    Returns:
+        A short status label such as ``available`` or ``recompiled``.
+    """
     note_sources = [probe_message, *[str(item) for item in raw_backend.get("notes", [])]]
     lowered_notes = [note.lower() for note in note_sources]
     if any(
@@ -237,6 +323,19 @@ def _normalize_cuda_environment(
     raw_backend: dict[str, Any],
     probe_message: str,
 ) -> dict[str, str]:
+    """Build the normalized CUDA-environment section for one backend.
+
+    Use this when the backend is CUDA so the normalized report records the most
+    useful driver, architecture, and compiler details in one place.
+
+    Args:
+        device_name: Human-readable GPU device name.
+        raw_backend: Raw backend report dictionary.
+        probe_message: Probe message emitted before the benchmark ran.
+
+    Returns:
+        A dictionary describing the CUDA environment.
+    """
     gpu_inventory = _detect_cuda_gpu_inventory()
     matched_gpu = next((gpu for gpu in gpu_inventory if gpu.get("name") == device_name), None)
     if matched_gpu is None and gpu_inventory:
@@ -258,6 +357,18 @@ def _normalize_cuda_environment(
 
 
 def _extract_search_space(raw_backend: dict[str, Any], probe_message: str) -> dict[str, list[object]]:
+    """Recover autotune search-space lists from backend note strings.
+
+    Use this when normalizing raw reports so the final schema records which
+    candidate values the backend considered during autotune.
+
+    Args:
+        raw_backend: Raw backend report dictionary.
+        probe_message: Probe message emitted before the benchmark ran.
+
+    Returns:
+        A mapping from search-space label to candidate values.
+    """
     search_space: dict[str, list[object]] = {}
     for note in [probe_message, *[str(item) for item in raw_backend.get("notes", [])]]:
         lowered = note.lower()
@@ -290,6 +401,20 @@ def _extract_device_name(
     probe_message: str,
     device_overview: dict[str, Any],
 ) -> str:
+    """Choose a display name for the device used by one backend.
+
+    Use this during normalization so each backend section has a stable device
+    label even if the original raw report format differs by backend.
+
+    Args:
+        backend_name: Logical backend name such as ``cpu`` or ``cuda``.
+        raw_backend: Raw backend report dictionary.
+        probe_message: Probe message emitted before the benchmark ran.
+        device_overview: Top-level host inventory collected for the report.
+
+    Returns:
+        The best-effort human-readable device name.
+    """
     if backend_name == "cpu":
         return str(((device_overview.get("cpu") or {}).get("name")) or backend_name)
 
@@ -314,6 +439,14 @@ def _extract_device_name(
 
 
 def _normalize_trial(raw_trial: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Normalize one raw trial payload into the shared trial schema.
+
+    Args:
+        raw_trial: Raw trial dictionary from a backend report.
+
+    Returns:
+        The normalized trial dictionary, or ``None`` when unavailable.
+    """
     if not isinstance(raw_trial, dict):
         return None
     return {
@@ -333,6 +466,22 @@ def _normalize_backend(
     autotune_plan: dict[str, Any],
     measurement_plan: dict[str, Any],
 ) -> dict[str, Any]:
+    """Normalize one raw backend report into the shared backend schema.
+
+    Use this for every backend inside a method report so downstream code can
+    reason about a stable structure independent of native backend output.
+
+    Args:
+        backend_name: Logical backend name.
+        raw_backend: Raw backend report dictionary.
+        raw_method: Raw method report that owns this backend.
+        device_overview: Top-level host overview for this benchmark.
+        autotune_plan: Normalized autotune workload description.
+        measurement_plan: Normalized measurement workload description.
+
+    Returns:
+        The normalized backend report dictionary.
+    """
     probe = raw_method.get("hardware_inventory", {}).get(backend_name, {})
     probe_message = str(probe.get("probe_message") or "")
     best_config = raw_backend.get("best_config") or raw_backend.get("selected_config")
@@ -371,6 +520,15 @@ def _normalize_backend(
 def _normalize_fixed_matrix_vector_dataset(
     raw_method: dict[str, Any], dataset_root: str | None
 ) -> dict[str, Any]:
+    """Normalize the dataset section for an FMVM method report.
+
+    Args:
+        raw_method: Raw FMVM method report.
+        dataset_root: Portable dataset-root string for the report.
+
+    Returns:
+        The normalized FMVM dataset description.
+    """
     dataset = raw_method.get("dataset", {})
     root_dir = dataset_root or dataset.get("root_dir")
     artifacts = dict(dataset.get("artifacts") or {})
@@ -422,13 +580,36 @@ def _normalize_fixed_matrix_vector_dataset(
 
 
 def _normalize_spatial_dataset(raw_method: dict[str, Any], dataset_root: str | None) -> dict[str, Any]:
+    """Normalize the dataset section for a spatial-convolution report.
+
+    Args:
+        raw_method: Raw spatial-convolution method report.
+        dataset_root: Portable dataset-root string for the report.
+
+    Returns:
+        The normalized spatial dataset description.
+    """
     workload = raw_method.get("workload", {})
+    autotune_variant = str(workload.get("autotune_dataset_variant") or "")
+    measurement_variant = str(workload.get("measurement_dataset_variant") or "")
     full_runtime = bool(workload.get("full_runtime_measurement"))
+    autotune_uses_large_dataset = autotune_variant == WORKLOAD_MODE_LARGE
+    measurement_uses_large_dataset = measurement_variant == WORKLOAD_MODE_LARGE or (
+        not measurement_variant and full_runtime
+    )
     artifacts = {
-        "autotune_input": f"{dataset_root}/test_input.bin" if dataset_root else None,
-        "autotune_weight": f"{dataset_root}/test_weight.bin" if dataset_root else None,
+        "autotune_input": (
+            f"{dataset_root}/runtime_input.bin"
+            if dataset_root and autotune_uses_large_dataset
+            else (f"{dataset_root}/test_input.bin" if dataset_root else None)
+        ),
+        "autotune_weight": (
+            f"{dataset_root}/runtime_weight.bin"
+            if dataset_root and autotune_uses_large_dataset
+            else (f"{dataset_root}/test_weight.bin" if dataset_root else None)
+        ),
     }
-    if full_runtime:
+    if measurement_uses_large_dataset:
         artifacts["measurement_input"] = f"{dataset_root}/runtime_input.bin" if dataset_root else None
         artifacts["measurement_weight"] = f"{dataset_root}/runtime_weight.bin" if dataset_root else None
     else:
@@ -447,6 +628,20 @@ def normalize_method_report(
     dataset_root: str | None,
     device_overview: dict[str, Any],
 ) -> dict[str, Any]:
+    """Normalize one raw method report into the shared report schema.
+
+    Use this from the top-level benchmark normalizer so FMVM and spatial
+    convolution both end up in the same downstream-friendly structure.
+
+    Args:
+        method_name: Logical compute method name.
+        raw_method: Raw method report emitted by the benchmark runner.
+        dataset_root: Portable dataset-root string for the report.
+        device_overview: Top-level host overview for this benchmark.
+
+    Returns:
+        The normalized method report dictionary.
+    """
     if method_name == METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION:
         display_name = FMVM_DISPLAY_NAME
         dataset = _normalize_fixed_matrix_vector_dataset(raw_method, dataset_root)
@@ -459,11 +654,13 @@ def normalize_method_report(
             or f"fmvm-{autotune_shape.get('rows')}x{autotune_shape.get('cols')}",
             "rows": autotune_shape.get("rows"),
             "cols": autotune_shape.get("cols"),
+            "dataset_variant": raw_workload.get("autotune_dataset_variant"),
             "autotune_repeats": raw_workload.get("autotune_repeats"),
             "selection_metric": raw_workload.get("selection_metric"),
             "input_dtype": raw_workload.get("input_dtype"),
             "output_dtype": raw_workload.get("output_dtype"),
             "accumulation_precision": raw_workload.get("accumulation_precision"),
+            "workload_mode": raw_workload.get("workload_mode"),
         }
         measurement_plan = {
             **dict(raw_workload.get("measurement") or {}),
@@ -471,10 +668,12 @@ def normalize_method_report(
             or f"fmvm-{measurement_shape.get('rows')}x{measurement_shape.get('cols')}",
             "rows": measurement_shape.get("rows"),
             "cols": measurement_shape.get("cols"),
+            "dataset_variant": raw_workload.get("measurement_dataset_variant"),
             "measurement_repeats": raw_workload.get("measurement_repeats"),
             "reported_metric": raw_workload.get("reported_metric"),
             "cross_backend_validation": raw_workload.get("cross_backend_validation"),
             "full_runtime_measurement": bool(raw_workload.get("full_runtime_measurement")),
+            "workload_mode": raw_workload.get("workload_mode"),
         }
     else:
         display_name = SPATIAL_DISPLAY_NAME
@@ -482,12 +681,16 @@ def normalize_method_report(
         raw_workload = raw_method.get("workload", {})
         autotune_plan = {
             **dict(raw_workload.get("autotune") or {}),
+            "dataset_variant": raw_workload.get("autotune_dataset_variant"),
             "autotune_repeats": raw_workload.get("autotune_repeats"),
+            "workload_mode": raw_workload.get("workload_mode"),
         }
         measurement_plan = {
             **dict(raw_workload.get("measurement") or {}),
+            "dataset_variant": raw_workload.get("measurement_dataset_variant"),
             "measurement_repeats": raw_workload.get("measurement_repeats"),
             "full_runtime_measurement": bool(raw_workload.get("full_runtime_measurement")),
+            "workload_mode": raw_workload.get("workload_mode"),
         }
 
     raw_backends = (
@@ -533,6 +736,16 @@ def build_report(
     device_overview: dict[str, Any],
     total_elapsed: float,
 ) -> dict[str, Any]:
+    """Assemble the final normalized multi-method benchmark report.
+
+    Args:
+        method_reports: Normalized method reports keyed by method name.
+        device_overview: Top-level host overview for this benchmark.
+        total_elapsed: Total wall-clock time for the benchmark run.
+
+    Returns:
+        The final report dictionary written by the top-level CLI.
+    """
     return {
         "schema_version": 5,
         "generated_at_unix": time.time(),

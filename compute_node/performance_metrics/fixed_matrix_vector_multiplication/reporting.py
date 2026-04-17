@@ -1,4 +1,8 @@
-"""Report assembly helpers for the benchmark entrypoint."""
+"""Assemble raw FMVM benchmark results into the method report schema.
+
+Use this module after FMVM backends finish running so the benchmark can rank
+backends, serialize their results, and emit one method-local report payload.
+"""
 
 from __future__ import annotations
 
@@ -14,7 +18,17 @@ from compute_node.performance_metrics.fixed_matrix_vector_multiplication.models 
 
 
 def trial_sort_key(result) -> tuple[float, float]:
-    """Order backend best-trials from strongest to weakest."""
+    """Order backend best-trials from strongest to weakest.
+
+    Use this when ranking FMVM backends so higher score wins, with lower
+    latency breaking ties among equal scores.
+
+    Args:
+        result: Backend-result object produced by the benchmark runner.
+
+    Returns:
+        A tuple suitable for sorting backend results.
+    """
 
     if result.best_trial is None:
         return (float("-inf"), float("inf"))
@@ -22,7 +36,15 @@ def trial_sort_key(result) -> tuple[float, float]:
 
 
 def serialize_backend_result(result, rank_lookup: dict[str, int]) -> dict[str, object]:
-    """Convert one backend summary into the JSON layout consumed by result.json."""
+    """Convert one backend summary into the JSON layout consumed by ``result.json``.
+
+    Args:
+        result: Backend-result object produced by the benchmark runner.
+        rank_lookup: Mapping from backend name to overall ranking position.
+
+    Returns:
+        The serialized backend section for the FMVM report.
+    """
 
     autotune_trial = result.autotune_trial
     best_trial = result.best_trial
@@ -59,7 +81,14 @@ def serialize_backend_result(result, rank_lookup: dict[str, int]) -> dict[str, o
 
 
 def probe_backends(backends: list[object]) -> dict[str, dict[str, object]]:
-    """Ask each backend whether it looks usable on this machine before running it."""
+    """Ask each backend whether it looks usable on this machine before running it.
+
+    Args:
+        backends: Backend objects that expose a ``probe()`` method.
+
+    Returns:
+        A mapping of backend name to probe availability and message.
+    """
 
     inventory: dict[str, dict[str, object]] = {}
     for backend in backends:
@@ -80,6 +109,9 @@ def build_report(
     measurement_dataset,
     autotune_spec,
     measurement_spec,
+    workload_mode: str,
+    autotune_dataset_variant: str,
+    measurement_dataset_variant: str,
     full_runtime_measurement: bool,
     dataset_was_generated: bool,
     hardware_inventory: dict[str, dict[str, object]],
@@ -89,7 +121,34 @@ def build_report(
     to_relative_string,
     root_dir,
 ) -> dict[str, object]:
-    """Assemble the JSON-serializable benchmark summary."""
+    """Assemble the FMVM JSON-serializable benchmark summary.
+
+    Use this once all FMVM backends have finished so the method-local report has
+    one stable schema regardless of which backends were available.
+
+    Args:
+        method: Logical method name.
+        total_elapsed: Total wall-clock time spent benchmarking the method.
+        force_rebuild: Whether backend binaries were forced to rebuild.
+        autotune_dataset: Dataset layout used during autotune.
+        measurement_dataset: Dataset layout used during final measurement.
+        autotune_spec: Benchmark spec used during autotune.
+        measurement_spec: Benchmark spec used during final measurement.
+        workload_mode: Requested workload mode.
+        autotune_dataset_variant: Dataset variant used during autotune.
+        measurement_dataset_variant: Dataset variant used during final measurement.
+        full_runtime_measurement: Whether the run used small autotune plus large measurement.
+        dataset_was_generated: Whether missing datasets were generated on demand.
+        hardware_inventory: Probe results keyed by backend name.
+        detected_backends: Backends that passed probe.
+        backend_results: Backend-result objects produced during the run.
+        backends: Backend objects considered by the run.
+        to_relative_string: Path-normalization helper for report output.
+        root_dir: Project-relative base directory for path normalization.
+
+    Returns:
+        The FMVM method report dictionary.
+    """
 
     ranked_backend_results = [
         result for result in sorted(backend_results, key=trial_sort_key, reverse=True) if result.best_trial is not None
@@ -107,6 +166,7 @@ def build_report(
         "generated_at_unix": time.time(),
         "benchmark_elapsed_seconds": total_elapsed,
         "workload": {
+            "workload_mode": workload_mode,
             "autotune": {
                 "name": autotune_spec.name,
                 "rows": autotune_spec.rows,
@@ -118,7 +178,9 @@ def build_report(
                 "cols": measurement_spec.cols,
             },
             "autotune_repeats": DEFAULT_AUTOTUNE_REPEATS,
-            "measurement_repeats": 1 if full_runtime_measurement else DEFAULT_MEASUREMENT_REPEATS,
+            "measurement_repeats": (
+                1 if measurement_dataset_variant == "large" else DEFAULT_MEASUREMENT_REPEATS
+            ),
             "selection_metric": "autotune_average_latency",
             "reported_metric": "measurement_average_latency",
             "force_rebuild": force_rebuild,
@@ -126,6 +188,8 @@ def build_report(
             "output_dtype": "fp32",
             "accumulation_precision": autotune_spec.accumulation_precision or DEFAULT_ACCUMULATION_PRECISION,
             "cross_backend_validation": "fp32_tolerance",
+            "autotune_dataset_variant": autotune_dataset_variant,
+            "measurement_dataset_variant": measurement_dataset_variant,
             "full_runtime_measurement": full_runtime_measurement,
         },
         "host": {

@@ -10,20 +10,6 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
-!compute_node/compute_methods/fixed_matrix_vector_multiplication/cpu/macos/build/
-compute_node/compute_methods/fixed_matrix_vector_multiplication/cpu/macos/build/*
-!compute_node/compute_methods/fixed_matrix_vector_multiplication/cpu/macos/build/fmvm_cpu_macos
-!compute_node/compute_methods/fixed_matrix_vector_multiplication/cpu/windows/build/
-compute_node/compute_methods/fixed_matrix_vector_multiplication/cpu/windows/build/*
-!compute_node/compute_methods/fixed_matrix_vector_multiplication/cpu/windows/build/fmvm_cpu_windows.exe
-!compute_node/compute_methods/fixed_matrix_vector_multiplication/cuda/build/
-compute_node/compute_methods/fixed_matrix_vector_multiplication/cuda/build/*
-!compute_node/compute_methods/fixed_matrix_vector_multiplication/cuda/build/fmvm_cuda_runner.exe
-!compute_node/compute_methods/fixed_matrix_vector_multiplication/dx12/build/
-compute_node/compute_methods/fixed_matrix_vector_multiplication/dx12/build/*
-!compute_node/compute_methods/fixed_matrix_vector_multiplication/metal/build/
-compute_node/compute_methods/fixed_matrix_vector_multiplication/metal/build/*
-!compute_node/compute_methods/fixed_matrix_vector_multiplication/metal/build/fmvm_metal_runner
 develop-eggs/
 dist/
 downloads/
@@ -238,19 +224,31 @@ __marimo__/
 /compute_node/compute_methods/**/artifacts/
 
 # Local build artifacts from compute methods
-/compute_node/compute_methods/**/performance_metrics/conv2d_runners/**/build/
-!/compute_node/compute_methods/spatial_convolution/performance_metrics/conv2d_runners/cpu/windows/build/
-/compute_node/compute_methods/spatial_convolution/performance_metrics/conv2d_runners/cpu/windows/build/*
-!/compute_node/compute_methods/spatial_convolution/performance_metrics/conv2d_runners/cpu/windows/build/fmvm_cpu_windows.exe
-!/compute_node/compute_methods/spatial_convolution/performance_metrics/conv2d_runners/cuda/build/
-/compute_node/compute_methods/spatial_convolution/performance_metrics/conv2d_runners/cuda/build/*
-!/compute_node/compute_methods/spatial_convolution/performance_metrics/conv2d_runners/cuda/build/fmvm_cuda_runner.exe
+!/compute_node/compute_methods/**/build/
+/compute_node/compute_methods/**/build/*
+!/compute_node/compute_methods/**/build/*.cmd
+# Git cannot enforce file size limits here, so we explicitly whitelist only the
+# runner binaries that are currently verified to stay below 4 MB.
+!/compute_node/compute_methods/fixed_matrix_vector_multiplication/cpu/macos/build/fmvm_cpu_macos
+!/compute_node/compute_methods/fixed_matrix_vector_multiplication/cpu/windows/build/fmvm_cpu_windows.exe
+!/compute_node/compute_methods/fixed_matrix_vector_multiplication/cuda/build/fmvm_cuda_runner.exe
+!/compute_node/compute_methods/fixed_matrix_vector_multiplication/metal/build/fmvm_metal_runner
+!/compute_node/compute_methods/spatial_convolution/cpu/macos/build/spatial_conv_cpu_macos
+!/compute_node/compute_methods/spatial_convolution/cpu/windows/build/spatial_conv_cpu_windows.exe
+!/compute_node/compute_methods/spatial_convolution/cuda/build/spatial_conv_cuda_runner.exe
+!/compute_node/compute_methods/spatial_convolution/dx12/build/spatial_conv_dx12_runner.exe
+!/compute_node/compute_methods/spatial_convolution/metal/build/spatial_conv_metal_runner
 /compute_node/compute_methods/**/*.obj
+/compute_node/compute_methods/**/*.o
+/compute_node/compute_methods/**/*.a
 /compute_node/compute_methods/**/*.ilk
 /compute_node/compute_methods/**/*.pdb
 /compute_node/compute_methods/**/*.lib
 /compute_node/compute_methods/**/*.exp
-/compute_node/compute_methods/**/build_fmvm_*.cmd
+/compute_node/compute_methods/**/*.dll
+/compute_node/compute_methods/**/*.so
+/compute_node/compute_methods/**/*.dylib
+/compute_node/compute_methods/**/*.pyd
 /compute_node/compute_methods/**/fmvm_cpu_output.bin
 /compute_node/compute_methods/**/fmvm_cuda_output.bin
 /compute_node/compute_methods/**/fmvm_dx12_output.bin

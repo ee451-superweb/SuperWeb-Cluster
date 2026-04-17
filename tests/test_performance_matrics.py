@@ -25,7 +25,8 @@ PERF_DIR = (
 
 from compute_node.performance_metrics import benchmark
 from compute_node.performance_metrics import result_format
-from compute_node.compute_methods.spatial_convolution.performance_metrics import backends as spatial_backend_registry
+from compute_node.performance_metrics.spatial_convolution import benchmark as spatial_benchmark
+from compute_node.performance_metrics.spatial_convolution import backends as spatial_backend_registry
 from compute_node.performance_metrics.fixed_matrix_vector_multiplication import backends as backend_registry
 from compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.cpu_backend import (
     CpuArtifacts,
@@ -40,6 +41,9 @@ from compute_node.performance_metrics.fixed_matrix_vector_multiplication.backend
     _candidate_tile_sizes as cuda_candidate_tile_sizes,
     _candidate_transpose_modes as cuda_candidate_transpose_modes,
     _windows_gencode_args,
+)
+from compute_node.performance_metrics.spatial_convolution.backends.cuda_backend import (
+    CudaBackend as SpatialCudaBackend,
 )
 from compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.metal_backend import (
     MetalBackend,
@@ -62,11 +66,18 @@ from compute_node.input_matrix.spatial_convolution import (
     build_input_matrix_spec as build_conv_input_matrix_spec,
     dataset_is_generated as conv_dataset_is_generated,
     generate_dataset as generate_conv_dataset,
+    get_test_input_matrix_spec as get_conv_test_input_matrix_spec,
+)
+from compute_node.input_matrix.fixed_matrix_vector_multiplication import (
+    get_test_input_matrix_spec as get_fmvm_test_input_matrix_spec,
 )
 from compute_node.input_matrix.spatial_convolution import generate as spatial_generate_cli
 from compute_node.performance_metrics.fixed_matrix_vector_multiplication.models import (
     DEFAULT_AUTOTUNE_REPEATS,
     DEFAULT_MEASUREMENT_REPEATS,
+)
+from compute_node.performance_metrics.spatial_convolution.models import (
+    BenchmarkSpec as SpatialBenchmarkSpec,
 )
 from compute_node.performance_metrics.path_utils import to_relative_cli_path
 from compute_node.performance_metrics.fixed_matrix_vector_multiplication.scoring import linear_time_score
@@ -74,6 +85,7 @@ from compute_node.performance_metrics.fixed_matrix_vector_multiplication.workloa
 import subprocess
 
 from app.constants import DX12_BACKEND_DISABLED_REASON, METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION, METHOD_SPATIAL_CONVOLUTION
+from tests.support import require_integration
 
 
 class PerformanceMatricsTests(unittest.TestCase):
@@ -95,6 +107,28 @@ class PerformanceMatricsTests(unittest.TestCase):
     def test_benchmark_parser_defaults_to_all_methods(self) -> None:
         args = benchmark.build_parser().parse_args([])
         self.assertEqual(args.method, "all")
+
+    def test_benchmark_parser_accepts_workload_mode(self) -> None:
+        args = benchmark.build_parser().parse_args(["--workload-mode", "large"])
+        self.assertEqual(args.workload_mode, "large")
+
+    def test_spatial_benchmark_parser_accepts_cuda_channel_batch_flags(self) -> None:
+        args = spatial_benchmark.build_parser().parse_args(
+            [
+                "--workload-mode",
+                "small",
+                "--output-channel-batch",
+                "8",
+                "--output-channel-batch-scale",
+                "0.75",
+                "--cooldown-ms",
+                "2.5",
+            ]
+        )
+        self.assertEqual(args.workload_mode, "small")
+        self.assertEqual(args.output_channel_batch, 8)
+        self.assertEqual(args.output_channel_batch_scale, 0.75)
+        self.assertEqual(args.cooldown_ms, 2.5)
 
     def test_input_matrix_cli_defaults_to_all_methods(self) -> None:
         args = input_matrix_generate_cli.build_parser().parse_args([])
@@ -146,7 +180,7 @@ class PerformanceMatricsTests(unittest.TestCase):
                         "score": 1000.0,
                     },
                     "notes": [
-                        "compiled CUDA runner from conv2d_runners/cuda/fmvm_cuda_runner.cu; fatbin SMs: sm_75, sm_89",
+                        "compiled CUDA runner from compute_node/compute_methods/spatial_convolution/cuda/spatial_conv_cuda_runner.cu; fatbin SMs: sm_75, sm_89",
                         "Autotuned on test-conv2d and measured on runtime-conv2d.",
                     ],
                     "trial_notes": ["device=NVIDIA GeForce RTX 4060 Laptop GPU"],
@@ -233,11 +267,11 @@ class PerformanceMatricsTests(unittest.TestCase):
     def test_spatial_windows_default_backend_order_routes_gpu_by_display_adapter(self) -> None:
         with (
             mock.patch(
-                "compute_node.compute_methods.spatial_convolution.performance_metrics.backends.os.name",
+                "compute_node.performance_metrics.spatial_convolution.backends.os.name",
                 "nt",
             ),
             mock.patch(
-                "compute_node.compute_methods.spatial_convolution.performance_metrics.backends.detect_nvidia_windows_adapter",
+                "compute_node.performance_metrics.spatial_convolution.backends.detect_nvidia_windows_adapter",
                 return_value=("NVIDIA GeForce RTX 4060 Laptop GPU", ""),
             ),
         ):
@@ -311,6 +345,14 @@ class PerformanceMatricsTests(unittest.TestCase):
         self.assertEqual(spec.matrix_bytes, 2 * 1024**3)
         self.assertEqual(spec.vector_bytes, 32_768 * 4)
 
+    def test_small_default_workloads_are_doubled(self) -> None:
+        fmvm_spec = get_fmvm_test_input_matrix_spec()
+        conv_spec = get_conv_test_input_matrix_spec()
+
+        self.assertEqual((fmvm_spec.rows, fmvm_spec.cols), (4_096, 8_192))
+        self.assertEqual((conv_spec.h, conv_spec.w), (512, 512))
+        self.assertEqual((conv_spec.c_in, conv_spec.c_out), (64, 128))
+
     def test_generate_dataset_with_small_override(self) -> None:
         spec = build_input_matrix_spec(rows=8, cols=16)
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -364,6 +406,41 @@ class PerformanceMatricsTests(unittest.TestCase):
             self.assertEqual(layout.input_path.stat().st_size, spec.input_bytes)
             self.assertEqual(layout.weight_path.stat().st_size, spec.weight_bytes)
 
+    def test_normalize_spatial_dataset_uses_runtime_artifacts_for_large_only_mode(self) -> None:
+        raw_method = {
+            "workload": {
+                "autotune_dataset_variant": "large",
+                "measurement_dataset_variant": "large",
+                "full_runtime_measurement": False,
+            }
+        }
+
+        normalized = result_format.normalize_method_report(
+            method_name=METHOD_SPATIAL_CONVOLUTION,
+            raw_method=raw_method,
+            dataset_root="compute_node/input_matrix/spatial_convolution/generated",
+            device_overview={},
+        )
+
+        dataset = normalized["dataset"]
+        self.assertEqual(
+            dataset["artifacts"]["autotune_input"],
+            "compute_node/input_matrix/spatial_convolution/generated/runtime_input.bin",
+        )
+        self.assertEqual(
+            dataset["artifacts"]["autotune_weight"],
+            "compute_node/input_matrix/spatial_convolution/generated/runtime_weight.bin",
+        )
+        self.assertEqual(
+            dataset["artifacts"]["measurement_input"],
+            "compute_node/input_matrix/spatial_convolution/generated/runtime_input.bin",
+        )
+        self.assertEqual(
+            dataset["artifacts"]["measurement_weight"],
+            "compute_node/input_matrix/spatial_convolution/generated/runtime_weight.bin",
+        )
+
+    @require_integration("Dataset override flow is validated through a real benchmark run.")
     def test_small_override_uses_override_dataset_directory_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
@@ -394,6 +471,7 @@ class PerformanceMatricsTests(unittest.TestCase):
         dataset_root = Path(method_report["dataset"]["root_dir"])
         self.assertEqual(dataset_root.parts[-3:], ("generated", "overrides", "8x16"))
 
+    @require_integration("Real benchmark execution is reserved for integration runs.")
     def test_benchmark_auto_generates_and_runs_cpu(self) -> None:
         backend = CpuBackend()
         available, _message = backend.probe()
@@ -559,6 +637,60 @@ class PerformanceMatricsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, re.escape(DX12_BACKEND_DISABLED_REASON)):
             spatial_backend_registry.build_backends(["dx12"])
 
+    def test_spatial_cuda_runner_command_includes_batch_candidates_and_cooldown_flags(self) -> None:
+        backend = SpatialCudaBackend()
+        spec = SpatialBenchmarkSpec(
+            name="unit-test",
+            h=8,
+            w=8,
+            c_in=4,
+            c_out=8,
+            k=3,
+            pad=1,
+            ideal_seconds=1.0,
+            zero_score_seconds=5.0,
+            stride=1,
+        )
+        layout = build_conv_dataset_layout(Path("C:/tmp/generated"), prefix="test_")
+        captured: dict[str, list[str]] = {}
+
+        def fake_run(command, **kwargs):
+            captured["command"] = list(command)
+            return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+        with (
+            mock.patch(
+                "compute_node.performance_metrics.spatial_convolution.backends.cuda_backend.SPATIAL_CUDA_OUTPUT_CHANNEL_BATCH_OVERRIDE",
+                (8,),
+            ),
+            mock.patch(
+                "compute_node.performance_metrics.spatial_convolution.backends.cuda_backend.SPATIAL_CUDA_COOLDOWN_MS",
+                2.5,
+            ),
+            mock.patch(
+                "compute_node.performance_metrics.spatial_convolution.backends.cuda_backend.subprocess.run",
+                side_effect=fake_run,
+            ),
+        ):
+            backend._run_runner(
+                Path("C:/tmp/fake_runner.exe"),
+                spec,
+                layout,
+                block_sizes=[64],
+                tile_sizes=[8],
+                transpose_modes=[0],
+                output_channel_batches=[8],
+                autotune_repeats=1,
+                measurement_repeats=1,
+                timeout_seconds=30.0,
+            )
+
+        command = captured["command"]
+        self.assertIn("--output-channel-batches", command)
+        self.assertEqual(command[command.index("--output-channel-batches") + 1], "8")
+        self.assertIn("--cooldown-ms", command)
+        self.assertEqual(command[command.index("--cooldown-ms") + 1], "2.5")
+
     def test_metal_backend_probe_returns_status(self) -> None:
         backend = MetalBackend()
         available, message = backend.probe()
@@ -601,6 +733,7 @@ class PerformanceMatricsTests(unittest.TestCase):
         self.assertGreater(result.best_trial.effective_gflops, 0.0)
         self.assertTrue(result.best_trial.checksum.startswith("fnv1a64:"))
 
+    @require_integration("Cross-backend runner comparisons are reserved for integration runs.")
     def test_cpu_and_metal_match_within_fp32_tolerance_on_small_override(self) -> None:
         cpu_backend = CpuBackend()
         metal_backend = MetalBackend()
@@ -674,6 +807,7 @@ class PerformanceMatricsTests(unittest.TestCase):
         self.assertLessEqual(max_abs_error, 1e-3)
         self.assertLessEqual(max_rel_error, 1e-2)
 
+    @require_integration("Cross-backend runner comparisons are reserved for integration runs.")
     def test_cpu_and_cuda_match_within_fp32_tolerance_on_small_override(self) -> None:
         cpu_backend = CpuBackend()
         cuda_backend = CudaBackend()

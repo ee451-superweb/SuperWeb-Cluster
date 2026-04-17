@@ -17,6 +17,7 @@ import subprocess
 
 
 def _adapter_identity(adapter: dict[str, str]) -> str:
+    """Build a lowercase identity string used for adapter classification."""
     parts = (
         str(adapter.get("Name") or "").strip(),
         str(adapter.get("AdapterCompatibility") or "").strip(),
@@ -26,6 +27,7 @@ def _adapter_identity(adapter: dict[str, str]) -> str:
 
 
 def _is_software_adapter(adapter: dict[str, str]) -> bool:
+    """Return whether one adapter entry looks like a software renderer."""
     identity = _adapter_identity(adapter)
     return "microsoft basic" in identity or "software" in identity
 

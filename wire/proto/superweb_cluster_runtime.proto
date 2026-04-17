@@ -15,6 +15,10 @@ enum MessageKind {
   TASK_ACCEPT = 9;
   TASK_FAIL = 10;
   TASK_RESULT = 11;
+  ARTIFACT_RELEASE = 12;
+  WORKER_UPDATE = 13;
+  CLIENT_INFO_REQUEST = 14;
+  CLIENT_INFO_REPLY = 15;
 }
 
 message HardwareProfile {
@@ -66,14 +70,59 @@ message Heartbeat {
   uint64 unix_time_ms = 2;
 }
 
+enum NodeStatus {
+  NODE_STATUS_UNKNOWN = 0;
+  NODE_STATUS_IDLE = 1;
+  NODE_STATUS_BUSY = 2;
+  NODE_STATUS_ERROR = 3;
+}
+
+enum TransferMode {
+  TRANSFER_MODE_UNSPECIFIED = 0;
+  INLINE_PREFERRED = 1;
+  ARTIFACT_PREFERRED = 2;
+  ARTIFACT_REQUIRED = 3;
+}
+
 message HeartbeatOk {
   string node_name = 1;
   uint64 heartbeat_unix_time_ms = 2;
   uint64 received_unix_time_ms = 3;
+  repeated string active_task_ids = 4;
+  NodeStatus node_status = 5;
+  uint64 completed_task_count = 6;
+  string node_id = 7;
 }
 
 message ClientJoin {
   string client_name = 1;
+}
+
+message ClientInfoRequest {
+  string client_id = 1;
+  string client_name = 2;
+  uint64 timestamp_ms = 3;
+}
+
+message ClientInfoReply {
+  string client_id = 1;
+  uint64 request_timestamp_ms = 2;
+  uint64 reply_timestamp_ms = 3;
+  uint64 timeout_ms = 4;
+  bool has_active_tasks = 5;
+  repeated string active_request_ids = 6;
+}
+
+message ArtifactDescriptor {
+  string artifact_id = 1;
+  string content_type = 2;
+  uint64 size_bytes = 3;
+  string checksum = 4;
+  string producer_node_id = 5;
+  string transfer_host = 6;
+  uint32 transfer_port = 7;
+  uint32 chunk_size = 8;
+  bool ready = 9;
 }
 
 message ClientRequest {
@@ -84,10 +133,12 @@ message ClientRequest {
   string object_id = 4;
   string stream_id = 5;
   uint64 timestamp_ms = 6;
-  uint32 vector_length = 7;
-  bytes vector_data = 8;
   // How many times the cluster should execute the same computation request.
-  uint32 iteration_count = 9;
+  uint32 iteration_count = 7;
+  oneof request_payload {
+    FixedMatrixVectorRequestPayload fixed_matrix_vector_multiplication = 8;
+    SpatialConvolutionRequestPayload spatial_convolution = 9;
+  }
 }
 
 message ClientResponse {
@@ -98,15 +149,17 @@ message ClientResponse {
   uint64 timestamp_ms = 5;
   uint32 status_code = 6;
   string error_message = 7;
-  uint32 output_length = 8;
-  bytes output_vector = 9;
-  uint32 worker_count = 10;
-  uint32 client_count = 11;
+  uint32 worker_count = 8;
+  uint32 client_count = 9;
   // Runtime id assigned by the main node, for example "client-1".
-  string client_id = 12;
+  string client_id = 10;
   // Echoes the iteration_count from the matching ClientRequest.
-  uint32 iteration_count = 13;
-  string result_artifact_id = 14;
+  uint32 iteration_count = 11;
+  oneof response_payload {
+    FixedMatrixVectorResponsePayload fixed_matrix_vector_multiplication = 12;
+    SpatialConvolutionResponsePayload spatial_convolution = 13;
+  }
+  ArtifactDescriptor result_artifact = 14;
 }
 
 message TaskAssign {
@@ -118,22 +171,15 @@ message TaskAssign {
   string object_id = 5;
   string stream_id = 6;
   uint64 timestamp_ms = 7;
-  uint32 row_start = 8;
-  uint32 row_end = 9;
-  uint32 vector_length = 10;
-  bytes vector_data = 11;
   // How many times the assigned processor slice should execute this math.
-  uint32 iteration_count = 12;
-  uint32 start_oc = 13;
-  uint32 end_oc = 14;
-  uint32 tensor_h = 15;
-  uint32 tensor_w = 16;
-  uint32 channels_in = 17;
-  uint32 channels_out = 18;
-  uint32 kernel_size = 19;
-  uint32 padding = 20;
-  uint32 stride = 21;
-  bytes weight_data = 22;
+  uint32 iteration_count = 8;
+  oneof task_payload {
+    FixedMatrixVectorTaskPayload fixed_matrix_vector_multiplication = 9;
+    SpatialConvolutionTaskPayload spatial_convolution = 10;
+  }
+  TransferMode transfer_mode = 11;
+  string artifact_id = 13;
+  uint64 artifact_timeout_ms = 14;
 }
 
 message TaskAccept {
@@ -159,17 +205,89 @@ message TaskResult {
   string task_id = 3;
   uint64 timestamp_ms = 4;
   uint32 status_code = 5;
-  uint32 row_start = 6;
-  uint32 row_end = 7;
-  uint32 output_length = 8;
-  bytes output_vector = 9;
   // Echoes the iteration_count from the matching TaskAssign.
-  uint32 iteration_count = 10;
-  uint32 start_oc = 11;
-  uint32 end_oc = 12;
-  uint32 output_h = 13;
-  uint32 output_w = 14;
-  string result_artifact_id = 15;
+  uint32 iteration_count = 6;
+  oneof result_payload {
+    FixedMatrixVectorResultPayload fixed_matrix_vector_multiplication = 7;
+    SpatialConvolutionResultPayload spatial_convolution = 8;
+  }
+  ArtifactDescriptor result_artifact = 9;
+}
+
+message ArtifactRelease {
+  string node_id = 1;
+  string task_id = 2;
+  string artifact_id = 4;
+  uint64 timestamp_ms = 5;
+}
+
+message WorkerUpdate {
+  string node_id = 1;
+  uint64 timestamp_ms = 2;
+  ComputePerformanceSummary performance = 3;
+}
+
+message FixedMatrixVectorRequestPayload {
+  uint32 vector_length = 1;
+  bytes vector_data = 2;
+}
+
+message SpatialConvolutionRequestPayload {
+  uint32 tensor_h = 1;
+  uint32 tensor_w = 2;
+  uint32 channels_in = 3;
+  uint32 channels_out = 4;
+  uint32 kernel_size = 5;
+  uint32 padding = 6;
+  uint32 stride = 7;
+}
+
+message FixedMatrixVectorResponsePayload {
+  uint32 output_length = 1;
+  bytes output_vector = 2;
+}
+
+message SpatialConvolutionResponsePayload {
+  uint32 output_length = 1;
+  bytes output_vector = 2;
+  string result_artifact_id = 3;
+}
+
+message FixedMatrixVectorTaskPayload {
+  uint32 row_start = 1;
+  uint32 row_end = 2;
+  uint32 vector_length = 3;
+  bytes vector_data = 4;
+}
+
+message SpatialConvolutionTaskPayload {
+  uint32 start_oc = 1;
+  uint32 end_oc = 2;
+  uint32 tensor_h = 3;
+  uint32 tensor_w = 4;
+  uint32 channels_in = 5;
+  uint32 channels_out = 6;
+  uint32 kernel_size = 7;
+  uint32 padding = 8;
+  uint32 stride = 9;
+  bytes weight_data = 10;
+}
+
+message FixedMatrixVectorResultPayload {
+  uint32 row_start = 1;
+  uint32 row_end = 2;
+  uint32 output_length = 3;
+  bytes output_vector = 4;
+}
+
+message SpatialConvolutionResultPayload {
+  uint32 start_oc = 1;
+  uint32 end_oc = 2;
+  uint32 output_h = 3;
+  uint32 output_w = 4;
+  uint32 output_length = 5;
+  bytes output_vector = 6;
+  string result_artifact_id = 7;
 }
 
 message RuntimeEnvelope {
@@ -185,4 +303,8 @@ message RuntimeEnvelope {
   TaskAccept task_accept = 10;
   TaskFail task_fail = 11;
   TaskResult task_result = 12;
+  ArtifactRelease artifact_release = 13;
+  WorkerUpdate worker_update = 14;
+  ClientInfoRequest client_info_request = 15;
+  ClientInfoReply client_info_reply = 16;
 }

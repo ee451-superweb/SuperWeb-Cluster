@@ -12,6 +12,7 @@ from app.constants import (
     DEFAULT_MULTICAST_GROUP,
     DEFAULT_MULTICAST_TTL,
 )
+from tests.support import require_integration
 from discovery.multicast import (
     close,
     create_receiver,
@@ -21,7 +22,7 @@ from discovery.multicast import (
     recv_packet,
     send_discover,
 )
-from wire.discovery import build_discover_message
+from wire.discovery_protocol.discovery import build_discover_message
 
 
 class MulticastTests(unittest.TestCase):
@@ -43,8 +44,6 @@ class MulticastTests(unittest.TestCase):
         resolve_multicast_interface_ip_mock.return_value = "192.168.1.10"
 
         endpoint = create_sender(AppConfig())
-        print("[UNIT] mocked_sender_interface_ip=192.168.1.10", flush=True)
-        print(f"[UNIT] mocked_sender_target={DEFAULT_MULTICAST_GROUP}:{DEFAULT_DISCOVERY_PORT}", flush=True)
         self.assertIs(endpoint.sock, fake_socket)
         fake_socket.bind.assert_called_once()
         configure_multicast_sender_mock.assert_called_once_with(
@@ -73,8 +72,6 @@ class MulticastTests(unittest.TestCase):
         configure_multicast_receiver_mock.return_value = b"membership"
 
         endpoint = create_receiver(AppConfig())
-        print("[UNIT] mocked_receiver_interface_ip=192.168.1.10", flush=True)
-        print(f"[UNIT] mocked_receiver_bind=0.0.0.0:{DEFAULT_DISCOVERY_PORT}", flush=True)
 
         self.assertIs(endpoint.sock, fake_socket)
         self.assertEqual(endpoint.membership, b"membership")
@@ -114,9 +111,6 @@ class MulticastTests(unittest.TestCase):
         endpoint.sock = mock.Mock()
         payload = build_discover_message(config.node_name)
 
-        print(f"[UNIT] multicast_sender_payload={payload}", flush=True)
-        print(f"[UNIT] multicast_sender_target={config.multicast_group}:{config.udp_port}", flush=True)
-
         send_discover(endpoint, config, config.node_name)
 
         endpoint.sock.sendto.assert_called_once_with(
@@ -124,48 +118,29 @@ class MulticastTests(unittest.TestCase):
             (config.multicast_group, config.udp_port),
         )
 
-    def test_live_multicast_sender_prints_actual_ip_and_payload(self) -> None:
+    @require_integration("Live multicast probes are reserved for integration runs.")
+    def test_live_multicast_sender_can_send_probe(self) -> None:
         config = AppConfig(node_name="unit-live-probe", discovery_timeout=0.2)
-        primary_ip = network.resolve_local_ip()
-        interface_ip = network.resolve_multicast_interface_ip(config.multicast_group, config.udp_port)
-        payload = build_discover_message(config.node_name)
-
         endpoint = create_sender(config)
         try:
             local_host, local_port = endpoint.sock.getsockname()
-            print(f"[LIVE] primary_local_ip={primary_ip}", flush=True)
-            print(f"[LIVE] multicast_interface_ip={interface_ip or '(default)'}", flush=True)
-            print(f"[LIVE] multicast_sender_socket={local_host}:{local_port}", flush=True)
-            print(f"[LIVE] multicast_sender_target={config.multicast_group}:{config.udp_port}", flush=True)
-            print(f"[LIVE] multicast_sender_payload={payload}", flush=True)
-
             send_discover(endpoint, config, config.node_name)
 
-            print("[LIVE] multicast_send_result=packet sent", flush=True)
+            self.assertIsInstance(local_host, str)
             self.assertGreater(local_port, 0)
         finally:
             close(endpoint)
 
+    @require_integration("Live multicast loopback checks are reserved for integration runs.")
     def test_live_multicast_loopback_chain(self) -> None:
         config = AppConfig(node_name="unit-loopback-probe", discovery_timeout=1.0)
-        primary_ip = network.resolve_local_ip()
-        interface_ip = network.resolve_multicast_interface_ip(config.multicast_group, config.udp_port)
         payload = build_discover_message(config.node_name)
 
         receiver = create_receiver(config)
         sender = create_sender(config)
         try:
-            print(f"[LIVE] primary_local_ip={primary_ip}", flush=True)
-            print(f"[LIVE] multicast_interface_ip={interface_ip or '(default)'}", flush=True)
-            print(f"[LIVE] loopback_receiver_socket={receiver.sock.getsockname()[0]}:{receiver.sock.getsockname()[1]}", flush=True)
-            print(f"[LIVE] loopback_sender_socket={sender.sock.getsockname()[0]}:{sender.sock.getsockname()[1]}", flush=True)
-            print(f"[LIVE] loopback_multicast_target={config.multicast_group}:{config.udp_port}", flush=True)
-            print(f"[LIVE] loopback_multicast_payload={payload}", flush=True)
-
             send_discover(sender, config, config.node_name)
             packet = recv_discover(receiver, config.buffer_size)
-
-            print(f"[LIVE] loopback_received_packet={packet!r}", flush=True)
 
             self.assertIsNotNone(packet)
             assert packet is not None

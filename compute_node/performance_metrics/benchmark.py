@@ -1,4 +1,8 @@
-"""Top-level multi-method benchmark entry point."""
+"""Run one or more benchmark methods and normalize their reports.
+
+Use this module as the top-level benchmark CLI when the project should execute
+FMVM, spatial convolution, or both in sequence and emit a unified report.
+"""
 
 from __future__ import annotations
 
@@ -38,6 +42,10 @@ from compute_node.performance_metrics.spatial_convolution.config import (
     RAW_BENCHMARK_PATH as SPATIAL_CONV_BENCHMARK_PATH,
     RESULT_PATH as SPATIAL_RESULT_PATH,
 )
+from compute_node.performance_metrics.workload_modes import (
+    BENCHMARK_WORKLOAD_MODE_CHOICES,
+    WORKLOAD_MODE_FULL,
+)
 
 ROOT_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_PATH = ROOT_DIR / "result.json"
@@ -53,7 +61,17 @@ METHOD_DATASET_DIRS = {
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Describe the CLI surface for one or more compute methods."""
+    """Build the CLI parser for the multi-method benchmark entrypoint.
+
+    Use this in the top-level benchmark CLI so callers can select methods,
+    workload sizes, dataset overrides, and output locations consistently.
+
+    Args:
+        None.
+
+    Returns:
+        The configured ``ArgumentParser`` for this entrypoint.
+    """
 
     parser = argparse.ArgumentParser(description="Benchmark superweb-cluster compute methods.")
     parser.add_argument(
@@ -115,6 +133,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--rows", type=int, help="Optional FMVM matrix row-count override.")
     parser.add_argument("--cols", type=int, help="Optional FMVM matrix column-count override.")
+    parser.add_argument(
+        "--workload-mode",
+        choices=BENCHMARK_WORKLOAD_MODE_CHOICES,
+        default=WORKLOAD_MODE_FULL,
+        help="Benchmark only the small, medium, or large dataset, or run the default small->large flow.",
+    )
     parser.add_argument("--role", choices=("compute", "main"), default="compute", help="Spatial-convolution dataset role.")
     parser.add_argument("--h", type=int, help="Optional Conv2D test height override.")
     parser.add_argument("--w", type=int, help="Optional Conv2D test width override.")
@@ -127,18 +151,41 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _selected_methods(method_arg: str) -> list[str]:
+    """Expand the CLI method selector into an ordered method list.
+
+    Use this after parsing CLI arguments so downstream code can always iterate a
+    concrete list instead of branching on the special ``all`` value.
+
+    Args:
+        method_arg: CLI ``--method`` value.
+
+    Returns:
+        The ordered list of method names to benchmark.
+    """
     if method_arg == "all":
         return [METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION, METHOD_SPATIAL_CONVOLUTION]
     return [method_arg]
 
 
 def _run_fmvm_benchmark(args: argparse.Namespace) -> dict[str, object]:
+    """Run the FMVM benchmark entrypoint and return its raw report.
+
+    Use this helper from the combined benchmark flow so FMVM can keep its own
+    runner while still contributing to the unified top-level report.
+
+    Args:
+        args: Parsed top-level benchmark CLI arguments.
+
+    Returns:
+        The raw JSON-like FMVM report dictionary.
+    """
     emit_status(
         "method.fmvm.dispatch",
         status="running",
         method=METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
         requested_backends=args.backend or ["auto"],
         rebuild=bool(getattr(args, "rebuild", False)),
+        workload_mode=getattr(args, "workload_mode", WORKLOAD_MODE_FULL),
         rows=args.rows,
         cols=args.cols,
         accumulation_precision=getattr(args, "accumulation_precision", "fp32"),
@@ -152,6 +199,7 @@ def _run_fmvm_benchmark(args: argparse.Namespace) -> dict[str, object]:
         accumulation_precision=getattr(args, "accumulation_precision", "fp32"),
         rows=args.rows,
         cols=args.cols,
+        workload_mode=getattr(args, "workload_mode", WORKLOAD_MODE_FULL),
     )
     previous_default_dataset_dir = fmvm_runner.DEFAULT_DATASET_DIR
     try:
@@ -162,6 +210,17 @@ def _run_fmvm_benchmark(args: argparse.Namespace) -> dict[str, object]:
 
 
 def _run_spatial_convolution_benchmark(args: argparse.Namespace) -> dict[str, object]:
+    """Run the spatial-convolution benchmark as a subprocess.
+
+    Use this helper from the combined benchmark flow so the method-specific
+    spatial benchmark can keep its own CLI and workspace conventions.
+
+    Args:
+        args: Parsed top-level benchmark CLI arguments.
+
+    Returns:
+        The raw JSON-like spatial-convolution report dictionary.
+    """
     if not SPATIAL_CONV_BENCHMARK_PATH.exists():
         raise FileNotFoundError(f"missing spatial_convolution benchmark entrypoint: {SPATIAL_CONV_BENCHMARK_PATH}")
 
@@ -177,6 +236,8 @@ def _run_spatial_convolution_benchmark(args: argparse.Namespace) -> dict[str, ob
             args.role,
             "--dataset-dir",
             str(METHOD_DATASET_DIRS[METHOD_SPATIAL_CONVOLUTION]),
+            "--workload-mode",
+            getattr(args, "workload_mode", WORKLOAD_MODE_FULL),
         ]
         if args.backend:
             for backend in args.backend:
@@ -242,10 +303,30 @@ def _run_spatial_convolution_benchmark(args: argparse.Namespace) -> dict[str, ob
 
 
 def _method_specific_output_path(method_name: str) -> Path:
+    """Return the canonical per-method result path for a method name.
+
+    Args:
+        method_name: Logical compute method name.
+
+    Returns:
+        The method-local ``result.json`` path.
+    """
     return METHOD_RESULT_PATHS[method_name]
 
 
 def _dataset_root_for_method(method_name: str, raw_report: dict[str, object]) -> str | None:
+    """Resolve the report-friendly dataset root string for one method.
+
+    Use this during normalization so each method report points at stable,
+    project-relative dataset paths instead of machine-specific absolute paths.
+
+    Args:
+        method_name: Logical compute method name.
+        raw_report: Raw method report emitted by the benchmark runner.
+
+    Returns:
+        A portable dataset-root string, or ``None`` if unavailable.
+    """
     if method_name == METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION:
         dataset_root = str((raw_report.get("dataset") or {}).get("root_dir") or "")
         if not dataset_root:
@@ -263,6 +344,18 @@ def _normalize_results(
     *,
     total_elapsed: float,
 ) -> dict[str, object]:
+    """Normalize raw per-method outputs into the shared report schema.
+
+    Use this once all selected methods have finished so the top-level output has
+    a consistent structure regardless of each method's native report shape.
+
+    Args:
+        raw_method_reports: Raw reports keyed by method name.
+        total_elapsed: Total wall-clock time for the combined benchmark run.
+
+    Returns:
+        The normalized benchmark report dictionary.
+    """
     device_overview = collect_device_overview()
     normalized_methods = {
         method_name: normalize_method_report(
@@ -281,6 +374,17 @@ def _normalize_results(
 
 
 def _write_method_reports(normalized_report: dict[str, object]) -> None:
+    """Write one method-local report file for each normalized method result.
+
+    Use this after normalization so each method keeps its own ``result.json`` in
+    addition to the combined multi-method report.
+
+    Args:
+        normalized_report: Combined normalized benchmark report.
+
+    Returns:
+        ``None`` after all method-local reports have been written.
+    """
     methods = normalized_report.get("methods", {})
     if not isinstance(methods, dict):
         return
@@ -301,7 +405,17 @@ def _write_method_reports(normalized_report: dict[str, object]) -> None:
 
 
 def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
-    """Run one or more method benchmarks and return a JSON-serializable report."""
+    """Run the requested benchmarks and return a normalized report.
+
+    Use this from the CLI entrypoint or tests when the caller wants the
+    benchmark result as a Python dictionary instead of just a written file.
+
+    Args:
+        args: Parsed benchmark CLI arguments.
+
+    Returns:
+        The normalized multi-method benchmark report.
+    """
 
     methods = _selected_methods(getattr(args, "method", METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION))
     started = time.perf_counter()
@@ -382,6 +496,17 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI entrypoint for the combined benchmark runner.
+
+    Use this when launching the benchmark from the command line so Python
+    relaunch, status logging, and final report writing all happen consistently.
+
+    Args:
+        argv: Optional CLI argument override. Defaults to ``sys.argv[1:]``.
+
+    Returns:
+        Process exit code ``0`` on success.
+    """
     relaunch_result = relaunch_with_project_python_if_needed(
         argv,
         script_path=Path(__file__),

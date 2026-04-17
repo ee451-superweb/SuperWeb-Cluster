@@ -9,6 +9,7 @@ from .spec import (
     SpatialConvolutionSpec,
     build_dataset_layout,
     build_input_matrix_spec,
+    get_medium_input_matrix_spec,
     get_runtime_input_matrix_spec,
     get_test_input_matrix_spec,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "build_input_matrix_spec",
     "dataset_is_generated",
     "generate_dataset",
+    "get_medium_input_matrix_spec",
     "get_runtime_input_matrix_spec",
     "get_test_input_matrix_spec",
 ]

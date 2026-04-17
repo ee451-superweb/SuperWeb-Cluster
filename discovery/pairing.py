@@ -1,4 +1,9 @@
-﻿"""Sprint 1 discovery flow."""
+﻿"""Run the high-level discovery role flow for one process.
+
+Use this module when a process has already chosen a discovery role and needs a
+single function that performs either the discover-side browse flow or the
+main-node announce-side reply flow.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +15,11 @@ from app.trace_utils import trace_function
 
 @trace_function
 def discover_peer(config: AppConfig) -> DiscoveryResult:
-    """Send discovery and wait for an announce reply."""
+    """Use this when a node wants to discover the current main node.
+
+    Args: config discovery settings and local node metadata.
+    Returns: A DiscoveryResult describing the discovered peer or the failure cause.
+    """
 
     try:
         # The sender binds an ephemeral local UDP port so the announce side can
@@ -31,7 +40,11 @@ def discover_peer(config: AppConfig) -> DiscoveryResult:
 
 @trace_function
 def announce_peer(config: AppConfig) -> DiscoveryResult:
-    """Wait for one main-node query and reply with main-node details."""
+    """Use this when a main node wants to answer one discovery probe.
+
+    Args: config discovery settings and the local main-node TCP endpoint info.
+    Returns: A DiscoveryResult describing the peer that was answered or the failure cause.
+    """
 
     try:
         # The receiver joins the multicast group and waits for a discover probe.
@@ -62,7 +75,11 @@ def announce_peer(config: AppConfig) -> DiscoveryResult:
 
 @trace_function
 def run_pairing(config: AppConfig) -> DiscoveryResult:
-    """Dispatch discovery behavior based on the configured role."""
+    """Use this when callers want role-based discovery behavior behind one function.
+
+    Args: config whose ``role`` decides whether to discover or announce.
+    Returns: The DiscoveryResult produced by the selected discovery branch.
+    """
 
     if config.role == "announce":
         return announce_peer(config)

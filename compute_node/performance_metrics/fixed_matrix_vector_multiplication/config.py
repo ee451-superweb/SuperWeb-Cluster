@@ -1,4 +1,8 @@
-"""Stable paths for the FMVM benchmark workspace."""
+"""Define stable workspace paths for the FMVM benchmark.
+
+Use this module whenever benchmark code needs the canonical method-local
+dataset, result, or dataset-generation paths for FMVM.
+"""
 
 from __future__ import annotations
 

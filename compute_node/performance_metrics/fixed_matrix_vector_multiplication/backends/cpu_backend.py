@@ -22,6 +22,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.compute_resource_policy import resolve_capped_cpu_worker_count
 from compute_node.compute_methods.fixed_matrix_vector_multiplication import (
     CPU_MACOS_BUILD_DIR,
     CPU_MACOS_EXECUTABLE_PATH,
@@ -193,6 +194,12 @@ def _measurement_repeats(_spec: BenchmarkSpec | None = None) -> int:
     return DEFAULT_MEASUREMENT_REPEATS
 
 
+def _default_worker_candidates(logical_cpu_count: int | None = None) -> list[int]:
+    """Return the CPU benchmark worker sweep under the shared project cap."""
+
+    return _binary_tree_worker_candidates(resolve_capped_cpu_worker_count(logical_cpu_count))
+
+
 class CpuBackend:
     """Compile and invoke the current platform's C++ CPU runner."""
 
@@ -205,7 +212,7 @@ class CpuBackend:
         if artifacts is None:
             return False, f"CPU backend is only available on Windows and macOS. Current platform: {sys.platform}."
 
-        worker_candidates = _binary_tree_worker_candidates(os.cpu_count() or 1)
+        worker_candidates = _default_worker_candidates()
         source_is_newer_than_binary = (
             artifacts.executable_path.exists()
             and artifacts.source_path.exists()
@@ -298,7 +305,7 @@ class CpuBackend:
 
         measurement_spec = spec if measurement_spec is None else measurement_spec
         measurement_dataset = dataset if measurement_dataset is None else measurement_dataset
-        worker_candidates = _binary_tree_worker_candidates(os.cpu_count() or 1)
+        worker_candidates = _default_worker_candidates()
         tile_candidates = _candidate_tile_sizes(spec.cols)
         autotune_repeats = _autotune_repeats(spec)
         final_measurement_repeats = (
@@ -455,6 +462,21 @@ class CpuBackend:
         measurement_repeats: int,
         timeout_seconds: float,
     ) -> dict[str, object]:
+        """Invoke the native CPU runner and parse its JSON metrics.
+
+        Args:
+            executable_path: Runner binary to execute.
+            spec: Benchmark spec being measured.
+            dataset: Dataset layout read by the runner.
+            workers: Worker-count candidates to sweep.
+            tile_sizes: Tile-size candidates to sweep.
+            autotune_repeats: Repeat count for autotune trials.
+            measurement_repeats: Repeat count for the selected configuration.
+            timeout_seconds: Subprocess timeout for the native runner.
+
+        Returns:
+            The parsed JSON metrics emitted by the native runner.
+        """
         command = [
             str(executable_path),
             "--matrix",
