@@ -1,3 +1,3 @@
-"""Compatibility re-exports for the FMVM input-dataset package."""
+"""Compatibility re-exports for the GEMV input-dataset package."""
 
-from compute_node.input_matrix.fixed_matrix_vector_multiplication.storage import *  # noqa: F401,F403
+from compute_node.input_matrix.gemv.storage import *  # noqa: F401,F403

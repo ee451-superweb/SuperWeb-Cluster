@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from app.constants import METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION
+from app.constants import METHOD_GEMV
 from common.types import ComputeHardwarePerformance, ComputePerformanceSummary, MethodPerformanceSummary
 
 DEFAULT_RESULT_PATH = Path(__file__).resolve().parent / "performance_metrics" / "result.json"
@@ -64,8 +64,8 @@ class RuntimeProcessorInventory:
         )
 
     def to_legacy_summary(self) -> ComputePerformanceSummary:
-        """Build the legacy single-method registration summary for FMVM."""
-        method_summary = self.to_method_summary(METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION)
+        """Build the legacy single-method registration summary for GEMV."""
+        method_summary = self.to_method_summary(METHOD_GEMV)
         return ComputePerformanceSummary(
             hardware_count=method_summary.hardware_count,
             ranked_hardware=list(method_summary.ranked_hardware),
@@ -87,7 +87,7 @@ class RuntimeMethodCatalog:
         """Convert the full method catalog into the advertised performance summary."""
         ordered_methods = sorted(
             self.method_inventories,
-            key=lambda name: (0 if name == METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION else 1, name),
+            key=lambda name: (0 if name == METHOD_GEMV else 1, name),
         )
         method_summaries = [
             self.method_inventories[method].to_method_summary(method)
@@ -98,9 +98,9 @@ class RuntimeMethodCatalog:
             (
                 summary
                 for summary in method_summaries
-                if summary.method == METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION
+                if summary.method == METHOD_GEMV
             ),
-            method_summaries[0] if method_summaries else MethodPerformanceSummary(method=METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION),
+            method_summaries[0] if method_summaries else MethodPerformanceSummary(method=METHOD_GEMV),
         )
         return ComputePerformanceSummary(
             hardware_count=legacy_view.hardware_count,
@@ -238,7 +238,7 @@ def _iter_method_payloads(payload: dict[str, Any]) -> list[tuple[str, dict[str, 
                 entries.append((str(method), method_payload))
         return entries
 
-    method = str(payload.get("method") or METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION)
+    method = str(payload.get("method") or METHOD_GEMV)
     return [(method, payload)]
 
 
@@ -262,7 +262,7 @@ def load_runtime_method_catalog(result_path: Path | None = None) -> RuntimeMetho
 def load_runtime_processor_inventory(
     result_path: Path | None = None,
     *,
-    method: str = METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
+    method: str = METHOD_GEMV,
 ) -> RuntimeProcessorInventory:
     """Load local processor configs for one method and filter out weak processors.
 

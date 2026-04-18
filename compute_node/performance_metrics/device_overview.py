@@ -13,7 +13,7 @@ import subprocess
 from typing import Any
 
 from common.hardware import _detect_total_memory_bytes
-from compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.windows_gpu_inventory import (
+from compute_node.performance_metrics.gemv.backends.windows_gpu_inventory import (
     list_windows_display_adapters,
 )
 

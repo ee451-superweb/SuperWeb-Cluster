@@ -19,6 +19,7 @@ from app.constants import (
     RUNTIME_MSG_CLIENT_INFO_REQUEST,
     RUNTIME_MSG_CLIENT_JOIN,
     RUNTIME_MSG_CLIENT_REQUEST,
+    RUNTIME_MSG_CLIENT_REQUEST_OK,
     RUNTIME_MSG_CLIENT_RESPONSE,
     RUNTIME_MSG_HEARTBEAT,
     RUNTIME_MSG_HEARTBEAT_OK,
@@ -38,24 +39,25 @@ from wire.external_protocol.control_plane import (
     ClientInfoRequest,
     ClientJoin,
     ClientRequest,
+    ClientRequestOk,
     ClientResponse,
-    FixedMatrixVectorRequestPayload,
-    FixedMatrixVectorResponsePayload,
-    SpatialConvolutionRequestPayload,
-    SpatialConvolutionResponsePayload,
+    GemvRequestPayload,
+    GemvResponsePayload,
+    Conv2dRequestPayload,
+    Conv2dResponsePayload,
 )
 from wire.external_protocol.data_plane import ArtifactDescriptor
 from wire.internal_protocol.common import MessageKind, NodeStatus, RuntimeEnvelope, TransferMode
 from wire.internal_protocol.control_plane import (
     ArtifactRelease,
-    FixedMatrixVectorResultPayload,
-    FixedMatrixVectorTaskPayload,
+    GemvResultPayload,
+    GemvTaskPayload,
     Heartbeat,
     HeartbeatOk,
     RegisterOk,
     RegisterWorker,
-    SpatialConvolutionResultPayload,
-    SpatialConvolutionTaskPayload,
+    Conv2dResultPayload,
+    Conv2dTaskPayload,
     TaskAccept,
     TaskAssign,
     TaskFail,
@@ -236,14 +238,14 @@ def build_client_info_reply(
     request_timestamp_ms: int,
     timeout_ms: int,
     has_active_tasks: bool,
-    active_request_ids: list[str] | tuple[str, ...] | None = None,
+    active_task_ids: list[str] | tuple[str, ...] | None = None,
     reply_timestamp_ms: int | None = None,
 ) -> RuntimeEnvelope:
     """Use this when the main node answers one client liveness/info poll."""
     if reply_timestamp_ms is None:
         reply_timestamp_ms = int(time.time() * 1000)
-    if active_request_ids is None:
-        active_request_ids = ()
+    if active_task_ids is None:
+        active_task_ids = ()
     return RuntimeEnvelope(
         kind=MessageKind.CLIENT_INFO_REPLY,
         client_info_reply=ClientInfoReply(
@@ -252,7 +254,7 @@ def build_client_info_reply(
             reply_timestamp_ms=reply_timestamp_ms,
             timeout_ms=timeout_ms,
             has_active_tasks=has_active_tasks,
-            active_request_ids=tuple(active_request_ids),
+            active_task_ids=tuple(active_task_ids),
         ),
     )
 
@@ -264,6 +266,7 @@ def build_client_request(
     method: str,
     vector_data: bytes,
     *,
+    size: str = "",
     object_id: str = "",
     stream_id: str = "",
     timestamp_ms: int | None = None,
@@ -276,7 +279,7 @@ def build_client_request(
     kernel_size: int = 0,
     padding: int = 0,
     stride: int = 1,
-    request_payload: FixedMatrixVectorRequestPayload | SpatialConvolutionRequestPayload | None = None,
+    request_payload: GemvRequestPayload | Conv2dRequestPayload | None = None,
 ) -> RuntimeEnvelope:
     """Use this when a client submits one structured compute request."""
     if timestamp_ms is None:
@@ -292,6 +295,7 @@ def build_client_request(
             request_id=request_id,
             client_name=client_name,
             method=method,
+            size=size,
             object_id=object_id,
             stream_id=stream_id,
             timestamp_ms=timestamp_ms,
@@ -311,11 +315,38 @@ def build_client_request(
 
 
 @trace_function
+def build_client_request_ok(
+    *,
+    client_id: str,
+    task_id: str,
+    method: str,
+    size: str = "",
+    object_id: str,
+    accepted_timestamp_ms: int | None = None,
+) -> RuntimeEnvelope:
+    """Use this when the main node assigns a task id for one client request."""
+    if accepted_timestamp_ms is None:
+        accepted_timestamp_ms = int(time.time() * 1000)
+    return RuntimeEnvelope(
+        kind=MessageKind.CLIENT_REQUEST_OK,
+        client_request_ok=ClientRequestOk(
+            client_id=client_id,
+            task_id=task_id,
+            method=method,
+            size=size,
+            object_id=object_id,
+            accepted_timestamp_ms=accepted_timestamp_ms,
+        ),
+    )
+
+
+@trace_function
 def build_client_response(
     request_id: str,
     status_code: int,
     *,
     method: str = "",
+    size: str = "",
     object_id: str = "",
     stream_id: str = "",
     error_message: str = "",
@@ -326,9 +357,11 @@ def build_client_response(
     client_count: int = 0,
     client_id: str = "",
     iteration_count: int = 1,
+    task_id: str = "",
+    elapsed_ms: int = 0,
     result_artifact_id: str = "",
     result_artifact: ArtifactDescriptor | None = None,
-    response_payload: FixedMatrixVectorResponsePayload | SpatialConvolutionResponsePayload | None = None,
+    response_payload: GemvResponsePayload | Conv2dResponsePayload | None = None,
 ) -> RuntimeEnvelope:
     """Use this when the main node replies to CLIENT_JOIN or CLIENT_REQUEST."""
     if timestamp_ms is None:
@@ -343,6 +376,7 @@ def build_client_response(
         client_response=ClientResponse(
             request_id=request_id,
             method=method,
+            size=size,
             object_id=object_id,
             stream_id=stream_id,
             timestamp_ms=timestamp_ms,
@@ -352,6 +386,8 @@ def build_client_response(
             client_count=client_count,
             client_id=client_id,
             iteration_count=iteration_count,
+            task_id=task_id,
+            elapsed_ms=elapsed_ms,
             response_payload=response_payload,
             result_artifact=result_artifact,
             result_artifact_id=result_artifact_id,
@@ -367,6 +403,7 @@ def build_task_assign(
     node_id: str,
     task_id: str,
     method: str,
+    size: str = "",
     row_start: int = 0,
     row_end: int = 0,
     vector_data: bytes = b"",
@@ -389,7 +426,7 @@ def build_task_assign(
     padding: int = 0,
     stride: int = 1,
     weight_data: bytes = b"",
-    task_payload: FixedMatrixVectorTaskPayload | SpatialConvolutionTaskPayload | None = None,
+    task_payload: GemvTaskPayload | Conv2dTaskPayload | None = None,
 ) -> RuntimeEnvelope:
     """Use this when the main node dispatches one worker slice of a client request."""
     if timestamp_ms is None:
@@ -406,6 +443,7 @@ def build_task_assign(
             node_id=node_id,
             task_id=task_id,
             method=method,
+            size=size,
             object_id=object_id,
             stream_id=stream_id,
             timestamp_ms=timestamp_ms,
@@ -501,7 +539,7 @@ def build_task_result(
     output_w: int = 0,
     result_artifact_id: str = "",
     result_artifact: ArtifactDescriptor | None = None,
-    result_payload: FixedMatrixVectorResultPayload | SpatialConvolutionResultPayload | None = None,
+    result_payload: GemvResultPayload | Conv2dResultPayload | None = None,
 ) -> RuntimeEnvelope:
     """Use this when a worker completes one assigned task slice."""
     if timestamp_ms is None:
@@ -595,6 +633,8 @@ def describe_message_kind(kind: MessageKind) -> str:
         return RUNTIME_MSG_CLIENT_INFO_REPLY
     if kind == MessageKind.CLIENT_REQUEST:
         return RUNTIME_MSG_CLIENT_REQUEST
+    if kind == MessageKind.CLIENT_REQUEST_OK:
+        return RUNTIME_MSG_CLIENT_REQUEST_OK
     if kind == MessageKind.CLIENT_RESPONSE:
         return RUNTIME_MSG_CLIENT_RESPONSE
     if kind == MessageKind.TASK_ASSIGN:
@@ -619,11 +659,12 @@ __all__ = [
     "ClientInfoRequest",
     "ClientJoin",
     "ClientRequest",
+    "ClientRequestOk",
     "ClientResponse",
-    "FixedMatrixVectorRequestPayload",
-    "FixedMatrixVectorResponsePayload",
-    "FixedMatrixVectorResultPayload",
-    "FixedMatrixVectorTaskPayload",
+    "GemvRequestPayload",
+    "GemvResponsePayload",
+    "GemvResultPayload",
+    "GemvTaskPayload",
     "Heartbeat",
     "HeartbeatOk",
     "MessageKind",
@@ -631,10 +672,10 @@ __all__ = [
     "RegisterOk",
     "RegisterWorker",
     "RuntimeEnvelope",
-    "SpatialConvolutionRequestPayload",
-    "SpatialConvolutionResponsePayload",
-    "SpatialConvolutionResultPayload",
-    "SpatialConvolutionTaskPayload",
+    "Conv2dRequestPayload",
+    "Conv2dResponsePayload",
+    "Conv2dResultPayload",
+    "Conv2dTaskPayload",
     "TaskAccept",
     "TaskAssign",
     "TaskFail",
@@ -646,6 +687,7 @@ __all__ = [
     "build_client_info_request",
     "build_client_join",
     "build_client_request",
+    "build_client_request_ok",
     "build_client_response",
     "build_heartbeat",
     "build_heartbeat_ok",

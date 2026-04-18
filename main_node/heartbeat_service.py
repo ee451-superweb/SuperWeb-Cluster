@@ -6,9 +6,11 @@ Use this module when the main node needs to probe worker liveness, wait for
 
 from __future__ import annotations
 
+import logging
 import socket
 import time
 
+from adapters.audit_log import write_audit_event
 from app.constants import MAIN_NODE_NAME, RUNTIME_MSG_HEARTBEAT, RUNTIME_MSG_HEARTBEAT_OK
 from app.trace_utils import trace_function
 from main_node.runtime_mailbox import RuntimeConnectionMailbox
@@ -18,17 +20,19 @@ from wire.internal_protocol.runtime_transport import MessageKind, build_heartbea
 class HeartbeatCoordinator:
     """Send periodic heartbeats and record worker liveness state."""
 
-    def __init__(self, *, config, registry, remove_connection) -> None:
+    def __init__(self, *, config, registry, remove_connection, logger=None) -> None:
         """Store runtime dependencies for future heartbeat rounds.
 
         Args:
             config: Main-node runtime configuration with timeout and retry limits.
             registry: Connection registry used to record heartbeat timestamps.
             remove_connection: Callback that evicts broken worker connections.
+            logger: Logger used for heartbeat audit entries.
         """
         self.config = config
         self.registry = registry
         self._remove_connection = remove_connection
+        self.logger = logger
 
     def _describe_connection_activity(self, connection, *, reported_task_ids: tuple[str, ...] = ()) -> str:
         """Summarize the worker's active task state for heartbeat logging.
@@ -95,16 +99,6 @@ class HeartbeatCoordinator:
             message.heartbeat_ok.received_unix_time_ms / 1000 if message.heartbeat_ok.received_unix_time_ms else time.time()
         )
         self.registry.mark_heartbeat(connection.peer_id, sent_at=ack_time)
-        reported_task_ids = tuple(message.heartbeat_ok.active_task_ids)
-        node_status = message.heartbeat_ok.node_status
-        completed_task_count = message.heartbeat_ok.completed_task_count
-        print(
-            f"{RUNTIME_MSG_HEARTBEAT_OK} from {message.heartbeat_ok.node_name} for {heartbeat_unix_time_ms}"
-            f" node_id={message.heartbeat_ok.node_id or connection.runtime_id}"
-            f" status={node_status.name} completed={completed_task_count}"
-            f"{self._describe_connection_activity(connection, reported_task_ids=reported_task_ids)}",
-            flush=True,
-        )
 
     @trace_function
     def send_heartbeat_with_retry(self, connection) -> None:
@@ -130,30 +124,28 @@ class HeartbeatCoordinator:
             try:
                 with connection.io_lock:
                     send_message(connection.sock, heartbeat)
-                print(
-                    f"{RUNTIME_MSG_HEARTBEAT} to {connection.node_name} "
-                    f"at {connection.peer_address}:{connection.peer_port} attempt={attempt}/{total_attempts}"
-                    f"{self._describe_connection_activity(connection)}",
-                    flush=True,
-                )
                 self.await_heartbeat_ok(connection, heartbeat_unix_time_ms)
                 return
             except (socket.timeout, OSError, ConnectionError, ValueError) as exc:
                 last_error = exc
                 if attempt < total_attempts:
-                    print(
-                        f"{RUNTIME_MSG_HEARTBEAT} retry for {connection.node_name} "
-                        f"at {connection.peer_address}:{connection.peer_port} after {exc}",
-                        flush=True,
+                    write_audit_event(
+                        f"{RUNTIME_MSG_HEARTBEAT} failure for {connection.node_name} "
+                        f"at {connection.peer_address}:{connection.peer_port} "
+                        f"attempt={attempt}/{total_attempts} after {exc}"
+                        f"{self._describe_connection_activity(connection)}",
+                        logger=self.logger,
+                        level=logging.WARNING,
                     )
         failure_count = self.registry.record_heartbeat_failure(connection.peer_id)
         if failure_count is None:
             return
-        print(
+        write_audit_event(
             f"{RUNTIME_MSG_HEARTBEAT} failure for {connection.node_name} "
             f"at {connection.peer_address}:{connection.peer_port} "
             f"failure_count={failure_count}/{total_attempts} after {last_error}",
-            flush=True,
+            logger=self.logger,
+            level=logging.WARNING,
         )
         if failure_count >= total_attempts:
             self._remove_connection(

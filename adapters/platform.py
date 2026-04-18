@@ -67,12 +67,14 @@ def detect_os() -> PlatformInfo:
         platform_name = "unknown"
 
     admin = is_admin()
+    hostname = os.environ.get("COMPUTERNAME") or platform.node() or "unknown-host"
 
     return PlatformInfo(
         platform_name=platform_name,
         system=system,
         release=platform.release(),
         machine=platform.machine(),
+        hostname=hostname,
         is_wsl=platform_name == "wsl",
         is_admin=admin,
         can_elevate=platform_name == "windows" and not admin,

@@ -24,6 +24,7 @@ class PlatformInfo:
     system: str
     release: str
     machine: str
+    hostname: str
     is_wsl: bool
     is_admin: bool
     can_elevate: bool

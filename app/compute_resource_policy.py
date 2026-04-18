@@ -7,7 +7,7 @@ import os
 
 from app.constants import (
     DEFAULT_COMPUTE_NODE_CPU_WORKER_FRACTION,
-    DEFAULT_SPATIAL_CUDA_OUTPUT_CHANNEL_BATCH_SCALE,
+    DEFAULT_CONV2D_CUDA_OUTPUT_CHANNEL_BATCH_SCALE,
 )
 
 
@@ -32,7 +32,7 @@ def resolve_capped_cpu_worker_count(
     return max(1, min(resolved_cpu_count, capped_workers))
 
 
-def build_spatial_cuda_output_channel_batch_candidates(output_channels: int) -> list[int]:
+def build_conv2d_cuda_output_channel_batch_candidates(output_channels: int) -> list[int]:
     """Return a short power-of-two sweep for Conv2D output-channel batching."""
 
     resolved_output_channels = max(1, int(output_channels))
@@ -46,11 +46,11 @@ def build_spatial_cuda_output_channel_batch_candidates(output_channels: int) -> 
     return candidates
 
 
-def resolve_scaled_spatial_cuda_output_channel_batch(
+def resolve_scaled_conv2d_cuda_output_channel_batch(
     autotuned_batch: int | None,
     available_output_channels: int,
     *,
-    scale: float = DEFAULT_SPATIAL_CUDA_OUTPUT_CHANNEL_BATCH_SCALE,
+    scale: float = DEFAULT_CONV2D_CUDA_OUTPUT_CHANNEL_BATCH_SCALE,
 ) -> int:
     """Scale one autotuned CUDA batch size into a runtime-ready task batch size."""
 

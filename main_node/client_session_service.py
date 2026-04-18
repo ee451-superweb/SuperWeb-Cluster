@@ -8,12 +8,21 @@ runtime TCP session.
 from __future__ import annotations
 
 import socket
+import time
 from contextlib import nullcontext
 
-from app.constants import METHOD_SPATIAL_CONVOLUTION, RUNTIME_MSG_CLIENT_REQUEST, RUNTIME_MSG_CLIENT_RESPONSE
+from adapters.audit_log import write_audit_event
+from app.constants import METHOD_CONV2D, RUNTIME_MSG_CLIENT_REQUEST, RUNTIME_MSG_CLIENT_RESPONSE
 from app.trace_utils import trace_function
+from compute_node.compute_methods.conv2d.executor import load_named_workload_spec
 from main_node.runtime_mailbox import RuntimeConnectionMailbox
-from wire.internal_protocol.runtime_transport import MessageKind, describe_message_kind, recv_message, send_message
+from wire.internal_protocol.runtime_transport import (
+    MessageKind,
+    build_client_request_ok,
+    describe_message_kind,
+    recv_message,
+    send_message,
+)
 
 
 def _resolve_connection_lock(lock):
@@ -34,7 +43,15 @@ def _resolve_connection_lock(lock):
 class ClientSessionService:
     """Serve one registered client from join until disconnect."""
 
-    def __init__(self, *, config, registry, build_client_response_for_request, remove_client_connection) -> None:
+    def __init__(
+        self,
+        *,
+        config,
+        registry,
+        build_client_response_for_request,
+        remove_client_connection,
+        logger=None,
+    ) -> None:
         """Store runtime dependencies needed to serve a client session.
 
         Args:
@@ -42,11 +59,13 @@ class ClientSessionService:
             registry: Registry used to track per-client request state.
             build_client_response_for_request: Handler that executes one request.
             remove_client_connection: Callback that removes broken client sockets.
+            logger: Logger used for audit events and unexpected-message warnings.
         """
         self.config = config
         self.registry = registry
         self.build_client_response_for_request = build_client_response_for_request
         self.remove_client_connection = remove_client_connection
+        self.logger = logger
 
     def describe_client_request(self, request) -> str:
         """Render a concise workload summary for client-request logs.
@@ -60,13 +79,49 @@ class ClientSessionService:
         Returns:
             A short textual summary of the workload dimensions.
         """
-        if request.method == METHOD_SPATIAL_CONVOLUTION:
+        if request.method == METHOD_CONV2D:
+            if request.object_id:
+                try:
+                    spec, variant = load_named_workload_spec(request.object_id, size=request.size)
+                except ValueError:
+                    pass
+                else:
+                    return (
+                        f"size={variant} tensor={spec.h}x{spec.w} "
+                        f"channels={spec.c_in}->{spec.c_out} "
+                        f"kernel={spec.k} pad={spec.pad} stride={spec.stride}"
+                    )
             return (
+                f"size={request.size or '<unspecified>'} "
                 f"tensor={request.tensor_h}x{request.tensor_w} "
                 f"channels={request.channels_in}->{request.channels_out} "
                 f"kernel={request.kernel_size} pad={request.padding} stride={request.stride}"
             )
-        return f"vector_length={request.vector_length}"
+        return f"size={request.size or '<unspecified>'} vector_length={request.vector_length}"
+
+    def describe_client_response(self, response) -> str:
+        """Render result, artifact, and latency details for client-response logs.
+
+        Args:
+            response: Runtime envelope returned by the request handler.
+
+        Returns:
+            A short suffix describing elapsed time and result transport details.
+        """
+        payload = response.client_response
+        if payload is None:
+            return ""
+        parts = [f"task_id={payload.task_id or '<unassigned>'}"]
+        if payload.elapsed_ms > 0:
+            parts.append(f"elapsed_ms={payload.elapsed_ms}")
+        if payload.result_artifact is not None:
+            parts.append(f"artifact_id={payload.result_artifact.artifact_id}")
+            parts.append(f"artifact_bytes={payload.result_artifact.size_bytes}")
+        elif payload.output_vector:
+            parts.append(f"inline_bytes={len(payload.output_vector)}")
+        if payload.output_length:
+            parts.append(f"output_length={payload.output_length}")
+        return " " + " ".join(parts)
 
     @trace_function
     def serve_client_connection(self, connection, runtime_should_stop) -> None:
@@ -100,37 +155,58 @@ class ClientSessionService:
                 return
 
             if message.kind != MessageKind.CLIENT_REQUEST or message.client_request is None:
-                print(
-                    f"Ignoring unexpected client runtime message from {connection.node_name}: "
-                    f"{describe_message_kind(message.kind)}",
-                    flush=True,
-                )
+                if self.logger is not None:
+                    self.logger.warning(
+                        "Ignoring unexpected client runtime message from %s: %s",
+                        connection.node_name,
+                        describe_message_kind(message.kind),
+                    )
                 continue
 
             request = message.client_request
             self.registry.mark_client_request(connection.peer_id)
+            task_id = self.registry.allocate_task_id(request.method)
+            request.request_id = task_id
             if hasattr(self.registry, "mark_client_request_state"):
                 self.registry.mark_client_request_state(
                     connection.peer_id,
-                    request_id=request.request_id,
+                    task_id=task_id,
                     method=request.method,
                 )
-            print(
+            write_audit_event(
                 f"{RUNTIME_MSG_CLIENT_REQUEST} from {request.client_name} "
-                f"request_id={request.request_id} method={request.method} "
+                f"task_id={task_id} method={request.method} "
                 f"{self.describe_client_request(request)} iteration_count={request.iteration_count}",
-                flush=True,
+                stdout=True,
+                logger=self.logger,
             )
             try:
+                accepted_timestamp_ms = int(time.time() * 1000)
+                with _resolve_connection_lock(getattr(connection, "io_lock", None)):
+                    send_message(
+                        connection.sock,
+                        build_client_request_ok(
+                            client_id=connection.runtime_id,
+                            task_id=task_id,
+                            method=request.method,
+                            size=request.size,
+                            object_id=request.object_id,
+                            accepted_timestamp_ms=accepted_timestamp_ms,
+                        ),
+                    )
                 response = self.build_client_response_for_request(request)
                 if response.client_response is not None:
                     response.client_response.client_id = connection.runtime_id
+                    if not response.client_response.task_id:
+                        response.client_response.task_id = task_id
                 with _resolve_connection_lock(getattr(connection, "io_lock", None)):
                     send_message(connection.sock, response)
-                print(
+                write_audit_event(
                     f"{RUNTIME_MSG_CLIENT_RESPONSE} to {request.client_name} "
-                    f"request_id={request.request_id} status_code={response.client_response.status_code}",
-                    flush=True,
+                    f"status_code={response.client_response.status_code}"
+                    f"{self.describe_client_response(response)}",
+                    stdout=True,
+                    logger=self.logger,
                 )
             except (OSError, ValueError, ConnectionError, RuntimeError) as exc:
                 self.remove_client_connection(connection, str(exc))
@@ -139,5 +215,5 @@ class ClientSessionService:
                 if hasattr(self.registry, "clear_client_request_state"):
                     self.registry.clear_client_request_state(
                         connection.peer_id,
-                        request_id=request.request_id,
+                        task_id=task_id,
                     )

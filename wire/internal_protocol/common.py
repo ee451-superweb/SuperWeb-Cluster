@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from wire.external_protocol.control_plane import (
+        ClientRequestOk,
         ClientInfoReply,
         ClientInfoRequest,
         ClientJoin,
@@ -51,6 +52,7 @@ class MessageKind(enum.IntEnum):
     WORKER_UPDATE = 13
     CLIENT_INFO_REQUEST = 14
     CLIENT_INFO_REPLY = 15
+    CLIENT_REQUEST_OK = 16
 
 
 class NodeStatus(enum.IntEnum):
@@ -81,6 +83,7 @@ class RuntimeEnvelope:
     heartbeat: Heartbeat | None = None
     heartbeat_ok: HeartbeatOk | None = None
     client_join: ClientJoin | None = None
+    client_request_ok: ClientRequestOk | None = None
     client_request: ClientRequest | None = None
     client_response: ClientResponse | None = None
     task_assign: TaskAssign | None = None

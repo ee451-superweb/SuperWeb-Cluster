@@ -7,15 +7,17 @@ performance updates.
 
 from __future__ import annotations
 
+import logging
 import socket
 import threading
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
 
+from adapters.audit_log import write_audit_event
 from app.constants import (
-    METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
-    METHOD_SPATIAL_CONVOLUTION,
+    METHOD_GEMV,
+    METHOD_CONV2D,
     RUNTIME_MSG_ARTIFACT_RELEASE,
     RUNTIME_MSG_HEARTBEAT,
     RUNTIME_MSG_HEARTBEAT_OK,
@@ -29,10 +31,10 @@ from app.constants import (
 )
 from common.types import ComputePerformanceSummary
 from wire.internal_protocol.runtime_transport import (
-    FixedMatrixVectorResultPayload,
+    GemvResultPayload,
     MessageKind,
     NodeStatus,
-    SpatialConvolutionResultPayload,
+    Conv2dResultPayload,
     TransferMode,
     build_heartbeat_ok,
     build_task_accept,
@@ -45,9 +47,9 @@ from wire.internal_protocol.runtime_transport import (
 def _method_display_name(method: str) -> str:
     """Return a short human-readable label for one method name."""
 
-    if method == METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION:
-        return "fmvm"
-    if method == METHOD_SPATIAL_CONVOLUTION:
+    if method == METHOD_GEMV:
+        return "gemv"
+    if method == METHOD_CONV2D:
         return "conv2d"
     return method
 
@@ -59,7 +61,7 @@ def format_compute_performance_summary(performance: ComputePerformanceSummary | 
         performance: Optional performance summary to render.
 
     Returns:
-        A short string such as ``fmvm=cuda:125.000GFLOPS conv2d=cpu:24.000GFLOPS``.
+        A short string such as ``gemv=cuda:125.000GFLOPS conv2d=cpu:24.000GFLOPS``.
     """
 
     if performance is None:
@@ -82,7 +84,7 @@ def format_compute_performance_summary(performance: ComputePerformanceSummary | 
             f"{item.hardware_type}:{item.effective_gflops:.3f}GFLOPS"
             for item in performance.ranked_hardware
         )
-        return f"{_method_display_name(METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION)}={ranked_text}"
+        return f"{_method_display_name(METHOD_GEMV)}={ranked_text}"
     return "<none>"
 
 
@@ -262,10 +264,11 @@ class WorkerTaskRuntimeService:
                         error_message=str(exc),
                     )
                 )
-                print(
+                write_audit_event(
                     f"{RUNTIME_MSG_TASK_FAIL} from {self.node_name} "
                     f"id={assigned_node_id} task_id={task.task_id} error={exc}",
-                    flush=True,
+                    logger=self.logger,
+                    level=logging.WARNING,
                 )
                 continue
 
@@ -302,7 +305,7 @@ class WorkerTaskRuntimeService:
                     status_code=task_result.status_code,
                     iteration_count=task_result.iteration_count,
                     result_payload=(
-                        SpatialConvolutionResultPayload(
+                        Conv2dResultPayload(
                             start_oc=task_result.start_oc,
                             end_oc=task_result.end_oc,
                             output_h=task_result.output_h,
@@ -313,8 +316,8 @@ class WorkerTaskRuntimeService:
                                 result_artifact.artifact_id if result_artifact is not None else ""
                             ),
                         )
-                        if task.method == METHOD_SPATIAL_CONVOLUTION
-                        else FixedMatrixVectorResultPayload(
+                        if task.method == METHOD_CONV2D
+                        else GemvResultPayload(
                             row_start=task_result.row_start,
                             row_end=task_result.row_end,
                             output_length=task_result.output_length,
@@ -326,16 +329,17 @@ class WorkerTaskRuntimeService:
             )
             result_scope = (
                 f"oc={task_result.start_oc}:{task_result.end_oc}"
-                if task.method == METHOD_SPATIAL_CONVOLUTION
+                if task.method == METHOD_CONV2D
                 else f"rows={task_result.row_start}:{task_result.row_end}"
             )
-            print(
+            write_audit_event(
                 f"{RUNTIME_MSG_TASK_RESULT} from {self.node_name} "
                 f"id={assigned_node_id} task_id={task.task_id} "
                 f"method={task.method} {result_scope} "
                 f"iteration_count={task_result.iteration_count} "
                 f"artifact_id={(result_artifact.artifact_id if result_artifact is not None else '')}",
-                flush=True,
+                stdout=True,
+                logger=self.logger,
             )
 
     def handle_heartbeat_message(self, *, session, assigned_node_id: str, heartbeat_state, heartbeat) -> None:
@@ -361,16 +365,6 @@ class WorkerTaskRuntimeService:
                 completed_task_count=self._completed_task_count,
             )
         )
-        print(
-            f"{RUNTIME_MSG_HEARTBEAT} from {heartbeat.main_node_name} "
-            f"at {heartbeat.unix_time_ms}",
-            flush=True,
-        )
-        print(
-            f"{RUNTIME_MSG_HEARTBEAT_OK} from {self.node_name} "
-            f"for {heartbeat.unix_time_ms} {self.describe_active_tasks()}",
-            flush=True,
-        )
 
     def handle_artifact_release_message(self, *, assigned_node_id: str, artifact_release, artifact_manager) -> None:
         """Delete one locally published artifact after the main node releases it.
@@ -393,12 +387,12 @@ class WorkerTaskRuntimeService:
             )
         elif artifact_manager is not None:
             removed = artifact_manager.remove_artifact(artifact_release.artifact_id)
-        print(
+        write_audit_event(
             f"{RUNTIME_MSG_ARTIFACT_RELEASE} for {assigned_node_id} "
             f"task_id={artifact_release.task_id} "
             f"artifact_id={artifact_release.artifact_id} "
             f"removed={removed}",
-            flush=True,
+            logger=self.logger,
         )
 
     def handle_task_assign_message(
@@ -438,7 +432,7 @@ class WorkerTaskRuntimeService:
                 status_code=STATUS_ACCEPTED,
             )
         )
-        print(
+        write_audit_event(
             f"{RUNTIME_MSG_TASK_ACCEPT} from {self.node_name} "
             f"id={assigned_node_id} task_id={task.task_id} "
             f"artifact_id={task.artifact_id} "
@@ -447,7 +441,8 @@ class WorkerTaskRuntimeService:
             f"oc={task.start_oc}:{task.end_oc} "
             f"iteration_count={task.iteration_count} "
             f"transfer_mode={task.transfer_mode.name.lower()}",
-            flush=True,
+            stdout=True,
+            logger=self.logger,
         )
         pending_tasks[task.task_id] = (
             task,
@@ -460,9 +455,9 @@ class WorkerTaskRuntimeService:
             ),
         )
         self.mark_active_task(task)
-        print(
+        write_audit_event(
             f"{self.node_name} running {self.describe_active_tasks()}",
-            flush=True,
+            logger=self.logger,
         )
         self.drain_completed_tasks(
             session=session,
@@ -592,11 +587,11 @@ class IdlePerformanceRefreshService:
                     )
                 )
                 last_worker_update_at = time.monotonic()
-                print(
+                write_audit_event(
                     f"{RUNTIME_MSG_WORKER_UPDATE} from {self.node_name} "
                     f"id={assigned_node_id} "
                     f"performance={format_compute_performance_summary(refreshed_performance)}",
-                    flush=True,
+                    logger=self.logger,
                 )
 
         if (

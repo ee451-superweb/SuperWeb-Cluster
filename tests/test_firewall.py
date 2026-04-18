@@ -19,6 +19,7 @@ class FirewallTests(unittest.TestCase):
             system="UnknownOS",
             release="0",
             machine="x86_64",
+            hostname="unknown-host",
             is_wsl=False,
             is_admin=False,
             can_elevate=False,

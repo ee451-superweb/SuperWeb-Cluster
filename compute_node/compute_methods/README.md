@@ -5,7 +5,7 @@ compute node can execute.
 
 Right now this folder contains one method:
 
-- `fixed_matrix_vector_multiplication`
+- `gemv`
 
 That method directory is shared by two higher-level workflows:
 

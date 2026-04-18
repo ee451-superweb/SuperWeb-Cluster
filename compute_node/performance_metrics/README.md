@@ -11,9 +11,9 @@ Its job is to answer:
 
 This workspace now uses a method-scoped layout:
 
-- `performance_metrics/fixed_matrix_vector_multiplication/`
-  - FMVM-specific benchmark result/config workspace
-- `performance_metrics/spatial_convolution/`
+- `performance_metrics/gemv/`
+  - GEMV-specific benchmark result/config workspace
+- `performance_metrics/conv2d/`
   - Conv2D-specific benchmark result/config workspace
 - top-level `performance_metrics/benchmark.py`
   - multi-method orchestrator that can run one method or both
@@ -46,10 +46,10 @@ The current flow is:
 
 The benchmark currently measures two methods:
 
-- `fixed_matrix_vector_multiplication`
-- `spatial_convolution`
+- `gemv`
+- `conv2d`
 
-The default FMVM problem is:
+The default GEMV problem is:
 
 - `A`: `16384 x 32768` float32, exactly `2 GiB`
 - `x`: `32768` float32
@@ -57,16 +57,19 @@ The default FMVM problem is:
 
 The default Conv2D problem uses:
 
-- small workload: `512 x 512`, `64 -> 128`, `k=3`, `pad=1`, `stride=1`
-- medium workload: `1024 x 1024`, `96 -> 192`, `k=3`, `pad=1`, `stride=1`
+- small workload: `256 x 256`, `32 -> 64`, `k=3`, `pad=1`, `stride=1`
+- mid workload: `1024 x 1024`, `128 -> 256`, `k=3`, `pad=1`, `stride=1`
 - large workload: `2048 x 2048`, `128 -> 256`, `k=3`, `pad=1`, `stride=1`
 
 The production benchmark keeps these shapes fixed so different machines compare
-the same work. By default it autotunes on the small workload and then measures
-the winning configuration on the large workload. `small`, `medium`, `large`,
-and `full` workload modes are available from the CLI.
+the same work. GEMV still defaults to the small-to-large flow, while conv2d now
+defaults to the small-to-mid flow so routine benchmarking on consumer Windows
+machines keeps autotune lightweight but still reports a more representative
+final measurement than the tiny autotune workload alone. Use `--workload-mode large`
+when you explicitly want the large conv2d run. `small`, `mid`, `large`, and
+`full` workload modes are available from the CLI.
 
-The fixed FMVM workload now runs in two stages:
+The fixed GEMV workload now runs in two stages:
 
 - autotune: every candidate config is timed with `3` repeats and ranked by
   average latency
@@ -100,7 +103,7 @@ Top-level `benchmark.py` acts as the orchestrator:
 On Windows, the default GPU routing is intentionally conservative:
 
 - if Device Manager reports an NVIDIA display adapter, the automatic benchmark includes `cuda`
-- DX12 is excluded entirely because repeated `spatial_convolution` runs on the AMD Radeon 780M path caused system-level crashes
+- DX12 is excluded entirely because repeated `conv2d` runs on the AMD Radeon 780M path caused system-level crashes
 
 ## Main Files
 
@@ -134,15 +137,15 @@ On Windows, the default GPU routing is intentionally conservative:
   - CUDA backend adapter
 - `backends/metal_backend.py`
   - Metal backend adapter
-- `../compute_methods/fixed_matrix_vector_multiplication/cpu/windows/fmvm_cpu_windows.cpp`
+- `../compute_methods/gemv/cpu/windows/gemv_cpu_windows.cpp`
   - Windows CPU compute runner
-- `../compute_methods/fixed_matrix_vector_multiplication/cpu/macos/fmvm_cpu_macos.cpp`
+- `../compute_methods/gemv/cpu/macos/gemv_cpu_macos.cpp`
   - macOS CPU compute runner
-- `../compute_methods/fixed_matrix_vector_multiplication/cuda/fmvm_cuda_runner.cu`
+- `../compute_methods/gemv/cuda/gemv_cuda_runner.cu`
   - CUDA compute runner
-- `../compute_methods/fixed_matrix_vector_multiplication/metal/fmvm_metal_runner.mm`
+- `../compute_methods/gemv/metal/gemv_metal_runner.mm`
   - Metal host runner
-- `../compute_methods/fixed_matrix_vector_multiplication/metal/fmvm_metal_kernels.metal`
+- `../compute_methods/gemv/metal/gemv_metal_kernels.metal`
   - Metal compute kernel
 
 ## Backends
@@ -240,10 +243,10 @@ Run only the Metal backend:
 python "compute_node/performance_metrics/benchmark.py" --backend metal
 ```
 
-Generate the FMVM dataset without running the benchmark:
+Generate the GEMV dataset without running the benchmark:
 
 ```bash
-python "compute_node/input_matrix/fixed_matrix_vector_multiplication/generate.py"
+python "compute_node/input_matrix/gemv/generate.py"
 ```
 
 Manually tune the generator for a faster one-time dataset build:
@@ -287,11 +290,11 @@ production dataset does not get overwritten.
   for a faster one-time dataset build on larger machines.
 - The benchmark entrypoint itself is now split into smaller helper modules so
   dataset preparation and report assembly do not live in one giant file.
-- The FMVM CPU/CUDA/Metal sources now live under `compute_node/compute_methods/`
+- The GEMV CPU/CUDA/Metal sources now live under `compute_node/compute_methods/`
   so `performance_metrics/` stays focused on benchmarking rather than owning
   method source trees.
 - The DX12 module is disabled in this build. Repeated
-  `spatial_convolution` benchmark runs on the AMD Radeon 780M path caused
+  `conv2d` benchmark runs on the AMD Radeon 780M path caused
   fatal system instability and at least one power-protection event that
   required a BIOS reset before the machine would power on normally again.
 - DX12 source files remain in-tree for postmortem debugging only. Benchmark

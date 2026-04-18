@@ -15,7 +15,7 @@ SuperWeb-Cluster Sprint 3 开发计划
 
 Sprint 3 总目标:
 
-- 把 `SuperWeb-Cluster` 从“只支持单一 FMVM 方法的分布式 runtime”
+- 把 `SuperWeb-Cluster` 从“只支持单一 GEMV 方法的分布式 runtime”
   推进成“支持多种计算方法的集群计算平台”。
 - 在 runtime、benchmark、worker registration、main-node scheduling 这四层都引入
   method-aware 设计。
@@ -25,8 +25,8 @@ Sprint 3 总目标:
 一、Sprint 3 范围
 
 1. 多计算方法
-   - 保留现有 `fixed_matrix_vector_multiplication`
-   - 新增至少一种新的计算方法，优先 `spatial_convolution` / `conv2d`
+   - 保留现有 `gemv`
+   - 新增至少一种新的计算方法，优先 `conv2d` / `conv2d`
    - 为后续继续增加 method 留出统一扩展点
 
 2. 前端功能
@@ -45,18 +45,18 @@ Sprint 3 总目标:
 Phase 1. 多方法基础设施
 
 目标:
-- 在不破坏现有 FMVM 路径的前提下，为 runtime 引入 method-aware 架构。
+- 在不破坏现有 GEMV 路径的前提下，为 runtime 引入 method-aware 架构。
 
 具体任务:
 
 1. 协议层支持多方法
    - `ClientRequest` 保持 `method` 为一等字段
    - `TaskAssign` / `TaskResult` 增加 method-specific payload 设计
-   - 避免把 `fmvm` 和 `conv2d` 的字段继续混在一个 flat 结构里
+   - 避免把 `gemv` 和 `conv2d` 的字段继续混在一个 flat 结构里
 
 2. worker registration 支持多方法 benchmark 摘要
    - 每个 worker 同时上报:
-     - FMVM 的硬件排名和 GFLOPS
+     - GEMV 的硬件排名和 GFLOPS
      - Conv2D 的硬件排名和 GFLOPS
    - main node 按 method 记录 worker 能力
 
@@ -68,19 +68,19 @@ Phase 1. 多方法基础设施
 Phase 2. 新计算方法接入
 
 目标:
-- 把 `spatial_convolution` / `conv2d` 作为第二种 method 正式并列接入。
+- 把 `conv2d` / `conv2d` 作为第二种 method 正式并列接入。
 
 具体任务:
 
-1. 新增 `compute_node/compute_methods/spatial_convolution/`
+1. 新增 `compute_node/compute_methods/conv2d/`
    - 迁入 method-specific source tree
    - 整理 runner、dataset、benchmark、handler
 
 2. benchmark 支持多方法
    - `performance_metrics` 按 method 拆分目录
    - 顶层 benchmark 增加:
-     - `--method fixed_matrix_vector_multiplication`
-     - `--method spatial_convolution`
+     - `--method gemv`
+     - `--method conv2d`
      - `--method all`
 
 3. main node 调度支持多方法
@@ -141,7 +141,7 @@ Phase 4. 前端平台扩展
 三、推荐技术策略
 
 1. runtime 先 method-aware，再做前端
-   - 如果后端仍然只有 FMVM，前端很难真正展示 Sprint 3 的价值
+   - 如果后端仍然只有 GEMV，前端很难真正展示 Sprint 3 的价值
    - 所以前端开发应建立在多方法能力已经有稳定接口的基础上
 
 2. 前端先做“观测与控制”，再做“重数据回传”
@@ -166,7 +166,7 @@ Phase 4. 前端平台扩展
 
 最低交付:
 
-1. FMVM + Conv2D 两种 method 共存
+1. GEMV + Conv2D 两种 method 共存
 2. worker 注册时可同时上报两种 method 的性能
 3. main node 按 method 做任务分发
 4. 第一版前端可查看集群与 benchmark 信息
@@ -201,7 +201,7 @@ Phase 4. 前端平台扩展
 
 1. 完成多方法协议与 registration 设计
 2. 引入 compute-node method handler 架构
-3. 接入 `spatial_convolution`
+3. 接入 `conv2d`
 4. 改造 main node 调度与聚合为 method-aware
 5. 重构 benchmark 为多方法入口
 6. 开发第一版前端
@@ -227,20 +227,20 @@ Phase 4. 前端平台扩展
 截至目前，Sprint 3 中与“多计算方法基础设施”和“新计算方法接入”直接相关的主干目标已经完成或基本完成：
 
 1. 多方法 runtime 主链路已打通
-   - `fixed_matrix_vector_multiplication` 与 `spatial_convolution` 已可并列存在
+   - `gemv` 与 `conv2d` 已可并列存在
    - compute-node 主循环已从 method-specific 逻辑中解耦，改为 handler / task router 驱动
    - main node 已可根据 `request.method` 选择对应 dispatcher、aggregator 和 worker 性能数据
 
 2. worker registration 已支持多方法 benchmark 摘要
-   - worker 现可同时上报 FMVM 与 spatial_convolution 的性能摘要
+   - worker 现可同时上报 GEMV 与 conv2d 的性能摘要
    - main node 已按 method 记录 worker 的 hardware ranking 与 effective GFLOPS
 
 3. benchmark / dataset 体系已完成 method-aware 重构
    - `performance_metrics` 与 `input_matrix` 已按 method 对称拆分目录
-   - 顶层 benchmark 与 dataset generation 已支持 `fixed_matrix_vector_multiplication`、`spatial_convolution` 和 `all`
-   - FMVM 与 spatial_convolution 都已支持 test/runtime 两阶段数据准备与 benchmark 汇总
+   - 顶层 benchmark 与 dataset generation 已支持 `gemv`、`conv2d` 和 `all`
+   - GEMV 与 conv2d 都已支持 test/runtime 两阶段数据准备与 benchmark 汇总
 
-4. `spatial_convolution` 已作为第二种 method 正式接入
+4. `conv2d` 已作为第二种 method 正式接入
    - compute-node 执行器、benchmark、dataset、main-node 调度与结果聚合都已接通
    - CPU / CUDA 路径已纳入主流程
    - DX12 路径因致命稳定性问题已明确禁用，不参与默认 benchmark 或 runtime 选择
@@ -307,17 +307,17 @@ Phase 4. 前端平台扩展
      - `wire/internal_protocol/data_plane_codec.py`
      - `transport/large_data_transfer.py`
      - `transport/artifact_manager.py`
-   - spatial convolution 的大输出现在不再被 protobuf 单帧大小限制直接卡死
+   - conv2d 的大输出现在不再被 protobuf 单帧大小限制直接卡死
 
 3. Client 端已同步升级到新协议
    - Python client 的 runtime wire 已切换到官方 protobuf codegen，不再维护手写 protobuf parser
    - client 已支持 method-specific payload 和 `ArtifactDescriptor`
    - client 已支持在收到大结果时通过独立 TCP 数据面自动拉取 artifact
-   - Windows terminal 共用的 Python interactive client 已新增 `spatial_convolution` 的 `test` / `runtime` 请求入口
+   - Windows terminal 共用的 Python interactive client 已新增 `conv2d` 的 `test` / `runtime` 请求入口
 
 4. 当前已完成的 Sprint 3 目标
    - 多方法基础设施
-   - 第二计算方法 `spatial_convolution`
+   - 第二计算方法 `conv2d`
    - method payload 协议主链
    - 大结果独立 TCP data plane
    - Python / Windows terminal client 的协议同步

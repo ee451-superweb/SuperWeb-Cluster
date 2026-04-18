@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import InitVar, dataclass
 
-from app.constants import METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION, METHOD_SPATIAL_CONVOLUTION
+from app.constants import METHOD_GEMV, METHOD_CONV2D
 from wire.external_protocol.data_plane import ArtifactDescriptor
 from wire.internal_protocol._model_utils import initvar_or_default
 
@@ -38,11 +38,11 @@ class ClientInfoReply:
     reply_timestamp_ms: int
     timeout_ms: int
     has_active_tasks: bool
-    active_request_ids: tuple[str, ...] = ()
+    active_task_ids: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
-class FixedMatrixVectorRequestPayload:
+class GemvRequestPayload:
     """Method-specific request payload for fixed-matrix vector multiplication."""
 
     vector_length: int = 0
@@ -50,8 +50,8 @@ class FixedMatrixVectorRequestPayload:
 
 
 @dataclass(slots=True)
-class SpatialConvolutionRequestPayload:
-    """Method-specific request payload for spatial convolution."""
+class Conv2dRequestPayload:
+    """Method-specific request payload for conv2d."""
 
     tensor_h: int = 0
     tensor_w: int = 0
@@ -63,7 +63,7 @@ class SpatialConvolutionRequestPayload:
 
 
 @dataclass(slots=True)
-class FixedMatrixVectorResponsePayload:
+class GemvResponsePayload:
     """Method-specific client response payload for fixed-matrix vector multiplication."""
 
     output_length: int = 0
@@ -71,8 +71,8 @@ class FixedMatrixVectorResponsePayload:
 
 
 @dataclass(slots=True)
-class SpatialConvolutionResponsePayload:
-    """Method-specific client response payload for spatial convolution."""
+class Conv2dResponsePayload:
+    """Method-specific client response payload for conv2d."""
 
     output_length: int = 0
     output_vector: bytes = b""
@@ -86,11 +86,12 @@ class ClientRequest:
     request_id: str
     client_name: str
     method: str
+    size: str
     object_id: str
     stream_id: str
     timestamp_ms: int
     iteration_count: int
-    request_payload: FixedMatrixVectorRequestPayload | SpatialConvolutionRequestPayload | None = None
+    request_payload: GemvRequestPayload | Conv2dRequestPayload | None = None
     vector_length: InitVar[int] = 0
     vector_data: InitVar[bytes] = b""
     tensor_h: InitVar[int] = 0
@@ -124,10 +125,10 @@ class ClientRequest:
         padding = initvar_or_default(padding, 0)
         stride = initvar_or_default(stride, 1)
         if self.request_payload is None:
-            if self.method == METHOD_SPATIAL_CONVOLUTION or any(
+            if self.method == METHOD_CONV2D or any(
                 value for value in (tensor_h, tensor_w, channels_in, channels_out, kernel_size, padding)
             ):
-                self.request_payload = SpatialConvolutionRequestPayload(
+                self.request_payload = Conv2dRequestPayload(
                     tensor_h=tensor_h,
                     tensor_w=tensor_w,
                     channels_in=channels_in,
@@ -137,88 +138,100 @@ class ClientRequest:
                     stride=stride,
                 )
             else:
-                self.request_payload = FixedMatrixVectorRequestPayload(
+                self.request_payload = GemvRequestPayload(
                     vector_length=vector_length,
                     vector_data=vector_data,
                 )
-        elif self.method == METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION and not isinstance(
+        elif self.method == METHOD_GEMV and not isinstance(
             self.request_payload,
-            FixedMatrixVectorRequestPayload,
+            GemvRequestPayload,
         ):
-            raise ValueError("fixed_matrix_vector_multiplication requests require a matching payload")
-        elif self.method == METHOD_SPATIAL_CONVOLUTION and not isinstance(
+            raise ValueError("gemv requests require a matching payload")
+        elif self.method == METHOD_CONV2D and not isinstance(
             self.request_payload,
-            SpatialConvolutionRequestPayload,
+            Conv2dRequestPayload,
         ):
-            raise ValueError("spatial_convolution requests require a matching payload")
+            raise ValueError("conv2d requests require a matching payload")
 
     @property
-    def fixed_matrix_vector_multiplication_payload(self) -> FixedMatrixVectorRequestPayload | None:
-        """Return the FMVM request payload when this request targets FMVM."""
-        if isinstance(self.request_payload, FixedMatrixVectorRequestPayload):
+    def gemv_payload(self) -> GemvRequestPayload | None:
+        """Return the GEMV request payload when this request targets GEMV."""
+        if isinstance(self.request_payload, GemvRequestPayload):
             return self.request_payload
         return None
 
     @property
-    def spatial_convolution_payload(self) -> SpatialConvolutionRequestPayload | None:
-        """Return the spatial request payload when this request targets Conv2D."""
-        if isinstance(self.request_payload, SpatialConvolutionRequestPayload):
+    def conv2d_payload(self) -> Conv2dRequestPayload | None:
+        """Return the conv2d request payload when this request targets Conv2D."""
+        if isinstance(self.request_payload, Conv2dRequestPayload):
             return self.request_payload
         return None
 
     @property
     def vector_length(self) -> int:
-        """Return the FMVM vector length encoded in the request payload."""
-        payload = self.fixed_matrix_vector_multiplication_payload
+        """Return the GEMV vector length encoded in the request payload."""
+        payload = self.gemv_payload
         return payload.vector_length if payload is not None else 0
 
     @property
     def vector_data(self) -> bytes:
-        """Return the FMVM vector bytes encoded in the request payload."""
-        payload = self.fixed_matrix_vector_multiplication_payload
+        """Return the GEMV vector bytes encoded in the request payload."""
+        payload = self.gemv_payload
         return payload.vector_data if payload is not None else b""
 
     @property
     def tensor_h(self) -> int:
         """Return the spatial input height encoded in the request payload."""
-        payload = self.spatial_convolution_payload
+        payload = self.conv2d_payload
         return payload.tensor_h if payload is not None else 0
 
     @property
     def tensor_w(self) -> int:
         """Return the spatial input width encoded in the request payload."""
-        payload = self.spatial_convolution_payload
+        payload = self.conv2d_payload
         return payload.tensor_w if payload is not None else 0
 
     @property
     def channels_in(self) -> int:
         """Return the spatial input-channel count encoded in the request payload."""
-        payload = self.spatial_convolution_payload
+        payload = self.conv2d_payload
         return payload.channels_in if payload is not None else 0
 
     @property
     def channels_out(self) -> int:
         """Return the spatial output-channel count encoded in the request payload."""
-        payload = self.spatial_convolution_payload
+        payload = self.conv2d_payload
         return payload.channels_out if payload is not None else 0
 
     @property
     def kernel_size(self) -> int:
         """Return the spatial kernel size encoded in the request payload."""
-        payload = self.spatial_convolution_payload
+        payload = self.conv2d_payload
         return payload.kernel_size if payload is not None else 0
 
     @property
     def padding(self) -> int:
         """Return the spatial padding encoded in the request payload."""
-        payload = self.spatial_convolution_payload
+        payload = self.conv2d_payload
         return payload.padding if payload is not None else 0
 
     @property
     def stride(self) -> int:
         """Return the spatial stride encoded in the request payload."""
-        payload = self.spatial_convolution_payload
+        payload = self.conv2d_payload
         return payload.stride if payload is not None else 1
+
+
+@dataclass(slots=True)
+class ClientRequestOk:
+    """Early main-node acknowledgement carrying the server-assigned task id."""
+
+    client_id: str
+    task_id: str
+    method: str
+    size: str
+    object_id: str
+    accepted_timestamp_ms: int
 
 
 @dataclass(slots=True)
@@ -227,6 +240,7 @@ class ClientResponse:
 
     request_id: str
     method: str
+    size: str
     object_id: str
     stream_id: str
     timestamp_ms: int
@@ -236,7 +250,9 @@ class ClientResponse:
     client_count: int
     client_id: str
     iteration_count: int
-    response_payload: FixedMatrixVectorResponsePayload | SpatialConvolutionResponsePayload | None = None
+    task_id: str = ""
+    elapsed_ms: int = 0
+    response_payload: GemvResponsePayload | Conv2dResponsePayload | None = None
     result_artifact: ArtifactDescriptor | None = None
     output_length: InitVar[int] = 0
     output_vector: InitVar[bytes] = b""
@@ -248,58 +264,58 @@ class ClientResponse:
         output_vector = initvar_or_default(output_vector, b"")
         result_artifact_id = initvar_or_default(result_artifact_id, "")
         if self.response_payload is None:
-            if self.method == METHOD_SPATIAL_CONVOLUTION or result_artifact_id:
-                self.response_payload = SpatialConvolutionResponsePayload(
+            if self.method == METHOD_CONV2D or result_artifact_id:
+                self.response_payload = Conv2dResponsePayload(
                     output_length=output_length,
                     output_vector=output_vector,
                     result_artifact_id=result_artifact_id,
                 )
             else:
-                self.response_payload = FixedMatrixVectorResponsePayload(
+                self.response_payload = GemvResponsePayload(
                     output_length=output_length,
                     output_vector=output_vector,
                 )
-        elif self.method == METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION and not isinstance(
+        elif self.method == METHOD_GEMV and not isinstance(
             self.response_payload,
-            FixedMatrixVectorResponsePayload,
+            GemvResponsePayload,
         ):
-            raise ValueError("fixed_matrix_vector_multiplication responses require a matching payload")
-        elif self.method == METHOD_SPATIAL_CONVOLUTION and not isinstance(
+            raise ValueError("gemv responses require a matching payload")
+        elif self.method == METHOD_CONV2D and not isinstance(
             self.response_payload,
-            SpatialConvolutionResponsePayload,
+            Conv2dResponsePayload,
         ):
-            raise ValueError("spatial_convolution responses require a matching payload")
+            raise ValueError("conv2d responses require a matching payload")
 
     @property
-    def fixed_matrix_vector_multiplication_payload(self) -> FixedMatrixVectorResponsePayload | None:
-        """Return the FMVM response payload when this response targets FMVM."""
-        if isinstance(self.response_payload, FixedMatrixVectorResponsePayload):
+    def gemv_payload(self) -> GemvResponsePayload | None:
+        """Return the GEMV response payload when this response targets GEMV."""
+        if isinstance(self.response_payload, GemvResponsePayload):
             return self.response_payload
         return None
 
     @property
-    def spatial_convolution_payload(self) -> SpatialConvolutionResponsePayload | None:
-        """Return the spatial response payload when this response targets Conv2D."""
-        if isinstance(self.response_payload, SpatialConvolutionResponsePayload):
+    def conv2d_payload(self) -> Conv2dResponsePayload | None:
+        """Return the conv2d response payload when this response targets Conv2D."""
+        if isinstance(self.response_payload, Conv2dResponsePayload):
             return self.response_payload
         return None
 
     @property
     def output_length(self) -> int:
         """Return the output element count stored in the response payload."""
-        if self.fixed_matrix_vector_multiplication_payload is not None:
-            return self.fixed_matrix_vector_multiplication_payload.output_length
-        if self.spatial_convolution_payload is not None:
-            return self.spatial_convolution_payload.output_length
+        if self.gemv_payload is not None:
+            return self.gemv_payload.output_length
+        if self.conv2d_payload is not None:
+            return self.conv2d_payload.output_length
         return 0
 
     @property
     def output_vector(self) -> bytes:
         """Return the inline output bytes stored in the response payload."""
-        if self.fixed_matrix_vector_multiplication_payload is not None:
-            return self.fixed_matrix_vector_multiplication_payload.output_vector
-        if self.spatial_convolution_payload is not None:
-            return self.spatial_convolution_payload.output_vector
+        if self.gemv_payload is not None:
+            return self.gemv_payload.output_vector
+        if self.conv2d_payload is not None:
+            return self.conv2d_payload.output_vector
         return b""
 
     @property
@@ -307,5 +323,5 @@ class ClientResponse:
         """Return the artifact id associated with this client response, if any."""
         if self.result_artifact is not None:
             return self.result_artifact.artifact_id
-        payload = self.spatial_convolution_payload
+        payload = self.conv2d_payload
         return payload.result_artifact_id if payload is not None else ""

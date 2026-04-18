@@ -3,7 +3,7 @@
 import unittest
 from unittest import mock
 
-from app.constants import METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION, METHOD_SPATIAL_CONVOLUTION
+from app.constants import METHOD_GEMV, METHOD_CONV2D
 from common.types import ComputeHardwarePerformance, ComputePerformanceSummary, HardwareProfile
 from common.types import MethodPerformanceSummary
 from main_node.registry import ClusterRegistry
@@ -63,14 +63,14 @@ class MainNodeRegistryTests(unittest.TestCase):
         performance = ComputePerformanceSummary(
             method_summaries=[
                 MethodPerformanceSummary(
-                    method=METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
+                    method=METHOD_GEMV,
                     hardware_count=1,
                     ranked_hardware=[
                         ComputeHardwarePerformance(hardware_type="cpu", effective_gflops=24.0, rank=1),
                     ],
                 ),
                 MethodPerformanceSummary(
-                    method=METHOD_SPATIAL_CONVOLUTION,
+                    method=METHOD_CONV2D,
                     hardware_count=1,
                     ranked_hardware=[
                         ComputeHardwarePerformance(hardware_type="cuda", effective_gflops=125.0, rank=1),
@@ -83,8 +83,8 @@ class MainNodeRegistryTests(unittest.TestCase):
 
         totals = registry.total_registered_gflops_by_method()
 
-        self.assertAlmostEqual(totals[METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION], 24.0)
-        self.assertAlmostEqual(totals[METHOD_SPATIAL_CONVOLUTION], 125.0)
+        self.assertAlmostEqual(totals[METHOD_GEMV], 24.0)
+        self.assertAlmostEqual(totals[METHOD_CONV2D], 125.0)
 
     def test_heartbeat_failure_counter_resets_after_success(self) -> None:
         registry = ClusterRegistry()

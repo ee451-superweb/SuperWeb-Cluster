@@ -8,10 +8,12 @@ import signal
 import time
 
 from adapters.firewall import cleanup_rules
+from adapters.audit_log import write_audit_event
 from common.state import RuntimeState
 from common.types import DiscoveryResult, FirewallStatus, PlatformInfo
 from compute_node.runtime import ComputeNodeRuntime
 from app.config import AppConfig
+from app.logging_setup import rebind_logging_role
 from discovery.fallback import prompt_manual_address
 from discovery.pairing import run_pairing
 from main_node.runtime import MainNodeRuntime
@@ -84,6 +86,7 @@ class Supervisor:
         """Try discovery several times before promoting self to the main node."""
 
         last_result = DiscoveryResult(success=False, message="Discovery did not run.")
+        write_audit_event("discovering main node", stdout=True, logger=self.logger)
 
         for attempt in range(1, self.config.discovery_attempts + 1):
             if self._shutdown_requested:
@@ -119,7 +122,10 @@ class Supervisor:
     def _promote_to_main_node(self) -> DiscoveryResult:
         """Become the main node and continue listening for multicast traffic."""
 
+        write_audit_event("promoting self to main node", stdout=True, logger=self.logger)
         self._set_state(RuntimeState.MAIN_NODE)
+        self.logger = rebind_logging_role("main")
+        write_audit_event("promoting self to main node", logger=self.logger)
         runtime = MainNodeRuntime(
             config=self.config,
             logger=self.logger,
@@ -137,7 +143,13 @@ class Supervisor:
                 message="Discovery succeeded but did not include a main-node TCP endpoint.",
             )
 
+        write_audit_event(
+            f"joining discovered main node {result.peer_address}:{result.peer_port} as compute node",
+            stdout=True,
+            logger=self.logger,
+        )
         self._set_state(RuntimeState.COMPUTE_NODE)
+        self.logger = rebind_logging_role("worker")
         runtime = ComputeNodeRuntime(
             config=self.config,
             main_node_host=result.peer_address,
