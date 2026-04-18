@@ -27,6 +27,7 @@ from compute_node.performance_metrics import benchmark
 from compute_node.performance_metrics import result_format
 from compute_node.performance_metrics.conv2d import benchmark as spatial_benchmark
 from compute_node.performance_metrics.conv2d import backends as conv2d_backend_registry
+from compute_node.performance_metrics.gemv import dataset_runner as gemv_dataset_runner
 from compute_node.performance_metrics.gemv import backends as backend_registry
 from compute_node.performance_metrics.gemv.backends.cpu_backend import (
     CpuArtifacts,
@@ -737,6 +738,68 @@ class PerformanceMatricsTests(unittest.TestCase):
         self.assertEqual((gemv_spec.rows, gemv_spec.cols), (2_048, 4_096))
         self.assertEqual((conv_spec.h, conv_spec.w), (256, 256))
         self.assertEqual((conv_spec.c_in, conv_spec.c_out), (32, 64))
+
+    def test_refresh_default_workloads_are_half_mid(self) -> None:
+        gemv_mid_spec = build_input_matrix_spec(default_variant="mid")
+        gemv_refresh_spec = build_input_matrix_spec(default_variant="refresh")
+        conv_mid_spec = build_conv_input_matrix_spec(default_variant="mid")
+        conv_refresh_spec = build_conv_input_matrix_spec(default_variant="refresh")
+
+        self.assertEqual(gemv_refresh_spec.rows, gemv_mid_spec.rows // 2)
+        self.assertEqual(gemv_refresh_spec.cols, gemv_mid_spec.cols // 2)
+        self.assertEqual(conv_refresh_spec.h, conv_mid_spec.h // 2)
+        self.assertEqual(conv_refresh_spec.w, conv_mid_spec.w // 2)
+        self.assertEqual(conv_refresh_spec.c_in, conv_mid_spec.c_in // 2)
+        self.assertEqual(conv_refresh_spec.c_out, conv_mid_spec.c_out // 2)
+
+    def test_gemv_benchmark_dataset_generation_skips_refresh_variant(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dataset_dir = Path(temp_dir) / "gemv"
+            with (
+                mock.patch.object(
+                    gemv_dataset_runner,
+                    "dataset_is_generated",
+                    side_effect=[False, False, True, True],
+                ),
+                mock.patch.object(gemv_dataset_runner, "emit_status"),
+                mock.patch.object(gemv_dataset_runner, "active_python_path", return_value=Path("/tmp/project-python")),
+                mock.patch.object(gemv_dataset_runner.subprocess, "run") as run_mock,
+            ):
+                gemv_dataset_runner.generate_dataset_if_missing(
+                    dataset_dir,
+                    8,
+                    16,
+                    generate_small_dataset=True,
+                    generate_mid_dataset=True,
+                    generate_large_dataset=False,
+                    root_dir=PROJECT_ROOT,
+                    generate_script_path=PROJECT_ROOT / "compute_node" / "input_matrix" / "gemv" / "generate.py",
+                )
+
+        command = run_mock.call_args.args[0]
+        self.assertIn("--skip-refresh", command)
+
+    def test_conv2d_benchmark_dataset_generation_skips_refresh_variant(self) -> None:
+        spec = spatial_benchmark.get_small_spec()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dataset_dir = Path(temp_dir) / "conv2d"
+            with (
+                mock.patch.object(spatial_benchmark, "dataset_is_generated", return_value=False),
+                mock.patch.object(spatial_benchmark, "emit_status"),
+                mock.patch.object(spatial_benchmark, "active_python_path", return_value=Path("/tmp/project-python")),
+                mock.patch.object(spatial_benchmark.subprocess, "run") as run_mock,
+            ):
+                spatial_benchmark._generate_if_needed(
+                    dataset_dir,
+                    spec,
+                    "compute",
+                    generate_small_dataset=True,
+                    generate_mid_dataset=False,
+                    generate_large_dataset=False,
+                )
+
+        command = run_mock.call_args.args[0]
+        self.assertIn("--skip-refresh", command)
 
     def test_generate_dataset_with_small_override(self) -> None:
         spec = build_input_matrix_spec(rows=8, cols=16)

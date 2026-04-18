@@ -195,6 +195,7 @@ def _generate_if_needed(
     ]
     if not generate_small_dataset:
         cmd.append("--skip-small")
+    cmd.append("--skip-refresh")
     if not generate_mid_dataset:
         cmd.append("--skip-mid")
     if generate_large_dataset:

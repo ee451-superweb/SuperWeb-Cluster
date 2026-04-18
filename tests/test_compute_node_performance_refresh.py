@@ -162,7 +162,7 @@ class ComputeNodePerformanceRefreshTests(unittest.TestCase):
         self.assertEqual(len(progress_messages), 7)
         self.assertEqual(progress_messages[0][0:2], (1, 7))
         self.assertIn("Loading persisted benchmark result metadata.", progress_messages[0][2])
-        self.assertIn("gemv small input matrix", progress_messages[2][2])
+        self.assertIn("gemv refresh input matrix", progress_messages[2][2])
         self.assertIn("conv2d runner binary", progress_messages[-1][2])
 
     def test_refresh_gemv_metal_accepts_best_config_without_legacy_launch_hints(self) -> None:
@@ -190,7 +190,7 @@ class ComputeNodePerformanceRefreshTests(unittest.TestCase):
         self.assertEqual(run_kwargs["block_sizes"], [256])
         self.assertEqual(run_kwargs["tile_sizes"], [1])
         self.assertEqual(run_kwargs["headroom_fraction"], 0.9)
-        self.assertEqual(run_kwargs["row_chunk_size"], 1843)
+        self.assertEqual(run_kwargs["row_chunk_size"], 3686)
 
     def test_refresh_conv2d_metal_accepts_best_config_without_legacy_launch_hints(self) -> None:
         backend = mock.Mock()
@@ -214,7 +214,7 @@ class ComputeNodePerformanceRefreshTests(unittest.TestCase):
         self.assertEqual(run_kwargs["block_sizes"], [256])
         self.assertEqual(run_kwargs["tile_sizes"], [16])
         self.assertEqual(run_kwargs["headroom_fraction"], 0.9)
-        self.assertEqual(run_kwargs["output_channel_batch"], 57)
+        self.assertEqual(run_kwargs["output_channel_batch"], 115)
 
 
 if __name__ == "__main__":

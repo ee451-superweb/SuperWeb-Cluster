@@ -2,7 +2,8 @@
 
 Use this module when a compute node has no in-flight tasks but wants to report
 fresh effective performance back to the main node without rerunning full
-autotune. It reuses the stored best config and runs a small benchmark pass.
+autotune. It reuses the stored best config and runs a dedicated refresh-sized
+benchmark pass.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from compute_node.performance_metrics.conv2d.backends import (
 from compute_node.performance_metrics.conv2d.config import (
     DATASET_DIR as CONV2D_DATASET_DIR,
 )
-from compute_node.performance_metrics.conv2d.workloads import get_small_spec as get_conv2d_small_spec
+from compute_node.performance_metrics.conv2d.workloads import get_refresh_spec as get_conv2d_refresh_spec
 from compute_node.performance_summary import DEFAULT_RESULT_PATH
 from compute_node.input_matrix.gemv import (
     build_dataset_layout as build_gemv_dataset_layout,
@@ -101,15 +102,15 @@ def _load_best_backend_config(method_payload: dict[str, object]) -> tuple[str, d
 
 
 def _ensure_gemv_refresh_dataset(backend_name: str, best_config: dict[str, object]) -> None:
-    """Use this to validate the GEMV small dataset before idle refresh starts.
+    """Use this to validate the GEMV refresh dataset before idle refresh starts.
 
     Args: backend_name selected refresh backend and best_config stored autotune config.
-    Returns: ``None`` once the small dataset exists locally.
+    Returns: ``None`` once the refresh dataset exists locally.
     """
     del best_config
-    dataset = build_gemv_dataset_layout(GEMV_DATASET_DIR, prefix="small_")
-    if not gemv_dataset_is_generated(dataset, build_gemv_benchmark_spec(default_variant="small")):
-        raise FileNotFoundError(f"GEMV small dataset is missing at {dataset.root_dir}")
+    dataset = build_gemv_dataset_layout(GEMV_DATASET_DIR, prefix="refresh_")
+    if not gemv_dataset_is_generated(dataset, build_gemv_benchmark_spec(default_variant="refresh")):
+        raise FileNotFoundError(f"GEMV refresh dataset is missing at {dataset.root_dir}")
 
 
 def _ensure_gemv_refresh_runner(backend_name: str, best_config: dict[str, object]) -> None:
@@ -130,15 +131,15 @@ def _ensure_gemv_refresh_runner(backend_name: str, best_config: dict[str, object
 
 
 def _ensure_conv2d_refresh_dataset(backend_name: str, best_config: dict[str, object]) -> None:
-    """Use this to validate the conv2d small dataset before idle refresh starts.
+    """Use this to validate the conv2d refresh dataset before idle refresh starts.
 
     Args: backend_name selected refresh backend and best_config stored autotune config.
-    Returns: ``None`` once the small dataset exists locally.
+    Returns: ``None`` once the refresh dataset exists locally.
     """
     del best_config
-    dataset = build_conv2d_dataset_layout(CONV2D_DATASET_DIR, prefix="small_")
-    if not conv2d_dataset_is_generated(dataset, get_conv2d_small_spec(), skip_weight=False):
-        raise FileNotFoundError(f"conv2d small dataset is missing at {dataset.root_dir}")
+    dataset = build_conv2d_dataset_layout(CONV2D_DATASET_DIR, prefix="refresh_")
+    if not conv2d_dataset_is_generated(dataset, get_conv2d_refresh_spec(), skip_weight=False):
+        raise FileNotFoundError(f"conv2d refresh dataset is missing at {dataset.root_dir}")
 
 
 def _ensure_conv2d_refresh_runner(backend_name: str, best_config: dict[str, object]) -> None:
@@ -168,19 +169,19 @@ def _compat_int(best_config: dict[str, object], key: str, default: int) -> int:
 
 
 def _refresh_gemv_gflops(backend_name: str, best_config: dict[str, object]) -> float:
-    """Use this while refreshing idle GEMV performance on the small benchmark dataset.
+    """Use this while refreshing idle GEMV performance on the refresh dataset.
 
     Args: backend_name selected refresh backend and best_config stored autotune config.
     Returns: Measured effective GFLOPS for the GEMV method on this worker.
     """
     backend = build_gemv_backends([backend_name])[0]
     spec = build_gemv_benchmark_spec(
-        default_variant="small",
+        default_variant="refresh",
         accumulation_precision=str(best_config.get("accumulation_precision") or "fp32"),
     )
-    dataset = build_gemv_dataset_layout(GEMV_DATASET_DIR, prefix="small_")
-    if not gemv_dataset_is_generated(dataset, build_gemv_benchmark_spec(default_variant="small")):
-        raise FileNotFoundError(f"GEMV small dataset is missing at {dataset.root_dir}")
+    dataset = build_gemv_dataset_layout(GEMV_DATASET_DIR, prefix="refresh_")
+    if not gemv_dataset_is_generated(dataset, build_gemv_benchmark_spec(default_variant="refresh")):
+        raise FileNotFoundError(f"GEMV refresh dataset is missing at {dataset.root_dir}")
     timeout_seconds = max(30.0, spec.zero_score_seconds)
 
     if backend_name == "cpu":
@@ -230,16 +231,16 @@ def _refresh_gemv_gflops(backend_name: str, best_config: dict[str, object]) -> f
 
 
 def _refresh_conv2d_gflops(backend_name: str, best_config: dict[str, object]) -> float:
-    """Use this while refreshing idle convolution performance on the small dataset.
+    """Use this while refreshing idle convolution performance on the refresh dataset.
 
     Args: backend_name selected refresh backend and best_config stored autotune config.
     Returns: Measured effective GFLOPS for the conv2d method.
     """
     backend = build_conv2d_backends([backend_name])[0]
-    spec = get_conv2d_small_spec()
-    dataset = build_conv2d_dataset_layout(CONV2D_DATASET_DIR, prefix="small_")
+    spec = get_conv2d_refresh_spec()
+    dataset = build_conv2d_dataset_layout(CONV2D_DATASET_DIR, prefix="refresh_")
     if not conv2d_dataset_is_generated(dataset, spec, skip_weight=False):
-        raise FileNotFoundError(f"conv2d small dataset is missing at {dataset.root_dir}")
+        raise FileNotFoundError(f"conv2d refresh dataset is missing at {dataset.root_dir}")
     timeout_seconds = max(30.0, spec.zero_score_seconds)
 
     if backend_name == "cpu":
@@ -366,7 +367,7 @@ def validate_idle_refresh_requirements(
         result_path: Optional benchmark-result path whose best configs should be reused.
         progress_callback: Optional callback for reporting step-by-step validation progress.
 
-    Returns: ``None`` when the persisted result, small datasets, and runners are ready.
+    Returns: ``None`` when the persisted result, refresh datasets, and runners are ready.
     """
     total_steps = 7
     _emit_validation_progress(
@@ -390,7 +391,7 @@ def validate_idle_refresh_requirements(
         step=3,
         total_steps=total_steps,
         description=(
-            "Checking gemv small input matrix "
+            "Checking gemv refresh input matrix "
             f"for backend {gemv_backend_name}."
         ),
     )
@@ -419,7 +420,7 @@ def validate_idle_refresh_requirements(
         step=6,
         total_steps=total_steps,
         description=(
-            "Checking conv2d small input matrix "
+            "Checking conv2d refresh input matrix "
             f"for backend {conv2d_backend_name}."
         ),
     )

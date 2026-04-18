@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate GEMV small, medium, and large datasets in the method-local workspace.
+"""Generate GEMV small, refresh, medium, and large datasets in the method-local workspace.
 
 Use this module when the project needs GEMV benchmark or runtime inputs to be
 generated or refreshed on disk.
@@ -26,6 +26,7 @@ from compute_node.input_matrix.gemv import (
     generate_dataset,
     get_large_input_matrix_spec,
     get_mid_input_matrix_spec,
+    get_refresh_input_matrix_spec,
 )
 from compute_node.input_matrix.progress import build_progress_reporter, emit_progress_message
 
@@ -55,7 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
     Returns:
         The configured ``ArgumentParser`` for GEMV dataset generation.
     """
-    parser = argparse.ArgumentParser(description="Generate GEMV small/mid/large datasets.")
+    parser = argparse.ArgumentParser(description="Generate GEMV small/refresh/mid/large datasets.")
     parser.add_argument("--output-dir", type=Path, default=DATASET_DIR)
     parser.add_argument("--rows", type=int, help="Optional test-only row-count override.")
     parser.add_argument("--cols", type=int, help="Optional test-only column-count override.")
@@ -73,6 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Chunk size in MiB used while streaming data.",
     )
     parser.add_argument("--skip-small", action="store_true", help="Skip the small dataset.")
+    parser.add_argument("--skip-refresh", action="store_true", help="Skip the idle-refresh dataset.")
     parser.add_argument("--skip-mid", action="store_true", help="Skip the mid-sized dataset.")
     parser.add_argument("--skip-medium", action="store_true", help="Alias for --skip-mid.")
     parser.add_argument("--skip-large", action="store_true", help="Skip the large dataset.")
@@ -100,12 +102,14 @@ def main(argv: list[str] | None = None) -> int:
 
     args = build_parser().parse_args(argv)
     skip_small = bool(args.skip_small or args.skip_test)
+    skip_refresh = bool(args.skip_refresh)
     skip_mid = bool(args.skip_mid or args.skip_medium)
     skip_large = bool(args.skip_large or args.skip_runtime)
-    if skip_small and skip_mid and skip_large:
-        raise ValueError("cannot skip small, mid, and large dataset generation at the same time")
+    if skip_small and skip_refresh and skip_mid and skip_large:
+        raise ValueError("cannot skip small, refresh, mid, and large dataset generation at the same time")
 
     small_spec = build_input_matrix_spec(rows=args.rows, cols=args.cols, default_variant="small")
+    refresh_spec = get_refresh_input_matrix_spec()
     mid_spec = get_mid_input_matrix_spec()
     large_spec = get_large_input_matrix_spec()
     display_root = _to_relative_string(args.output_dir, start=PROJECT_ROOT)
@@ -130,6 +134,25 @@ def main(argv: list[str] | None = None) -> int:
                 )
             else:
                 emit_progress_message(f"GEMV small dataset already present at {display_root}")
+
+        if not skip_refresh:
+            refresh_layout = build_dataset_layout(args.output_dir, prefix=dataset_prefix_for_size("refresh"))
+            if args.force or not dataset_is_generated(refresh_layout, refresh_spec):
+                emit_progress_message(
+                    f"generating GEMV refresh dataset at {display_root} "
+                    f"(rows={refresh_spec.rows}, cols={refresh_spec.cols}, "
+                    f"matrix_bytes={refresh_spec.matrix_bytes}, "
+                    f"workers={args.workers}, chunk_mib={args.chunk_mib})"
+                )
+                generate_dataset(
+                    refresh_layout,
+                    refresh_spec,
+                    progress=_report_progress,
+                    generator_workers=args.workers,
+                    chunk_values=chunk_values,
+                )
+            else:
+                emit_progress_message(f"GEMV refresh dataset already present at {display_root}")
 
         if not skip_mid:
             mid_layout = build_dataset_layout(args.output_dir, prefix=dataset_prefix_for_size("mid"))
