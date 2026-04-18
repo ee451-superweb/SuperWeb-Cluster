@@ -241,14 +241,32 @@ class CpuBackend:
 
         worker_candidates = _default_worker_candidates()
         source_is_newer_than_binary = (
-                artifacts.executable_path.exists() and artifacts.source_path.exists() and
-                artifacts.executable_path.stat().st_mtime < artifacts.source_path.stat().st_mtime
+            artifacts.executable_path.exists()
+            and artifacts.source_path.exists()
+            and artifacts.executable_path.stat().st_mtime < artifacts.source_path.stat().st_mtime
         )
         if artifacts.executable_path.exists():
             if not source_is_newer_than_binary:
-                return (True, f"{artifacts.platform_label} CPU backend available. worker search order: {worker_candidates}")
-            can_build, _ = self._can_build_for_artifacts(artifacts)
-            return (True, f"{artifacts.platform_label} CPU backend available. worker search order: {worker_candidates}")
+                return (
+                    True,
+                    f"{artifacts.platform_label} CPU backend available via self-contained binary at "
+                    f"{_relative_project_path(artifacts.executable_path)}. worker search order: {worker_candidates}",
+                )
+            can_build, build_message = self._can_build_for_artifacts(artifacts)
+            if not can_build:
+                return (
+                    True,
+                    f"{artifacts.platform_label} CPU backend available via self-contained binary at "
+                    f"{_relative_project_path(artifacts.executable_path)}. Source is newer, but the build toolchain "
+                    f"is unavailable ({build_message}), so the existing binary will be used. "
+                    f"worker search order: {worker_candidates}",
+                )
+            return (
+                True,
+                f"{artifacts.platform_label} CPU backend available. Existing binary at "
+                f"{_relative_project_path(artifacts.executable_path)} is older than the source, so the runner can be "
+                f"rebuilt locally. worker search order: {worker_candidates}",
+            )
 
         if not artifacts.source_path.exists():
             return False, f"missing CPU runner source at {_relative_project_path(artifacts.source_path)}"
@@ -256,7 +274,11 @@ class CpuBackend:
         can_build, build_message = self._can_build_for_artifacts(artifacts)
         if not can_build:
             return False, build_message
-        return (True, f"{artifacts.platform_label} CPU backend available. worker search order: {worker_candidates}")
+        return (
+            True,
+            f"{artifacts.platform_label} CPU backend available. Binary is missing, so it can be built locally "
+            f"({build_message}). worker search order: {worker_candidates}",
+        )
 
     def run(
         self,
@@ -465,14 +487,59 @@ class CpuBackend:
             A tuple of ``(executable_path, note)`` describing the resolution.
         """
         resolved_artifacts = _current_cpu_artifacts() if artifacts is None else artifacts
-        if resolved_artifacts is None: raise FileNotFoundError("Unsupported platform")
+        if resolved_artifacts is None:
+            raise FileNotFoundError(f"CPU backend is unsupported on platform {sys.platform!r}")
         resolved_artifacts.build_dir.mkdir(parents=True, exist_ok=True)
+        compile_reason = "binary is missing"
         build_inputs = [resolved_artifacts.source_path, Path(__file__)]
+        if force_rebuild:
+            compile_reason = "rebuild was explicitly requested"
+            can_build, build_message = self._can_build_for_artifacts(resolved_artifacts)
+            if not can_build:
+                raise FileNotFoundError(
+                    f"force rebuild requested for the {resolved_artifacts.platform_label} CPU runner, but the build "
+                    f"toolchain is unavailable ({build_message})"
+                )
+        elif resolved_artifacts.executable_path.exists():
+            if _binary_is_stale(resolved_artifacts.executable_path, build_inputs):
+                can_build, build_message = self._can_build_for_artifacts(resolved_artifacts)
+                if can_build:
+                    compile_reason = "source or build recipe is newer than binary"
+                else:
+                    return (
+                        resolved_artifacts.executable_path,
+                        f"using prebuilt {resolved_artifacts.platform_label} CPU binary at "
+                        f"{_relative_project_path(resolved_artifacts.executable_path)} because the source or build "
+                        f"recipe is newer but the build toolchain is unavailable ({build_message})",
+                    )
+            else:
+                return (
+                    resolved_artifacts.executable_path,
+                    f"using prebuilt {resolved_artifacts.platform_label} CPU binary at "
+                    f"{_relative_project_path(resolved_artifacts.executable_path)}",
+                )
 
-        if force_rebuild or (resolved_artifacts.executable_path.exists() and _binary_is_stale(resolved_artifacts.executable_path, build_inputs)):
-            if resolved_artifacts.platform_key == "windows": self._compile_windows_runner(resolved_artifacts)
-            elif resolved_artifacts.platform_key == "macos": self._compile_macos_runner(resolved_artifacts)
-        return resolved_artifacts.executable_path, "CPU runner resolved"
+        if not resolved_artifacts.source_path.exists():
+            raise FileNotFoundError(
+                f"missing CPU runner source at {_relative_project_path(resolved_artifacts.source_path)}"
+            )
+
+        if resolved_artifacts.platform_key == "windows":
+            self._compile_windows_runner(resolved_artifacts)
+        elif resolved_artifacts.platform_key == "macos":
+            self._compile_macos_runner(resolved_artifacts)
+        else:
+            raise FileNotFoundError(f"no CPU build flow is registered for platform {resolved_artifacts.platform_key!r}")
+
+        if not resolved_artifacts.executable_path.exists():
+            raise FileNotFoundError(
+                f"CPU runner build completed without producing {_relative_project_path(resolved_artifacts.executable_path)}"
+            )
+        return (
+            resolved_artifacts.executable_path,
+            f"compiled {resolved_artifacts.platform_label} CPU runner from "
+            f"{_relative_project_path(resolved_artifacts.source_path)} because {compile_reason}",
+        )
 
     def _compile_windows_runner(self, artifacts: CpuArtifacts) -> None:
         """Build the Windows CPU runner through an on-disk batch script.
@@ -499,7 +566,28 @@ class CpuBackend:
             ``None`` after the compile step finishes successfully.
         """
         compiler = self._find_macos_cpp_compiler()
-        subprocess.run([compiler, f"../{artifacts.source_path.name}", "-std=c++20", "-O3", "-ffast-math", "-fvisibility=hidden", "-fvisibility-inlines-hidden", "-pthread", "-Wl,-dead_strip", "-Wl,-dead_strip_dylibs", "-o", artifacts.executable_path.name], cwd=artifacts.build_dir, capture_output=True, text=True, check=True)
+        if compiler is None:
+            raise FileNotFoundError("clang++, c++, or g++ was not found")
+        subprocess.run(
+            [
+                compiler,
+                f"../{artifacts.source_path.name}",
+                "-std=c++20",
+                "-O3",
+                "-ffast-math",
+                "-fvisibility=hidden",
+                "-fvisibility-inlines-hidden",
+                "-pthread",
+                "-Wl,-dead_strip",
+                "-Wl,-dead_strip_dylibs",
+                "-o",
+                artifacts.executable_path.name,
+            ],
+            cwd=artifacts.build_dir,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
 
     def _can_build_for_artifacts(self, artifacts: CpuArtifacts) -> tuple[bool, str]:
         """Return whether the backend can build the given artifact bundle.
@@ -510,7 +598,15 @@ class CpuBackend:
         Returns:
             A ``(can_build, message)`` tuple for probe-time checks.
         """
-        return True, ""
+        if artifacts.platform_key == "windows":
+            if self._find_vsdevcmd() is None:
+                return False, "VsDevCmd.bat was not found; MSVC build environment is unavailable."
+            return True, "MSVC build environment is available"
+
+        compiler = self._find_macos_cpp_compiler()
+        if compiler is None:
+            return False, "No C++ compiler (clang++, c++, or g++) was found on PATH."
+        return True, f"compiler {Path(compiler).name} is available"
 
     def _macos_linkage_note(self, executable_path: Path) -> str:
         """Return a short linkage note for the macOS runner binary.
@@ -521,7 +617,29 @@ class CpuBackend:
         Returns:
             A short note describing macOS linkage expectations.
         """
-        return "macOS linkage notes"
+        completed = subprocess.run(
+            ["otool", "-L", str(executable_path)],
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            return "macOS CPU linkage inspection failed; full static linkage is not expected on Apple toolchains."
+
+        dynamic_libraries: list[str] = []
+        for line in completed.stdout.splitlines()[1:]:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            library_path = stripped.split(" (compatibility version", 1)[0].strip()
+            dynamic_libraries.append(Path(library_path).name or library_path)
+
+        if not dynamic_libraries:
+            return "macOS CPU linkage inspection found no explicit dylib records."
+
+        return (
+            "macOS CPU build uses best-effort self-contained flags, but Apple toolchains still require "
+            f"dynamic system libraries: {', '.join(dynamic_libraries)}"
+        )
 
     @staticmethod
     def _find_macos_cpp_compiler() -> str | None:
@@ -541,4 +659,30 @@ class CpuBackend:
         Returns:
             The resolved ``VsDevCmd`` path, or ``None`` when unavailable.
         """
-        return None  # Simplified for brevity; relies on script
+        program_files_x86 = os.environ.get("ProgramFiles(x86)")
+        if not program_files_x86:
+            return None
+
+        vswhere_path = Path(program_files_x86) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
+        if vswhere_path.exists():
+            completed = subprocess.run(
+                [
+                    str(vswhere_path),
+                    "-latest",
+                    "-products",
+                    "*",
+                    "-find",
+                    "Common7\\Tools\\VsDevCmd.bat",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if completed.returncode == 0:
+                resolved = completed.stdout.strip().splitlines()
+                if resolved:
+                    return Path(resolved[0])
+
+        fallback = Path(program_files_x86) / "Microsoft Visual Studio" / "18" / "BuildTools" / "Common7" / "Tools" / "VsDevCmd.bat"
+        if fallback.exists():
+            return fallback
+        return None

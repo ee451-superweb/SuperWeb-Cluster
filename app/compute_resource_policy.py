@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import math
 import os
 
@@ -9,6 +10,15 @@ from app.constants import (
     DEFAULT_COMPUTE_NODE_CPU_WORKER_FRACTION,
     DEFAULT_CONV2D_CUDA_OUTPUT_CHANNEL_BATCH_SCALE,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class MetalHeadroomPolicy:
+    """Describe one translated Metal runtime-throttling policy."""
+
+    headroom_fraction: float
+    work_chunk_size: int
+    cooldown_ratio: float
 
 
 def resolve_capped_cpu_worker_count(
@@ -30,6 +40,42 @@ def resolve_capped_cpu_worker_count(
     resolved_cpu_count = max(1, int(resolved_cpu_count or 1))
     capped_workers = math.floor(resolved_cpu_count * fraction)
     return max(1, min(resolved_cpu_count, capped_workers))
+
+
+def resolve_metal_headroom_policy(
+    total_work_units: int,
+    *,
+    fraction: float = DEFAULT_COMPUTE_NODE_CPU_WORKER_FRACTION,
+) -> MetalHeadroomPolicy:
+    """Translate one shared headroom fraction into Metal-friendly throttling knobs.
+
+    Metal does not expose a portable "use only N% of the GPU" API. We therefore
+    translate the shared headroom target into:
+
+    - a chunk size that inserts scheduling boundaries inside a long job
+    - a cooldown ratio that expands each chunk's wall-clock duration into the
+      requested average duty cycle
+    """
+
+    if not 0.0 < fraction <= 1.0:
+        raise ValueError("Metal headroom fraction must be within (0.0, 1.0].")
+
+    resolved_total_units = max(1, int(total_work_units))
+    if fraction >= 1.0 or resolved_total_units == 1:
+        return MetalHeadroomPolicy(
+            headroom_fraction=float(fraction),
+            work_chunk_size=resolved_total_units,
+            cooldown_ratio=0.0,
+        )
+
+    translated_chunk_size = math.floor(resolved_total_units * fraction)
+    translated_chunk_size = max(1, min(resolved_total_units - 1, translated_chunk_size))
+    cooldown_ratio = max(0.0, (1.0 / fraction) - 1.0)
+    return MetalHeadroomPolicy(
+        headroom_fraction=float(fraction),
+        work_chunk_size=translated_chunk_size,
+        cooldown_ratio=cooldown_ratio,
+    )
 
 
 def build_conv2d_cuda_output_channel_batch_candidates(output_channels: int) -> list[int]:

@@ -95,13 +95,10 @@ def active_python_path() -> Path:
 def current_python_uses_project_venv() -> bool:
     """Return whether the current interpreter is the project's venv Python."""
 
-    venv_python = project_python_path()
-    if not venv_python.exists():
-        return False
     try:
-        return Path(sys.executable).resolve() == venv_python.resolve()
+        return Path(sys.prefix).resolve() == VENV_DIR.resolve()
     except OSError:
-        return Path(sys.executable) == venv_python
+        return Path(sys.prefix) == VENV_DIR
 
 
 def requirements_hash() -> str:

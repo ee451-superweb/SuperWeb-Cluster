@@ -232,9 +232,10 @@ class CudaBackend:
             return False, f"missing CUDA runner source at {_relative_project_path(CUDA_SOURCE_PATH)}"
 
         nvidia_adapter_name: str | None = None
+        nvidia_adapter_message = ""
         if os.name == "nt":
             nvidia_adapter_name, nvidia_adapter_message = detect_nvidia_windows_adapter()
-            if nvidia_adapter_name is None:
+            if nvidia_adapter_name is None and not CUDA_EXECUTABLE_PATH.exists():
                 return False, nvidia_adapter_message
 
         capability = _detect_compute_capability()
@@ -260,11 +261,28 @@ class CudaBackend:
             if not binary_is_stale:
                 if os.name == "nt":
                     if capability is None:
+                        if nvidia_adapter_name is None:
+                            return (
+                                True,
+                                f"CUDA backend available via self-contained Windows runner at "
+                                f"{_relative_project_path(CUDA_EXECUTABLE_PATH)}. It targets "
+                                f"{_format_windows_sm_targets()} and needs only the NVIDIA driver at runtime. "
+                                f"Windows display-adapter verification was unavailable ({nvidia_adapter_message}).",
+                            )
                         return (
                             True,
                             f"CUDA backend available via self-contained Windows runner at "
                             f"{_relative_project_path(CUDA_EXECUTABLE_PATH)}. It targets {_format_windows_sm_targets()} "
                             "and needs only the NVIDIA driver at runtime.",
+                        )
+                    if nvidia_adapter_name is None:
+                        return (
+                            True,
+                            f"CUDA backend available via self-contained Windows runner at "
+                            f"{_relative_project_path(CUDA_EXECUTABLE_PATH)}. Detected GPU is sm_{capability}; the "
+                            f"runner targets {_format_windows_sm_targets()} and needs only the NVIDIA driver at "
+                            f"runtime. Windows display-adapter verification was unavailable "
+                            f"({nvidia_adapter_message}).",
                         )
                     return (
                         True,

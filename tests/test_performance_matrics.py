@@ -45,6 +45,13 @@ from compute_node.performance_metrics.gemv.backends.cuda_backend import (
 from compute_node.performance_metrics.conv2d.backends.cuda_backend import (
     CudaBackend as SpatialCudaBackend,
 )
+from compute_node.performance_metrics.conv2d.backends.cpu_backend import (
+    CpuArtifacts as SpatialCpuArtifacts,
+    CpuBackend as SpatialCpuBackend,
+)
+from compute_node.performance_metrics.conv2d.backends.metal_backend import (
+    MetalBackend as SpatialMetalBackend,
+)
 from compute_node.performance_metrics.gemv.backends.metal_backend import (
     MetalBackend,
     _candidate_block_sizes as metal_candidate_block_sizes,
@@ -85,10 +92,23 @@ from compute_node.performance_metrics.gemv.workloads import build_benchmark_spec
 import subprocess
 
 from app.constants import DX12_BACKEND_DISABLED_REASON, METHOD_GEMV, METHOD_CONV2D
+from app.compute_resource_policy import resolve_metal_headroom_policy
 from tests.support import require_integration
 
 
 class PerformanceMatricsTests(unittest.TestCase):
+    def test_metal_headroom_policy_translates_fraction_into_chunk_and_cooldown(self) -> None:
+        policy = resolve_metal_headroom_policy(8, fraction=0.9)
+
+        self.assertEqual(policy.work_chunk_size, 7)
+        self.assertAlmostEqual(policy.cooldown_ratio, (1.0 / 0.9) - 1.0)
+
+    def test_metal_headroom_policy_keeps_full_work_when_fraction_is_one(self) -> None:
+        policy = resolve_metal_headroom_policy(8, fraction=1.0)
+
+        self.assertEqual(policy.work_chunk_size, 8)
+        self.assertEqual(policy.cooldown_ratio, 0.0)
+
     def test_linear_score_midpoint_is_half(self) -> None:
         score = linear_time_score(0.6, ideal_seconds=0.2, zero_score_seconds=1.0, max_score=100.0)
         self.assertAlmostEqual(score, 50.0)
@@ -638,6 +658,70 @@ class PerformanceMatricsTests(unittest.TestCase):
         self.assertEqual(executable_path, artifacts.executable_path)
         compile_mock.assert_called_once_with(artifacts)
         self.assertIn("rebuild was explicitly requested", note)
+
+    def test_spatial_cpu_backend_compiles_missing_macos_binary(self) -> None:
+        backend = SpatialCpuBackend()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            artifacts = SpatialCpuArtifacts(
+                platform_key="macos",
+                platform_label="macOS",
+                source_path=temp_root / "conv2d_cpu_macos.cpp",
+                build_dir=temp_root / "build",
+                executable_path=temp_root / "build" / "conv2d_cpu_macos",
+            )
+            artifacts.build_dir.mkdir(parents=True, exist_ok=True)
+            artifacts.source_path.write_text("// source placeholder\n", encoding="utf-8")
+
+            def fake_compile(_artifacts) -> None:
+                artifacts.executable_path.write_text("binary placeholder\n", encoding="utf-8")
+
+            with mock.patch.object(backend, "_compile_macos_runner", side_effect=fake_compile) as compile_mock:
+                executable_path, note = backend._resolve_executable_path(artifacts)
+
+        self.assertEqual(executable_path, artifacts.executable_path)
+        compile_mock.assert_called_once_with(artifacts)
+        self.assertIn("binary is missing", note)
+
+    def test_spatial_metal_backend_prefers_existing_binary_before_compiling(self) -> None:
+        backend = SpatialMetalBackend()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            binary_path = temp_root / "conv2d_metal_runner"
+            host_source = temp_root / "conv2d_metal_runner.mm"
+            kernel_source = temp_root / "conv2d_metal_kernels.metal"
+            host_source.write_text("// host placeholder\n", encoding="utf-8")
+            kernel_source.write_text("// kernel placeholder\n", encoding="utf-8")
+            binary_path.write_text("binary placeholder\n", encoding="utf-8")
+            os.utime(binary_path, None)
+
+            with (
+                mock.patch(
+                    "compute_node.performance_metrics.conv2d.backends.metal_backend.METAL_EXECUTABLE_PATH",
+                    binary_path,
+                ),
+                mock.patch(
+                    "compute_node.performance_metrics.conv2d.backends.metal_backend.METAL_HOST_SOURCE_PATH",
+                    host_source,
+                ),
+                mock.patch(
+                    "compute_node.performance_metrics.conv2d.backends.metal_backend.METAL_KERNEL_SOURCE_PATH",
+                    kernel_source,
+                ),
+                mock.patch(
+                    "compute_node.performance_metrics.conv2d.backends.metal_backend._binary_is_stale",
+                    return_value=False,
+                ),
+                mock.patch.object(
+                    backend,
+                    "_toolchain_status",
+                    side_effect=AssertionError("should not probe toolchain"),
+                ),
+            ):
+                executable_path, note = backend._compile_if_needed()
+
+        self.assertEqual(executable_path, binary_path)
+        self.assertIn("using prebuilt", note)
 
     def test_default_spec_matches_requested_2gib_shape(self) -> None:
         spec = build_benchmark_spec()

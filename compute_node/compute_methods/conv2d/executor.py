@@ -20,7 +20,7 @@ from app.constants import (
     METHOD_CONV2D,
     STATUS_OK,
 )
-from app.compute_resource_policy import resolve_capped_cpu_worker_count
+from app.compute_resource_policy import resolve_capped_cpu_worker_count, resolve_metal_headroom_policy
 from compute_node.compute_methods.conv2d.paths import (
     CPU_MACOS_EXECUTABLE_PATH,
     CPU_WINDOWS_EXECUTABLE_PATH,
@@ -129,6 +129,34 @@ def _runner_path(backend_name: str) -> Path:
     if backend_name == "metal":
         return METAL_EXECUTABLE_PATH
     raise ValueError(f"unsupported conv2d backend: {backend_name}")
+
+
+def _prepare_runner_path(backend_name: str) -> Path:
+    """Resolve one runtime runner path, compiling on demand when needed."""
+
+    executable_path = _runner_path(backend_name)
+    if executable_path.exists():
+        return executable_path
+
+    if backend_name == "cpu":
+        from compute_node.performance_metrics.conv2d.backends.cpu_backend import CpuBackend
+
+        executable_path, _note = CpuBackend()._resolve_executable_path(force_rebuild=False)
+        return executable_path
+
+    if backend_name == "cuda":
+        from compute_node.performance_metrics.conv2d.backends.cuda_backend import CudaBackend
+
+        executable_path, _note = CudaBackend()._resolve_executable_path(force_rebuild=False)
+        return executable_path
+
+    if backend_name == "metal":
+        from compute_node.performance_metrics.conv2d.backends.metal_backend import MetalBackend
+
+        executable_path, _note = MetalBackend()._compile_if_needed(force_rebuild=False)
+        return executable_path
+
+    return executable_path
 
 
 def _spec_for_task(task: TaskAssign):
@@ -318,7 +346,7 @@ class Conv2dTaskExecutor:
         backend_profile = _best_backend_profile(self.result_path)
         backend_name = backend_profile.hardware_type if backend_profile is not None else _best_backend_name(self.result_path)
         best_config = {} if backend_profile is None else dict(backend_profile.best_config)
-        executable_path = _runner_path(backend_name)
+        executable_path = _prepare_runner_path(backend_name)
         if not executable_path.exists():
             raise FileNotFoundError(f"conv2d runner is missing: {executable_path}")
 
@@ -398,6 +426,29 @@ class Conv2dTaskExecutor:
                             str(resolved_batch),
                             "--cooldown-ms",
                             str(CONV2D_CUDA_COOLDOWN_MS),
+                        ]
+                    )
+                elif backend_name == "metal":
+                    block_size = int(best_config.get("block_size") or 256)
+                    tile_size = int(best_config.get("tile_size") or 16)
+                    headroom_fraction = best_config.get("headroom_fraction")
+                    if headroom_fraction is None:
+                        headroom_policy = resolve_metal_headroom_policy(task.end_oc - task.start_oc)
+                    else:
+                        headroom_policy = resolve_metal_headroom_policy(
+                            task.end_oc - task.start_oc,
+                            fraction=float(headroom_fraction),
+                        )
+                    cmd.extend(
+                        [
+                            "--block-sizes",
+                            str(block_size),
+                            "--tile-sizes",
+                            str(tile_size),
+                            "--headroom-fraction",
+                            f"{headroom_policy.headroom_fraction:.6f}",
+                            "--output-channel-batch",
+                            str(headroom_policy.work_chunk_size),
                         ]
                     )
 

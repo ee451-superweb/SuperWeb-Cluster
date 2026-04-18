@@ -6,7 +6,7 @@ struct FmvmParams {
     uint rows;
     uint cols;
     uint simdgroup_count;
-    uint reserved;
+    uint row_start;
 };
 
 template <uint TileSize>
@@ -23,10 +23,11 @@ inline void gemv_row_major_impl(
     uint simdgroup_size [[threads_per_simdgroup]],
     threadgroup float* partial_sums [[threadgroup(0)]]
 ) {
-    const uint row = threadgroup_position.x;
-    if (row >= params.rows) {
+    const uint output_row = threadgroup_position.x;
+    if (output_row >= params.rows) {
         return;
     }
+    const uint row = params.row_start + output_row;
 
     const uint worker_count = threads_per_threadgroup.x;
     const uint stride = worker_count * TileSize;
@@ -56,7 +57,7 @@ inline void gemv_row_major_impl(
         }
         final_sum = simd_sum(final_sum);
         if (simd_lane_index == 0) {
-            output_values[row] = final_sum;
+            output_values[output_row] = final_sum;
         }
     }
 }

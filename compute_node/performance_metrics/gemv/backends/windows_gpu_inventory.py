@@ -38,20 +38,23 @@ def list_windows_display_adapters() -> tuple[list[dict[str, str]], str]:
     if os.name != "nt":
         return [], "display-adapter routing is only available on Windows"
 
-    completed = subprocess.run(
-        [
-            "powershell",
-            "-NoProfile",
-            "-Command",
-            (
-                "Get-CimInstance Win32_VideoController | "
-                "Select-Object Name,AdapterCompatibility,PNPDeviceID | "
-                "ConvertTo-Json -Compress"
-            ),
-        ],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        completed = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                (
+                    "Get-CimInstance Win32_VideoController | "
+                    "Select-Object Name,AdapterCompatibility,PNPDeviceID | "
+                    "ConvertTo-Json -Compress"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        return [], f"unable to inspect Windows video adapters: {exc}"
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout or "").strip()
         return [], f"unable to inspect Windows video adapters: {detail or 'unknown error'}"

@@ -233,6 +233,13 @@ def ensure_bootstrap_runtime_environment(logger, argv: list[str]) -> int | None:
     """
 
     status = inspect_project_environment()
+    logger.info(
+        "Bootstrap interpreter check: current=%s project=%s using_project_python=%s ready=%s",
+        sys.executable,
+        project_python_path(),
+        status.using_project_python,
+        status.ready,
+    )
     if not status.ready:
         setup_command = _setup_command()
         logger.info(
@@ -602,4 +609,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-

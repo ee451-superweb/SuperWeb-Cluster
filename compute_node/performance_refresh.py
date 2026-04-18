@@ -12,6 +12,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from app.constants import METHOD_GEMV, METHOD_CONV2D
+from app.compute_resource_policy import resolve_metal_headroom_policy
 from common.types import ComputeHardwarePerformance, ComputePerformanceSummary, MethodPerformanceSummary
 from compute_node.performance_metrics.gemv.backends import (
     build_backends as build_gemv_backends,
@@ -152,12 +153,18 @@ def _ensure_conv2d_refresh_runner(backend_name: str, best_config: dict[str, obje
         backend._resolve_executable_path(force_rebuild=False)
         return
     if backend_name == "metal":
-        from compute_node.compute_methods.conv2d import METAL_EXECUTABLE_PATH
-
-        if not METAL_EXECUTABLE_PATH.exists():
-            raise FileNotFoundError(f"spatial Metal runner is missing at {METAL_EXECUTABLE_PATH}")
+        backend._compile_if_needed(force_rebuild=False)
         return
     raise ValueError(f"unsupported spatial refresh backend: {backend_name}")
+
+
+def _compat_int(best_config: dict[str, object], key: str, default: int) -> int:
+    """Use this for runner flags that older and newer backends may omit."""
+
+    value = best_config.get(key)
+    if value in (None, ""):
+        return default
+    return int(value)
 
 
 def _refresh_gemv_gflops(backend_name: str, best_config: dict[str, object]) -> float:
@@ -203,12 +210,15 @@ def _refresh_gemv_gflops(backend_name: str, best_config: dict[str, object]) -> f
         )
     elif backend_name == "metal":
         executable_path, _ = backend._compile_if_needed(force_rebuild=False)
+        headroom_policy = resolve_metal_headroom_policy(spec.rows)
         metrics = backend._run_runner(
             executable_path,
             spec,
             dataset,
-            block_sizes=[int(best_config["block_size"])],
-            tile_sizes=[int(best_config["tile_size"])],
+            block_sizes=[_compat_int(best_config, "block_size", 256)],
+            tile_sizes=[_compat_int(best_config, "tile_size", 1)],
+            headroom_fraction=float(best_config.get("headroom_fraction") or headroom_policy.headroom_fraction),
+            row_chunk_size=headroom_policy.work_chunk_size,
             autotune_repeats=1,
             measurement_repeats=1,
             timeout_seconds=timeout_seconds,
@@ -259,14 +269,16 @@ def _refresh_conv2d_gflops(backend_name: str, best_config: dict[str, object]) ->
             timeout_seconds=timeout_seconds,
         )
     elif backend_name == "metal":
-        from compute_node.compute_methods.conv2d import METAL_EXECUTABLE_PATH
-
+        executable_path, _ = backend._compile_if_needed(force_rebuild=False)
+        headroom_policy = resolve_metal_headroom_policy(spec.c_out)
         metrics = backend._run_runner(
-            METAL_EXECUTABLE_PATH,
+            executable_path,
             spec,
             dataset,
-            block_sizes=[int(best_config["block_size"])],
-            tile_sizes=[int(best_config["tile_size"])],
+            block_sizes=[_compat_int(best_config, "block_size", 256)],
+            tile_sizes=[_compat_int(best_config, "tile_size", 16)],
+            headroom_fraction=float(best_config.get("headroom_fraction") or headroom_policy.headroom_fraction),
+            output_channel_batch=headroom_policy.work_chunk_size,
             autotune_repeats=1,
             measurement_repeats=1,
             timeout_seconds=timeout_seconds,
