@@ -1076,6 +1076,48 @@ class PerformanceMatricsTests(unittest.TestCase):
         self.assertIn("--cooldown-ms", command)
         self.assertEqual(command[command.index("--cooldown-ms") + 1], "2.5")
 
+    def test_spatial_metal_runner_command_includes_preparation_timing_flag(self) -> None:
+        backend = SpatialMetalBackend()
+        spec = SpatialBenchmarkSpec(
+            name="unit-test",
+            h=8,
+            w=8,
+            c_in=4,
+            c_out=8,
+            k=3,
+            pad=1,
+            ideal_seconds=1.0,
+            zero_score_seconds=5.0,
+            stride=1,
+        )
+        layout = build_conv_dataset_layout(Path("/tmp/generated"), prefix="test_")
+        captured: dict[str, list[str]] = {}
+
+        def fake_run(command, **kwargs):
+            captured["command"] = list(command)
+            return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+        with mock.patch(
+            "compute_node.performance_metrics.conv2d.backends.metal_backend.subprocess.run",
+            side_effect=fake_run,
+        ):
+            backend._run_runner(
+                Path("/tmp/fake_runner"),
+                spec,
+                layout,
+                block_sizes=[256],
+                tile_sizes=[16],
+                headroom_fraction=0.9,
+                output_channel_batch=7,
+                autotune_repeats=1,
+                measurement_repeats=1,
+                timeout_seconds=30.0,
+            )
+
+        command = captured["command"]
+        self.assertIn("--include-preparation-in-metrics", command)
+        self.assertEqual(command[command.index("--include-preparation-in-metrics") + 1], "1")
+
     def test_metal_backend_probe_returns_status(self) -> None:
         backend = MetalBackend()
         available, message = backend.probe()

@@ -46,6 +46,7 @@ struct Options {
     int stride = 1;
     std::vector<int> block_sizes;
     std::vector<int> tile_sizes;
+    bool include_preparation_in_metrics = false;
     double headroom_fraction = 1.0;
     int output_channel_batch = 0;
     int autotune_repeats = 1;
@@ -79,6 +80,16 @@ std::vector<int> parse_int_list(const std::string& text) {
         throw std::runtime_error("expected a non-empty integer list");
     }
     return values;
+}
+
+bool parse_bool_flag(const std::string& text) {
+    if (text == "1" || text == "true" || text == "TRUE" || text == "yes" || text == "YES") {
+        return true;
+    }
+    if (text == "0" || text == "false" || text == "FALSE" || text == "no" || text == "NO") {
+        return false;
+    }
+    throw std::runtime_error("expected boolean flag value");
 }
 
 Options parse_args(int argc, char** argv) {
@@ -116,6 +127,8 @@ Options parse_args(int argc, char** argv) {
             options.block_sizes = parse_int_list(value);
         } else if (key == "--tile-sizes") {
             options.tile_sizes = parse_int_list(value);
+        } else if (key == "--include-preparation-in-metrics") {
+            options.include_preparation_in_metrics = parse_bool_flag(value);
         } else if (key == "--headroom-fraction") {
             options.headroom_fraction = std::stod(value);
         } else if (key == "--output-channel-batch") {
@@ -347,6 +360,7 @@ PhaseMetrics run_mpsgraph_conv2d(
     int repeats
 ) {
     @autoreleasepool {
+        const auto phase_started = std::chrono::steady_clock::now();
         const int out_h_int = (options.h + 2 * options.pad - options.k) / options.stride + 1;
         const int out_w_int = (options.w + 2 * options.pad - options.k) / options.stride + 1;
         if (out_h_int <= 0 || out_w_int <= 0) {
@@ -494,7 +508,13 @@ PhaseMetrics run_mpsgraph_conv2d(
             total_seconds += run_pass(true, repeat + 1 < repeats, repeat + 1 == repeats);
         }
 
-        const double latency_seconds = total_seconds / static_cast<double>(repeats);
+        double latency_seconds = total_seconds / static_cast<double>(repeats);
+        if (options.include_preparation_in_metrics) {
+            const auto phase_finished = std::chrono::steady_clock::now();
+            const double phase_wall_clock_seconds =
+                std::chrono::duration<double>(phase_finished - phase_started).count();
+            latency_seconds = phase_wall_clock_seconds / static_cast<double>(repeats);
+        }
         const double flops_per_run =
             2.0 * static_cast<double>(out_h_int) * static_cast<double>(out_w_int) * static_cast<double>(options.c_out)
             * static_cast<double>(options.c_in) * static_cast<double>(options.k) * static_cast<double>(options.k);

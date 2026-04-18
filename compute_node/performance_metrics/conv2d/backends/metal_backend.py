@@ -211,6 +211,7 @@ class MetalBackend:
         tile_sizes = _candidate_tile_sizes()
         notes.append("implementation: official Apple MPSGraph convolution2D")
         notes.append("launch-shape autotune hints are accepted for interface compatibility but ignored by MPSGraph")
+        notes.append("wall-clock timings include MPSGraph graph construction and initial compilation cost")
         notes.append(f"shared_headroom_fraction: {measurement_headroom_policy.headroom_fraction:.3f}")
         notes.append(f"translated_autotune_output_channel_batch: {autotune_headroom_policy.work_chunk_size}")
         notes.append(f"translated_measurement_output_channel_batch: {measurement_headroom_policy.work_chunk_size}")
@@ -402,6 +403,8 @@ class MetalBackend:
             ",".join(str(value) for value in block_sizes),
             "--tile-sizes",
             ",".join(str(value) for value in tile_sizes),
+            "--include-preparation-in-metrics",
+            "1",
             "--headroom-fraction",
             f"{headroom_fraction:.6f}",
             "--output-channel-batch",
