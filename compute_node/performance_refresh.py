@@ -11,32 +11,32 @@ import json
 from collections.abc import Callable
 from pathlib import Path
 
-from app.constants import METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION, METHOD_SPATIAL_CONVOLUTION
+from app.constants import METHOD_GEMV, METHOD_CONV2D
 from common.types import ComputeHardwarePerformance, ComputePerformanceSummary, MethodPerformanceSummary
-from compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends import (
-    build_backends as build_fmvm_backends,
+from compute_node.performance_metrics.gemv.backends import (
+    build_backends as build_gemv_backends,
 )
-from compute_node.performance_metrics.fixed_matrix_vector_multiplication.config import (
-    DATASET_DIR as FMVM_DATASET_DIR,
+from compute_node.performance_metrics.gemv.config import (
+    DATASET_DIR as GEMV_DATASET_DIR,
 )
-from compute_node.performance_metrics.fixed_matrix_vector_multiplication.workloads import (
-    build_benchmark_spec as build_fmvm_benchmark_spec,
+from compute_node.performance_metrics.gemv.workloads import (
+    build_benchmark_spec as build_gemv_benchmark_spec,
 )
-from compute_node.performance_metrics.spatial_convolution.backends import (
-    build_backends as build_spatial_backends,
+from compute_node.performance_metrics.conv2d.backends import (
+    build_backends as build_conv2d_backends,
 )
-from compute_node.performance_metrics.spatial_convolution.config import (
-    DATASET_DIR as SPATIAL_DATASET_DIR,
+from compute_node.performance_metrics.conv2d.config import (
+    DATASET_DIR as CONV2D_DATASET_DIR,
 )
-from compute_node.performance_metrics.spatial_convolution.workloads import get_test_spec as get_spatial_test_spec
+from compute_node.performance_metrics.conv2d.workloads import get_small_spec as get_conv2d_small_spec
 from compute_node.performance_summary import DEFAULT_RESULT_PATH
-from compute_node.input_matrix.fixed_matrix_vector_multiplication import (
-    build_dataset_layout as build_fmvm_dataset_layout,
-    dataset_is_generated as fmvm_dataset_is_generated,
+from compute_node.input_matrix.gemv import (
+    build_dataset_layout as build_gemv_dataset_layout,
+    dataset_is_generated as gemv_dataset_is_generated,
 )
-from compute_node.input_matrix.spatial_convolution import (
-    build_dataset_layout as build_spatial_dataset_layout,
-    dataset_is_generated as spatial_dataset_is_generated,
+from compute_node.input_matrix.conv2d import (
+    build_dataset_layout as build_conv2d_dataset_layout,
+    dataset_is_generated as conv2d_dataset_is_generated,
 )
 
 ProgressCallback = Callable[[int, int, str], None]
@@ -99,60 +99,60 @@ def _load_best_backend_config(method_payload: dict[str, object]) -> tuple[str, d
     raise ValueError("benchmark result does not contain a refreshable best_config")
 
 
-def _ensure_fmvm_refresh_dataset(backend_name: str, best_config: dict[str, object]) -> None:
-    """Use this to validate the FMVM small dataset before idle refresh starts.
+def _ensure_gemv_refresh_dataset(backend_name: str, best_config: dict[str, object]) -> None:
+    """Use this to validate the GEMV small dataset before idle refresh starts.
 
     Args: backend_name selected refresh backend and best_config stored autotune config.
     Returns: ``None`` once the small dataset exists locally.
     """
     del best_config
-    dataset = build_fmvm_dataset_layout(FMVM_DATASET_DIR, prefix="test_")
-    if not fmvm_dataset_is_generated(dataset, build_fmvm_benchmark_spec(default_variant="test")):
-        raise FileNotFoundError(f"FMVM small dataset is missing at {dataset.root_dir}")
+    dataset = build_gemv_dataset_layout(GEMV_DATASET_DIR, prefix="small_")
+    if not gemv_dataset_is_generated(dataset, build_gemv_benchmark_spec(default_variant="small")):
+        raise FileNotFoundError(f"GEMV small dataset is missing at {dataset.root_dir}")
 
 
-def _ensure_fmvm_refresh_runner(backend_name: str, best_config: dict[str, object]) -> None:
-    """Use this to validate the FMVM runner binary before idle refresh starts.
+def _ensure_gemv_refresh_runner(backend_name: str, best_config: dict[str, object]) -> None:
+    """Use this to validate the GEMV runner binary before idle refresh starts.
 
     Args: backend_name selected refresh backend and best_config stored autotune config.
     Returns: ``None`` once the chosen backend runner is available locally.
     """
     del best_config
-    backend = build_fmvm_backends([backend_name])[0]
+    backend = build_gemv_backends([backend_name])[0]
     if backend_name in {"cpu", "cuda"}:
         backend._resolve_executable_path(force_rebuild=False)
         return
     if backend_name == "metal":
         backend._compile_if_needed(force_rebuild=False)
         return
-    raise ValueError(f"unsupported FMVM refresh backend: {backend_name}")
+    raise ValueError(f"unsupported GEMV refresh backend: {backend_name}")
 
 
-def _ensure_spatial_refresh_dataset(backend_name: str, best_config: dict[str, object]) -> None:
-    """Use this to validate the spatial small dataset before idle refresh starts.
+def _ensure_conv2d_refresh_dataset(backend_name: str, best_config: dict[str, object]) -> None:
+    """Use this to validate the conv2d small dataset before idle refresh starts.
 
     Args: backend_name selected refresh backend and best_config stored autotune config.
     Returns: ``None`` once the small dataset exists locally.
     """
     del best_config
-    dataset = build_spatial_dataset_layout(SPATIAL_DATASET_DIR, prefix="test_")
-    if not spatial_dataset_is_generated(dataset, get_spatial_test_spec(), skip_weight=False):
-        raise FileNotFoundError(f"spatial small dataset is missing at {dataset.root_dir}")
+    dataset = build_conv2d_dataset_layout(CONV2D_DATASET_DIR, prefix="small_")
+    if not conv2d_dataset_is_generated(dataset, get_conv2d_small_spec(), skip_weight=False):
+        raise FileNotFoundError(f"conv2d small dataset is missing at {dataset.root_dir}")
 
 
-def _ensure_spatial_refresh_runner(backend_name: str, best_config: dict[str, object]) -> None:
+def _ensure_conv2d_refresh_runner(backend_name: str, best_config: dict[str, object]) -> None:
     """Use this to validate the spatial runner binary before idle refresh starts.
 
     Args: backend_name selected refresh backend and best_config stored autotune config.
     Returns: ``None`` once the chosen backend runner is available locally.
     """
     del best_config
-    backend = build_spatial_backends([backend_name])[0]
+    backend = build_conv2d_backends([backend_name])[0]
     if backend_name in {"cpu", "cuda"}:
         backend._resolve_executable_path(force_rebuild=False)
         return
     if backend_name == "metal":
-        from compute_node.compute_methods.spatial_convolution import METAL_EXECUTABLE_PATH
+        from compute_node.compute_methods.conv2d import METAL_EXECUTABLE_PATH
 
         if not METAL_EXECUTABLE_PATH.exists():
             raise FileNotFoundError(f"spatial Metal runner is missing at {METAL_EXECUTABLE_PATH}")
@@ -160,20 +160,20 @@ def _ensure_spatial_refresh_runner(backend_name: str, best_config: dict[str, obj
     raise ValueError(f"unsupported spatial refresh backend: {backend_name}")
 
 
-def _refresh_fmvm_gflops(backend_name: str, best_config: dict[str, object]) -> float:
-    """Use this while refreshing idle FMVM performance on the small benchmark dataset.
+def _refresh_gemv_gflops(backend_name: str, best_config: dict[str, object]) -> float:
+    """Use this while refreshing idle GEMV performance on the small benchmark dataset.
 
     Args: backend_name selected refresh backend and best_config stored autotune config.
-    Returns: Measured effective GFLOPS for the FMVM method on this worker.
+    Returns: Measured effective GFLOPS for the GEMV method on this worker.
     """
-    backend = build_fmvm_backends([backend_name])[0]
-    spec = build_fmvm_benchmark_spec(
-        default_variant="test",
+    backend = build_gemv_backends([backend_name])[0]
+    spec = build_gemv_benchmark_spec(
+        default_variant="small",
         accumulation_precision=str(best_config.get("accumulation_precision") or "fp32"),
     )
-    dataset = build_fmvm_dataset_layout(FMVM_DATASET_DIR, prefix="test_")
-    if not fmvm_dataset_is_generated(dataset, build_fmvm_benchmark_spec(default_variant="test")):
-        raise FileNotFoundError(f"FMVM small dataset is missing at {dataset.root_dir}")
+    dataset = build_gemv_dataset_layout(GEMV_DATASET_DIR, prefix="small_")
+    if not gemv_dataset_is_generated(dataset, build_gemv_benchmark_spec(default_variant="small")):
+        raise FileNotFoundError(f"GEMV small dataset is missing at {dataset.root_dir}")
     timeout_seconds = max(30.0, spec.zero_score_seconds)
 
     if backend_name == "cpu":
@@ -214,22 +214,22 @@ def _refresh_fmvm_gflops(backend_name: str, best_config: dict[str, object]) -> f
             timeout_seconds=timeout_seconds,
         )
     else:
-        raise ValueError(f"unsupported FMVM refresh backend: {backend_name}")
+        raise ValueError(f"unsupported GEMV refresh backend: {backend_name}")
 
     return float(metrics["measurement_effective_gflops"])
 
 
-def _refresh_spatial_gflops(backend_name: str, best_config: dict[str, object]) -> float:
+def _refresh_conv2d_gflops(backend_name: str, best_config: dict[str, object]) -> float:
     """Use this while refreshing idle convolution performance on the small dataset.
 
     Args: backend_name selected refresh backend and best_config stored autotune config.
-    Returns: Measured effective GFLOPS for the spatial-convolution method.
+    Returns: Measured effective GFLOPS for the conv2d method.
     """
-    backend = build_spatial_backends([backend_name])[0]
-    spec = get_spatial_test_spec()
-    dataset = build_spatial_dataset_layout(SPATIAL_DATASET_DIR, prefix="test_")
-    if not spatial_dataset_is_generated(dataset, spec, skip_weight=False):
-        raise FileNotFoundError(f"spatial small dataset is missing at {dataset.root_dir}")
+    backend = build_conv2d_backends([backend_name])[0]
+    spec = get_conv2d_small_spec()
+    dataset = build_conv2d_dataset_layout(CONV2D_DATASET_DIR, prefix="small_")
+    if not conv2d_dataset_is_generated(dataset, spec, skip_weight=False):
+        raise FileNotFoundError(f"conv2d small dataset is missing at {dataset.root_dir}")
     timeout_seconds = max(30.0, spec.zero_score_seconds)
 
     if backend_name == "cpu":
@@ -259,7 +259,7 @@ def _refresh_spatial_gflops(backend_name: str, best_config: dict[str, object]) -
             timeout_seconds=timeout_seconds,
         )
     elif backend_name == "metal":
-        from compute_node.compute_methods.spatial_convolution import METAL_EXECUTABLE_PATH
+        from compute_node.compute_methods.conv2d import METAL_EXECUTABLE_PATH
 
         metrics = backend._run_runner(
             METAL_EXECUTABLE_PATH,
@@ -287,13 +287,13 @@ def refresh_idle_performance_summary(result_path: Path | None = None) -> Compute
     payload = _load_result_payload(result_path)
     method_summaries: list[MethodPerformanceSummary] = []
 
-    for method in (METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION, METHOD_SPATIAL_CONVOLUTION):
+    for method in (METHOD_GEMV, METHOD_CONV2D):
         method_payload = _load_method_payload(payload, method)
         backend_name, best_config = _load_best_backend_config(method_payload)
         effective_gflops = (
-            _refresh_fmvm_gflops(backend_name, best_config)
-            if method == METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION
-            else _refresh_spatial_gflops(backend_name, best_config)
+            _refresh_gemv_gflops(backend_name, best_config)
+            if method == METHOD_GEMV
+            else _refresh_conv2d_gflops(backend_name, best_config)
         )
         method_summaries.append(
             MethodPerformanceSummary(
@@ -312,7 +312,7 @@ def refresh_idle_performance_summary(result_path: Path | None = None) -> Compute
     legacy_view = next(
         summary
         for summary in method_summaries
-        if summary.method == METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION
+        if summary.method == METHOD_GEMV
     )
     return ComputePerformanceSummary(
         hardware_count=legacy_view.hardware_count,
@@ -365,60 +365,60 @@ def validate_idle_refresh_requirements(
     )
     payload = _load_result_payload(result_path)
 
-    fmvm_payload = _load_method_payload(payload, METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION)
+    gemv_payload = _load_method_payload(payload, METHOD_GEMV)
     _emit_validation_progress(
         progress_callback,
         step=2,
         total_steps=total_steps,
-        description="Selecting refresh backend for fixed_matrix_vector_multiplication.",
+        description="Selecting refresh backend for gemv.",
     )
-    fmvm_backend_name, fmvm_best_config = _load_best_backend_config(fmvm_payload)
+    gemv_backend_name, gemv_best_config = _load_best_backend_config(gemv_payload)
     _emit_validation_progress(
         progress_callback,
         step=3,
         total_steps=total_steps,
         description=(
-            "Checking fixed_matrix_vector_multiplication small input matrix "
-            f"for backend {fmvm_backend_name}."
+            "Checking gemv small input matrix "
+            f"for backend {gemv_backend_name}."
         ),
     )
-    _ensure_fmvm_refresh_dataset(fmvm_backend_name, fmvm_best_config)
+    _ensure_gemv_refresh_dataset(gemv_backend_name, gemv_best_config)
     _emit_validation_progress(
         progress_callback,
         step=4,
         total_steps=total_steps,
         description=(
-            "Checking fixed_matrix_vector_multiplication runner binary "
-            f"for backend {fmvm_backend_name}."
+            "Checking gemv runner binary "
+            f"for backend {gemv_backend_name}."
         ),
     )
-    _ensure_fmvm_refresh_runner(fmvm_backend_name, fmvm_best_config)
+    _ensure_gemv_refresh_runner(gemv_backend_name, gemv_best_config)
 
-    spatial_payload = _load_method_payload(payload, METHOD_SPATIAL_CONVOLUTION)
+    conv2d_payload = _load_method_payload(payload, METHOD_CONV2D)
     _emit_validation_progress(
         progress_callback,
         step=5,
         total_steps=total_steps,
-        description="Selecting refresh backend for spatial_convolution.",
+        description="Selecting refresh backend for conv2d.",
     )
-    spatial_backend_name, spatial_best_config = _load_best_backend_config(spatial_payload)
+    conv2d_backend_name, conv2d_best_config = _load_best_backend_config(conv2d_payload)
     _emit_validation_progress(
         progress_callback,
         step=6,
         total_steps=total_steps,
         description=(
-            "Checking spatial_convolution small input matrix "
-            f"for backend {spatial_backend_name}."
+            "Checking conv2d small input matrix "
+            f"for backend {conv2d_backend_name}."
         ),
     )
-    _ensure_spatial_refresh_dataset(spatial_backend_name, spatial_best_config)
+    _ensure_conv2d_refresh_dataset(conv2d_backend_name, conv2d_best_config)
     _emit_validation_progress(
         progress_callback,
         step=7,
         total_steps=total_steps,
         description=(
-            "Checking spatial_convolution runner binary "
-            f"for backend {spatial_backend_name}."
+            "Checking conv2d runner binary "
+            f"for backend {conv2d_backend_name}."
         ),
     )
-    _ensure_spatial_refresh_runner(spatial_backend_name, spatial_best_config)
+    _ensure_conv2d_refresh_runner(conv2d_backend_name, conv2d_best_config)

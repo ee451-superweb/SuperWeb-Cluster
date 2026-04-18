@@ -6,11 +6,13 @@ threads, worker-update handling, client-info replies, and role-aware cleanup.
 
 from __future__ import annotations
 
+import logging
 import socket
 import threading
 from contextlib import nullcontext
 
 from adapters import network
+from adapters.audit_log import write_audit_event
 from app.constants import (
     DEFAULT_CLIENT_INFO_TIMEOUT,
     RUNTIME_MSG_CLIENT_INFO_REPLY,
@@ -34,6 +36,7 @@ class RuntimeConnectionHandler:
         format_reported_hardware,
         print_cluster_compute_capacity,
         runtime_should_stop,
+        logger=None,
     ) -> None:
         """Store dependencies used while reading and maintaining runtime peers.
 
@@ -43,12 +46,14 @@ class RuntimeConnectionHandler:
             format_reported_hardware: Formatter used in worker-update logs.
             print_cluster_compute_capacity: Callback that prints cluster totals.
             runtime_should_stop: Callback returning whether shutdown is in progress.
+            logger: Logger used for audit events and removal warnings.
         """
         self.config = config
         self.registry = registry
         self.format_reported_hardware = format_reported_hardware
         self.print_cluster_compute_capacity = print_cluster_compute_capacity
         self.runtime_should_stop = runtime_should_stop
+        self.logger = logger
 
     @trace_function
     def start_runtime_connection_reader(self, connection) -> None:
@@ -149,10 +154,10 @@ class RuntimeConnectionHandler:
         )
         if updated is None:
             raise ValueError(f"unable to apply {RUNTIME_MSG_WORKER_UPDATE} for unknown worker {connection.runtime_id}")
-        print(
+        write_audit_event(
             f"{RUNTIME_MSG_WORKER_UPDATE} from {connection.node_name} "
             f"id={connection.runtime_id} ranking={self.format_reported_hardware(updated)}",
-            flush=True,
+            logger=self.logger,
         )
         self.print_cluster_compute_capacity()
 
@@ -172,7 +177,7 @@ class RuntimeConnectionHandler:
                 f"received {RUNTIME_MSG_CLIENT_INFO_REQUEST} for unexpected client id "
                 f"{client_id}; expected {connection.runtime_id}"
             )
-        active_request_ids = self.registry.get_client_active_request_ids(connection.peer_id)
+        active_task_ids = self.registry.get_client_active_task_ids(connection.peer_id)
         timeout_ms = int(DEFAULT_CLIENT_INFO_TIMEOUT * 1000)
         with self._resolve_connection_lock(getattr(connection, "io_lock", None)):
             send_message(
@@ -181,14 +186,14 @@ class RuntimeConnectionHandler:
                     client_id=connection.runtime_id,
                     request_timestamp_ms=client_info_request.timestamp_ms,
                     timeout_ms=timeout_ms,
-                    has_active_tasks=bool(active_request_ids),
-                    active_request_ids=active_request_ids,
+                    has_active_tasks=bool(active_task_ids),
+                    active_task_ids=active_task_ids,
                 ),
             )
-        print(
+        write_audit_event(
             f"{RUNTIME_MSG_CLIENT_INFO_REPLY} to {connection.node_name} "
-            f"id={connection.runtime_id} active_requests={list(active_request_ids)}",
-            flush=True,
+            f"id={connection.runtime_id} active_tasks={list(active_task_ids)}",
+            logger=self.logger,
         )
 
     def _resolve_connection_lock(self, lock):
@@ -221,9 +226,10 @@ class RuntimeConnectionHandler:
             return
         removed.mailbox.close(reason)
         network.safe_close(removed.sock)
-        print(
+        write_audit_event(
             f"Removed compute node {connection.node_name} at {connection.peer_address}:{connection.peer_port}: {reason}",
-            flush=True,
+            logger=self.logger,
+            level=logging.WARNING,
         )
         self.print_cluster_compute_capacity()
 
@@ -243,9 +249,10 @@ class RuntimeConnectionHandler:
             return
         removed.mailbox.close(reason)
         network.safe_close(removed.sock)
-        print(
+        write_audit_event(
             f"Removed client {connection.node_name} at {connection.peer_address}:{connection.peer_port}: {reason}",
-            flush=True,
+            logger=self.logger,
+            level=logging.WARNING,
         )
 
     def remove_runtime_connection(self, connection, reason: str) -> None:

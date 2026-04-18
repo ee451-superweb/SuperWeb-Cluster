@@ -1,4 +1,4 @@
-﻿"""Runtime protobuf protocol tests."""
+"""Runtime protobuf protocol tests."""
 
 import socket
 import unittest
@@ -9,8 +9,8 @@ from common.types import ComputeHardwarePerformance, ComputePerformanceSummary, 
 from app.constants import (
     COMPUTE_NODE_NAME,
     MAIN_NODE_NAME,
-    METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
-    METHOD_SPATIAL_CONVOLUTION,
+    METHOD_GEMV,
+    METHOD_CONV2D,
     STATUS_ACCEPTED,
     STATUS_OK,
     SUPERWEB_CLIENT_NAME,
@@ -18,9 +18,9 @@ from app.constants import (
 from wire.internal_protocol.control_plane_codec import encode_envelope, parse_envelope
 from wire.internal_protocol.runtime_transport import (
     MessageKind,
-    SpatialConvolutionRequestPayload,
-    SpatialConvolutionResultPayload,
-    SpatialConvolutionTaskPayload,
+    Conv2dRequestPayload,
+    Conv2dResultPayload,
+    Conv2dTaskPayload,
     TransferMode,
     build_client_join,
     build_client_request,
@@ -113,7 +113,7 @@ class RuntimeProtocolTests(unittest.TestCase):
                 build_client_request(
                     SUPERWEB_CLIENT_NAME,
                     "req-1",
-                    METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
+                    METHOD_GEMV,
                     vector_data,
                     object_id="input_matrix/default",
                     stream_id="stream-1",
@@ -126,7 +126,7 @@ class RuntimeProtocolTests(unittest.TestCase):
                 build_client_response(
                     request_id="req-1",
                     status_code=STATUS_OK,
-                    method=METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
+                    method=METHOD_GEMV,
                     object_id="input_matrix/default",
                     stream_id="stream-1",
                     output_vector=output_vector,
@@ -141,7 +141,7 @@ class RuntimeProtocolTests(unittest.TestCase):
         self.assertEqual(join.kind, MessageKind.CLIENT_JOIN)
         self.assertEqual(join.client_join.client_name, SUPERWEB_CLIENT_NAME)
         self.assertEqual(request.kind, MessageKind.CLIENT_REQUEST)
-        self.assertEqual(request.client_request.method, METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION)
+        self.assertEqual(request.client_request.method, METHOD_GEMV)
         self.assertEqual(request.client_request.vector_length, 4)
         self.assertEqual(request.client_request.iteration_count, 7)
         self.assertEqual(unpack_float32_bytes(request.client_request.vector_data), [1.0, 2.0, 3.0, 4.0])
@@ -162,7 +162,7 @@ class RuntimeProtocolTests(unittest.TestCase):
                     request_id="req-1",
                     node_id=COMPUTE_NODE_NAME,
                     task_id="req-1:worker-a",
-                    method=METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
+                    method=METHOD_GEMV,
                     row_start=10,
                     row_end=12,
                     vector_data=vector_data,
@@ -208,7 +208,7 @@ class RuntimeProtocolTests(unittest.TestCase):
         self.assertEqual(result.task_result.iteration_count, 11)
         self.assertEqual(unpack_float32_bytes(result.task_result.output_vector), [9.0, 10.0])
 
-    def test_spatial_convolution_messages_use_typed_payloads(self) -> None:
+    def test_conv2d_messages_use_typed_payloads(self) -> None:
         weight_data = pack_float32_values([0.5] * (3 * 3 * 4 * 2))
         output_vector = pack_float32_values([1.0] * (8 * 8 * 2))
         request = parse_envelope(
@@ -216,9 +216,10 @@ class RuntimeProtocolTests(unittest.TestCase):
                 build_client_request(
                     SUPERWEB_CLIENT_NAME,
                     "req-spatial",
-                    METHOD_SPATIAL_CONVOLUTION,
+                    METHOD_CONV2D,
                     b"",
-                    object_id="spatial_convolution/test",
+                    size="small",
+                    object_id="conv2d/small",
                     stream_id="stream-spatial",
                     tensor_h=8,
                     tensor_w=8,
@@ -236,11 +237,12 @@ class RuntimeProtocolTests(unittest.TestCase):
                     request_id="req-spatial",
                     node_id=COMPUTE_NODE_NAME,
                     task_id="req-spatial:worker-a:0",
-                    method=METHOD_SPATIAL_CONVOLUTION,
+                    method=METHOD_CONV2D,
+                    size="small",
                     row_start=0,
                     row_end=0,
                     vector_data=b"",
-                    object_id="spatial_convolution/test",
+                    object_id="conv2d/small",
                     stream_id="stream-spatial",
                     iteration_count=3,
                     transfer_mode=TransferMode.ARTIFACT_PREFERRED,
@@ -278,17 +280,17 @@ class RuntimeProtocolTests(unittest.TestCase):
             )
         )
 
-        self.assertIsInstance(request.client_request.request_payload, SpatialConvolutionRequestPayload)
+        self.assertIsInstance(request.client_request.request_payload, Conv2dRequestPayload)
         self.assertEqual(request.client_request.tensor_h, 8)
         self.assertEqual(request.client_request.channels_out, 8)
         self.assertEqual(request.client_request.vector_length, 0)
-        self.assertIsInstance(assign.task_assign.task_payload, SpatialConvolutionTaskPayload)
+        self.assertIsInstance(assign.task_assign.task_payload, Conv2dTaskPayload)
         self.assertEqual(assign.task_assign.transfer_mode, TransferMode.ARTIFACT_PREFERRED)
         self.assertEqual(assign.task_assign.start_oc, 2)
         self.assertEqual(assign.task_assign.end_oc, 4)
         self.assertEqual(assign.task_assign.channels_in, 4)
         self.assertEqual(assign.task_assign.weight_data, weight_data)
-        self.assertIsInstance(result.task_result.result_payload, SpatialConvolutionResultPayload)
+        self.assertIsInstance(result.task_result.result_payload, Conv2dResultPayload)
         self.assertEqual(result.task_result.output_h, 8)
         self.assertEqual(result.task_result.output_w, 8)
         self.assertEqual(result.task_result.output_length, 8 * 8 * 2)

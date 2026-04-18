@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 import sys
 from pathlib import Path
 
+from app.constants import LOGGER_NAME
 from setup import current_python_uses_project_venv, project_python_path
 
 
@@ -25,12 +27,9 @@ def relaunch_with_project_python_if_needed(
     target_script = Path(sys.argv[0]).resolve() if script_path is None else Path(script_path)
     launch_cwd = Path.cwd() if cwd is None else Path(cwd)
     command = [str(venv_python), str(target_script), *effective_argv]
+    logger = logging.getLogger(LOGGER_NAME)
 
-    print(
-        f"relaunching with project virtual environment: {venv_python}",
-        file=sys.stderr,
-        flush=True,
-    )
+    logger.info("Relaunching with project virtual environment: %s", venv_python)
     try:
         result = subprocess.run(
             command,
@@ -38,10 +37,6 @@ def relaunch_with_project_python_if_needed(
             cwd=launch_cwd,
         )
     except OSError as exc:
-        print(
-            f"failed to relaunch with project virtual environment: {exc}",
-            file=sys.stderr,
-            flush=True,
-        )
+        logger.error("Failed to relaunch with project virtual environment: %s", exc)
         return 1
     return int(result.returncode)

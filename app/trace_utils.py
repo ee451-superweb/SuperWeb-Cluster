@@ -21,16 +21,10 @@ def trace_function(func: Callable[P, R]) -> Callable[P, R]:
         qualified_name = f"{func.__module__}.{func.__qualname__}"
         message = f"[TRACE] Entering {qualified_name}"
 
-        # If logging is already configured, keep trace output aligned with the rest
-        # of the program. Otherwise fall back to print so early startup still shows
-        # function entry order.
+        # Only emit trace lines once logging is configured. Early bootstrap
+        # should stay quiet on stdout so audit-log routing remains consistent.
         if logging.getLogger().handlers:
             logging.getLogger(LOGGER_NAME).info(message)
-        else:
-            try:
-                print(message, flush=True)
-            except OSError:
-                logging.getLogger(LOGGER_NAME).debug(message)
 
         return func(*args, **kwargs)
 

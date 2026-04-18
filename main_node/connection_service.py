@@ -10,6 +10,7 @@ import socket
 import threading
 
 from adapters import network
+from adapters.audit_log import write_audit_event
 from app.constants import MAIN_NODE_NAME, STATUS_OK
 from app.trace_utils import trace_function
 from wire.internal_protocol.runtime_transport import (
@@ -35,6 +36,7 @@ class RuntimeConnectionService:
         serve_client_connection,
         cluster_counts,
         on_runtime_connection_registered=None,
+        logger=None,
     ) -> None:
         """Capture registration helpers and runtime callbacks.
 
@@ -46,6 +48,7 @@ class RuntimeConnectionService:
             serve_client_connection: Entry point for a registered client session.
             cluster_counts: Callback returning current worker and client counts.
             on_runtime_connection_registered: Optional post-registration hook.
+            logger: Logger used for audit events and rejection warnings.
         """
         self.config = config
         self.registry = registry
@@ -54,6 +57,7 @@ class RuntimeConnectionService:
         self.serve_client_connection = serve_client_connection
         self.cluster_counts = cluster_counts
         self.on_runtime_connection_registered = on_runtime_connection_registered
+        self.logger = logger
 
     @trace_function
     def register_worker_connection(
@@ -95,14 +99,15 @@ class RuntimeConnectionService:
                 node_id=connection.runtime_id,
             ),
         )
-        print(
+        write_audit_event(
             f"Registered compute node {connection.node_name} "
             f"id={connection.runtime_id} "
             f"from {connection.peer_address}:{connection.peer_port} "
             f"cpu={connection.hardware.logical_cpu_count} memory_bytes={connection.hardware.memory_bytes} "
             f"reported_hardware={connection.performance.hardware_count if connection.performance else 0} "
             f"ranking={self.format_reported_hardware(connection)}",
-            flush=True,
+            stdout=True,
+            logger=self.logger,
         )
         self.print_cluster_compute_capacity()
         if self.on_runtime_connection_registered is not None:
@@ -146,11 +151,12 @@ class RuntimeConnectionService:
                 client_id=connection.runtime_id,
             ),
         )
-        print(
+        write_audit_event(
             f"Registered client {connection.node_name} "
             f"id={connection.runtime_id} "
             f"from {connection.peer_address}:{connection.peer_port}",
-            flush=True,
+            stdout=True,
+            logger=self.logger,
         )
         if self.on_runtime_connection_registered is not None:
             self.on_runtime_connection_registered(connection)
@@ -233,5 +239,11 @@ class RuntimeConnectionService:
             try:
                 self.register_runtime_connection(client_sock, addr, main_node_ip)
             except (OSError, ValueError, ConnectionError) as exc:
-                print(f"Rejected superweb-cluster runtime connection from {addr[0]}:{addr[1]}: {exc}", flush=True)
+                if self.logger is not None:
+                    self.logger.warning(
+                        "Rejected superweb-cluster runtime connection from %s:%s: %s",
+                        addr[0],
+                        addr[1],
+                        exc,
+                    )
                 network.safe_close(client_sock)

@@ -15,11 +15,9 @@ import time
 from functools import lru_cache
 from typing import Any
 
-from app.constants import METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION, METHOD_SPATIAL_CONVOLUTION
-from compute_node.performance_metrics.fixed_matrix_vector_multiplication.config import DISPLAY_NAME as FMVM_DISPLAY_NAME
-from compute_node.performance_metrics.spatial_convolution.config import DISPLAY_NAME as SPATIAL_DISPLAY_NAME
-from compute_node.performance_metrics.workload_modes import WORKLOAD_MODE_LARGE
-
+from app.constants import METHOD_GEMV, METHOD_CONV2D
+from compute_node.performance_metrics.gemv.config import DISPLAY_NAME as GEMV_DISPLAY_NAME
+from compute_node.performance_metrics.conv2d.config import DISPLAY_NAME as CONV2D_DISPLAY_NAME
 _DEVICE_NOTE_PATTERN = re.compile(r"device=(.+)")
 _QUOTED_DEVICE_PATTERN = re.compile(r"'([^']+)'")
 _SEARCH_VALUES_PATTERN = re.compile(r"search order: (?P<values>\[.*\])$")
@@ -80,6 +78,29 @@ def _compact_note(note: str) -> str | None:
         A shortened note string, or ``None`` when the note is unhelpful.
     """
     lowered = note.lower()
+    autotune_match = re.match(
+        r"autotuned on (?P<autotune>.+?) and measured on (?P<measurement>.+?)\.?$",
+        note.strip(),
+        re.IGNORECASE,
+    )
+    if autotune_match:
+        autotune_name = autotune_match.group("autotune").strip().lower()
+        measurement_name = autotune_match.group("measurement").strip().lower()
+
+        def _workload_variant(name: str) -> str | None:
+            if "runtime" in name or "large" in name:
+                return "large"
+            if "medium" in name or "mid" in name:
+                return "mid"
+            if "test" in name or "small" in name:
+                return "small"
+            return None
+
+        autotune_variant = _workload_variant(autotune_name)
+        measurement_variant = _workload_variant(measurement_name)
+        if autotune_variant and measurement_variant:
+            return f"{autotune_variant} autotune, {measurement_variant} measurement"
+
     if "cuda backend available" in lowered or "nvcc detected on path" in lowered:
         return None
     if "compiled cuda runner" in lowered or "compiled self-contained windows cuda runner" in lowered:
@@ -117,8 +138,6 @@ def _compact_note(note: str) -> str | None:
         ("self-contained", "self-contained binary"),
         ("only available on macos", "macOS only"),
         ("only fp32 accumulation", "fp32 accumulation only"),
-        ("autotuned on", "test autotune, runtime measurement"),
-        ("autotune on", "test autotune, runtime measurement"),
     )
     for needle, replacement in replacements:
         if needle in lowered:
@@ -517,17 +536,17 @@ def _normalize_backend(
     return normalized
 
 
-def _normalize_fixed_matrix_vector_dataset(
+def _normalize_gemv_dataset(
     raw_method: dict[str, Any], dataset_root: str | None
 ) -> dict[str, Any]:
-    """Normalize the dataset section for an FMVM method report.
+    """Normalize the dataset section for an GEMV method report.
 
     Args:
-        raw_method: Raw FMVM method report.
+        raw_method: Raw GEMV method report.
         dataset_root: Portable dataset-root string for the report.
 
     Returns:
-        The normalized FMVM dataset description.
+        The normalized GEMV dataset description.
     """
     dataset = raw_method.get("dataset", {})
     root_dir = dataset_root or dataset.get("root_dir")
@@ -579,39 +598,48 @@ def _normalize_fixed_matrix_vector_dataset(
     }
 
 
-def _normalize_spatial_dataset(raw_method: dict[str, Any], dataset_root: str | None) -> dict[str, Any]:
-    """Normalize the dataset section for a spatial-convolution report.
+def _normalize_conv2d_dataset(raw_method: dict[str, Any], dataset_root: str | None) -> dict[str, Any]:
+    """Normalize the dataset section for a conv2d report.
 
     Args:
-        raw_method: Raw spatial-convolution method report.
+        raw_method: Raw conv2d method report.
         dataset_root: Portable dataset-root string for the report.
 
     Returns:
-        The normalized spatial dataset description.
+        The normalized conv2d dataset description.
     """
     workload = raw_method.get("workload", {})
     autotune_variant = str(workload.get("autotune_dataset_variant") or "")
     measurement_variant = str(workload.get("measurement_dataset_variant") or "")
     full_runtime = bool(workload.get("full_runtime_measurement"))
-    autotune_uses_large_dataset = autotune_variant == WORKLOAD_MODE_LARGE
-    measurement_uses_large_dataset = measurement_variant == WORKLOAD_MODE_LARGE or (
-        not measurement_variant and full_runtime
+
+    def _normalize_variant(variant: str, fallback: str) -> str:
+        lowered = (variant or fallback).strip().lower()
+        if lowered == "test":
+            return "small"
+        if lowered == "medium":
+            return "mid"
+        if lowered == "runtime":
+            return "large"
+        return lowered or fallback
+
+    def _artifact_path(variant: str, kind: str) -> str | None:
+        if not dataset_root:
+            return None
+        return f"{dataset_root}/{variant}_{kind}.bin"
+
+    autotune_variant = _normalize_variant(autotune_variant, "small")
+    measurement_variant = _normalize_variant(
+        measurement_variant,
+        "large" if full_runtime else autotune_variant,
     )
     artifacts = {
-        "autotune_input": (
-            f"{dataset_root}/runtime_input.bin"
-            if dataset_root and autotune_uses_large_dataset
-            else (f"{dataset_root}/test_input.bin" if dataset_root else None)
-        ),
-        "autotune_weight": (
-            f"{dataset_root}/runtime_weight.bin"
-            if dataset_root and autotune_uses_large_dataset
-            else (f"{dataset_root}/test_weight.bin" if dataset_root else None)
-        ),
+        "autotune_input": _artifact_path(autotune_variant, "input"),
+        "autotune_weight": _artifact_path(autotune_variant, "weight"),
     }
-    if measurement_uses_large_dataset:
-        artifacts["measurement_input"] = f"{dataset_root}/runtime_input.bin" if dataset_root else None
-        artifacts["measurement_weight"] = f"{dataset_root}/runtime_weight.bin" if dataset_root else None
+    if measurement_variant != autotune_variant:
+        artifacts["measurement_input"] = _artifact_path(measurement_variant, "input")
+        artifacts["measurement_weight"] = _artifact_path(measurement_variant, "weight")
     else:
         artifacts["measurement_input"] = artifacts["autotune_input"]
         artifacts["measurement_weight"] = artifacts["autotune_weight"]
@@ -630,7 +658,7 @@ def normalize_method_report(
 ) -> dict[str, Any]:
     """Normalize one raw method report into the shared report schema.
 
-    Use this from the top-level benchmark normalizer so FMVM and spatial
+    Use this from the top-level benchmark normalizer so GEMV and spatial
     convolution both end up in the same downstream-friendly structure.
 
     Args:
@@ -642,16 +670,16 @@ def normalize_method_report(
     Returns:
         The normalized method report dictionary.
     """
-    if method_name == METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION:
-        display_name = FMVM_DISPLAY_NAME
-        dataset = _normalize_fixed_matrix_vector_dataset(raw_method, dataset_root)
+    if method_name == METHOD_GEMV:
+        display_name = GEMV_DISPLAY_NAME
+        dataset = _normalize_gemv_dataset(raw_method, dataset_root)
         raw_workload = raw_method.get("workload", {})
         autotune_shape = dict(dataset.get("shape", {}).get("autotune") or {})
         measurement_shape = dict(dataset.get("shape", {}).get("measurement") or {})
         autotune_plan = {
             **dict(raw_workload.get("autotune") or {}),
             "name": raw_workload.get("autotune", {}).get("name")
-            or f"fmvm-{autotune_shape.get('rows')}x{autotune_shape.get('cols')}",
+            or f"gemv-{autotune_shape.get('rows')}x{autotune_shape.get('cols')}",
             "rows": autotune_shape.get("rows"),
             "cols": autotune_shape.get("cols"),
             "dataset_variant": raw_workload.get("autotune_dataset_variant"),
@@ -665,7 +693,7 @@ def normalize_method_report(
         measurement_plan = {
             **dict(raw_workload.get("measurement") or {}),
             "name": raw_workload.get("measurement", {}).get("name")
-            or f"fmvm-{measurement_shape.get('rows')}x{measurement_shape.get('cols')}",
+            or f"gemv-{measurement_shape.get('rows')}x{measurement_shape.get('cols')}",
             "rows": measurement_shape.get("rows"),
             "cols": measurement_shape.get("cols"),
             "dataset_variant": raw_workload.get("measurement_dataset_variant"),
@@ -676,8 +704,8 @@ def normalize_method_report(
             "workload_mode": raw_workload.get("workload_mode"),
         }
     else:
-        display_name = SPATIAL_DISPLAY_NAME
-        dataset = _normalize_spatial_dataset(raw_method, dataset_root)
+        display_name = CONV2D_DISPLAY_NAME
+        dataset = _normalize_conv2d_dataset(raw_method, dataset_root)
         raw_workload = raw_method.get("workload", {})
         autotune_plan = {
             **dict(raw_workload.get("autotune") or {}),

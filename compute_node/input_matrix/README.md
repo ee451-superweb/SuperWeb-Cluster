@@ -5,9 +5,9 @@ benchmarks.
 
 It is intentionally separate from `compute_node/performance_metrics/`:
 
-- `input_matrix/fixed_matrix_vector_multiplication/` stores and generates the
-  FMVM matrix/vector dataset
-- `input_matrix/spatial_convolution/` stores and generates the Conv2D
+- `input_matrix/gemv/` stores and generates the
+  GEMV matrix/vector dataset
+- `input_matrix/conv2d/` stores and generates the Conv2D
   input/weight datasets
 - `performance_metrics/` consumes those files to benchmark method-specific backends
 
@@ -26,32 +26,32 @@ avoids coupling the dataset generator to one benchmark implementation.
   - deterministic counter-based float32 chunk generation helpers
 - `generator.py`
   - streaming file writer and metadata emitter
-- `fixed_matrix_vector_multiplication/generate.py`
-  - wrapper for the FMVM dataset workspace
-- `spatial_convolution/generate.py`
+- `gemv/generate.py`
+  - wrapper for the GEMV dataset workspace
+- `conv2d/generate.py`
   - wrapper for the Conv2D dataset workspace
-- `fixed_matrix_vector_multiplication/generated/`
-  - FMVM matrix/vector cache
-- `spatial_convolution/generated/`
+- `gemv/generated/`
+  - GEMV matrix/vector cache
+- `conv2d/generated/`
   - Conv2D test/runtime dataset cache
 
 ## Default Datasets
 
 The shared dataset workspace now keeps method-specific workload presets:
 
-- FMVM large workload:
+- GEMV large workload:
   - `A`: `16384 x 32768` float32, exactly `2 GiB`
   - `x`: `32768` float32
-- FMVM small workload:
-  - `A`: `4096 x 8192` float32
-  - `x`: `8192` float32
-- spatial-convolution small workload:
-  - input: `512 x 512 x 64`
-  - weights: `128 x 64 x 3 x 3`
-- spatial-convolution medium workload:
+- GEMV small workload:
+  - `A`: `2048 x 4096` float32
+  - `x`: `4096` float32
+- conv2d small workload:
+  - input: `256 x 256 x 32`
+  - weights: `64 x 32 x 3 x 3`
+- conv2d medium workload:
   - input: `1024 x 1024 x 96`
   - weights: `192 x 96 x 3 x 3`
-- spatial-convolution large workload:
+- conv2d large workload:
   - input: `2048 x 2048 x 128`
   - weights: `256 x 128 x 3 x 3`
 
@@ -66,40 +66,40 @@ The files themselves are generic binary assets:
 
 ## Usage
 
-Generate the default FMVM dataset:
+Generate the default GEMV dataset:
 
 ```bash
-python "compute_node/input_matrix/fixed_matrix_vector_multiplication/generate.py"
+python "compute_node/input_matrix/gemv/generate.py"
 ```
 
-Generate only the small spatial-convolution dataset:
+Generate only the small conv2d dataset:
 
 ```bash
-python "compute_node/input_matrix/spatial_convolution/generate.py" --skip-medium --skip-large
+python "compute_node/input_matrix/conv2d/generate.py" --skip-medium --skip-large
 ```
 
-Generate only the large spatial-convolution dataset:
+Generate only the large conv2d dataset:
 
 ```bash
-python "compute_node/input_matrix/spatial_convolution/generate.py" --skip-small --skip-medium
+python "compute_node/input_matrix/conv2d/generate.py" --skip-small --skip-medium
 ```
 
 Force a rebuild of the default dataset:
 
 ```bash
-python "compute_node/input_matrix/fixed_matrix_vector_multiplication/generate.py" --force
+python "compute_node/input_matrix/gemv/generate.py" --force
 ```
 
 Tune generation speed manually:
 
 ```bash
-python "compute_node/input_matrix/fixed_matrix_vector_multiplication/generate.py" --workers 4 --chunk-mib 32
+python "compute_node/input_matrix/gemv/generate.py" --workers 4 --chunk-mib 32
 ```
 
 Generate a tiny override dataset for testing:
 
 ```bash
-python "compute_node/input_matrix/fixed_matrix_vector_multiplication/generate.py" --rows 8 --cols 16 --output-dir tmp_dataset
+python "compute_node/input_matrix/gemv/generate.py" --rows 8 --cols 16 --output-dir tmp_dataset
 ```
 
 ## Notes

@@ -20,32 +20,32 @@ PERF_DIR = (
     Path(__file__).resolve().parents[1]
     / "compute_node"
     / "performance_metrics"
-    / "fixed_matrix_vector_multiplication"
+    / "gemv"
 )
 
 from compute_node.performance_metrics import benchmark
 from compute_node.performance_metrics import result_format
-from compute_node.performance_metrics.spatial_convolution import benchmark as spatial_benchmark
-from compute_node.performance_metrics.spatial_convolution import backends as spatial_backend_registry
-from compute_node.performance_metrics.fixed_matrix_vector_multiplication import backends as backend_registry
-from compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.cpu_backend import (
+from compute_node.performance_metrics.conv2d import benchmark as spatial_benchmark
+from compute_node.performance_metrics.conv2d import backends as conv2d_backend_registry
+from compute_node.performance_metrics.gemv import backends as backend_registry
+from compute_node.performance_metrics.gemv.backends.cpu_backend import (
     CpuArtifacts,
     CpuBackend,
     _binary_tree_worker_candidates,
     _candidate_tile_sizes as cpu_candidate_tile_sizes,
     _cpu_artifacts_for_platform,
 )
-from compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.cuda_backend import (
+from compute_node.performance_metrics.gemv.backends.cuda_backend import (
     CudaBackend,
     _candidate_block_sizes as cuda_candidate_block_sizes,
     _candidate_tile_sizes as cuda_candidate_tile_sizes,
     _candidate_transpose_modes as cuda_candidate_transpose_modes,
     _windows_gencode_args,
 )
-from compute_node.performance_metrics.spatial_convolution.backends.cuda_backend import (
+from compute_node.performance_metrics.conv2d.backends.cuda_backend import (
     CudaBackend as SpatialCudaBackend,
 )
-from compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.metal_backend import (
+from compute_node.performance_metrics.gemv.backends.metal_backend import (
     MetalBackend,
     _candidate_block_sizes as metal_candidate_block_sizes,
     _candidate_tile_sizes as metal_candidate_tile_sizes,
@@ -60,31 +60,31 @@ from compute_node.input_matrix import (
 )
 from compute_node.input_matrix import generator as shared_input_generator
 from compute_node.input_matrix import generate as input_matrix_generate_cli
-from compute_node.input_matrix.fixed_matrix_vector_multiplication import generate as fmvm_generate_cli
-from compute_node.input_matrix.spatial_convolution import (
+from compute_node.input_matrix.gemv import generate as gemv_generate_cli
+from compute_node.input_matrix.conv2d import (
     build_dataset_layout as build_conv_dataset_layout,
     build_input_matrix_spec as build_conv_input_matrix_spec,
     dataset_is_generated as conv_dataset_is_generated,
     generate_dataset as generate_conv_dataset,
     get_test_input_matrix_spec as get_conv_test_input_matrix_spec,
 )
-from compute_node.input_matrix.fixed_matrix_vector_multiplication import (
-    get_test_input_matrix_spec as get_fmvm_test_input_matrix_spec,
+from compute_node.input_matrix.gemv import (
+    get_test_input_matrix_spec as get_gemv_test_input_matrix_spec,
 )
-from compute_node.input_matrix.spatial_convolution import generate as spatial_generate_cli
-from compute_node.performance_metrics.fixed_matrix_vector_multiplication.models import (
+from compute_node.input_matrix.conv2d import generate as spatial_generate_cli
+from compute_node.performance_metrics.gemv.models import (
     DEFAULT_AUTOTUNE_REPEATS,
     DEFAULT_MEASUREMENT_REPEATS,
 )
-from compute_node.performance_metrics.spatial_convolution.models import (
+from compute_node.performance_metrics.conv2d.models import (
     BenchmarkSpec as SpatialBenchmarkSpec,
 )
 from compute_node.performance_metrics.path_utils import to_relative_cli_path
-from compute_node.performance_metrics.fixed_matrix_vector_multiplication.scoring import linear_time_score
-from compute_node.performance_metrics.fixed_matrix_vector_multiplication.workloads import build_benchmark_spec
+from compute_node.performance_metrics.gemv.scoring import linear_time_score
+from compute_node.performance_metrics.gemv.workloads import build_benchmark_spec
 import subprocess
 
-from app.constants import DX12_BACKEND_DISABLED_REASON, METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION, METHOD_SPATIAL_CONVOLUTION
+from app.constants import DX12_BACKEND_DISABLED_REASON, METHOD_GEMV, METHOD_CONV2D
 from tests.support import require_integration
 
 
@@ -130,6 +130,34 @@ class PerformanceMatricsTests(unittest.TestCase):
         self.assertEqual(args.output_channel_batch_scale, 0.75)
         self.assertEqual(args.cooldown_ms, 2.5)
 
+    def test_spatial_benchmark_parser_defaults_to_full_workload(self) -> None:
+        args = spatial_benchmark.build_parser().parse_args([])
+        self.assertEqual(args.workload_mode, "full")
+
+    def test_gemv_cpu_hardware_label_prefers_friendly_detected_cpu_name(self) -> None:
+        with mock.patch.object(
+            benchmark.gemv_runner,
+            "detect_cpu_name",
+            return_value="AMD Ryzen 9 8945HS w/ Radeon 780M Graphics",
+        ):
+            label = benchmark.gemv_runner._hardware_label_for_backend("cpu", "")
+
+        self.assertEqual(label, "AMD Ryzen 9 8945HS w/ Radeon 780M Graphics")
+
+    def test_conv2d_cpu_hardware_label_prefers_friendly_detected_cpu_name(self) -> None:
+        with mock.patch.object(
+            spatial_benchmark,
+            "detect_cpu_name",
+            return_value="AMD Ryzen 9 8945HS w/ Radeon 780M Graphics",
+        ):
+            label = spatial_benchmark._hardware_label_for_backend("cpu", "", None)
+
+        self.assertEqual(label, "AMD Ryzen 9 8945HS w/ Radeon 780M Graphics")
+
+    def test_top_level_benchmark_parser_leaves_workload_mode_unset_by_default(self) -> None:
+        args = benchmark.build_parser().parse_args([])
+        self.assertIsNone(args.workload_mode)
+
     def test_input_matrix_cli_defaults_to_all_methods(self) -> None:
         args = input_matrix_generate_cli.build_parser().parse_args([])
         self.assertEqual(args.method, "all")
@@ -137,13 +165,13 @@ class PerformanceMatricsTests(unittest.TestCase):
         self.assertEqual(args.chunk_mib, 8)
 
     def test_method_local_generate_parsers_use_cpu_count_and_8mib_chunks(self) -> None:
-        fmvm_args = fmvm_generate_cli.build_parser().parse_args([])
+        gemv_args = gemv_generate_cli.build_parser().parse_args([])
         spatial_args = spatial_generate_cli.build_parser().parse_args([])
 
         expected_workers = max(1, os.cpu_count() or 1)
-        self.assertEqual(fmvm_args.workers, expected_workers)
+        self.assertEqual(gemv_args.workers, expected_workers)
         self.assertEqual(spatial_args.workers, expected_workers)
-        self.assertEqual(fmvm_args.chunk_mib, 8)
+        self.assertEqual(gemv_args.chunk_mib, 8)
         self.assertEqual(spatial_args.chunk_mib, 8)
 
     def test_normalize_method_report_adds_structured_cuda_environment(self) -> None:
@@ -180,7 +208,7 @@ class PerformanceMatricsTests(unittest.TestCase):
                         "score": 1000.0,
                     },
                     "notes": [
-                        "compiled CUDA runner from compute_node/compute_methods/spatial_convolution/cuda/spatial_conv_cuda_runner.cu; fatbin SMs: sm_75, sm_89",
+                        "compiled CUDA runner from compute_node/compute_methods/conv2d/cuda/conv2d_cuda_runner.cu; fatbin SMs: sm_75, sm_89",
                         "Autotuned on test-conv2d and measured on runtime-conv2d.",
                     ],
                     "trial_notes": ["device=NVIDIA GeForce RTX 4060 Laptop GPU"],
@@ -208,9 +236,9 @@ class PerformanceMatricsTests(unittest.TestCase):
             mock.patch.object(result_format, "_detect_nvcc_version", return_value="13.2"),
         ):
             normalized = result_format.normalize_method_report(
-                method_name=METHOD_SPATIAL_CONVOLUTION,
+                method_name=METHOD_CONV2D,
                 raw_method=raw_method,
-                dataset_root="compute_node/input_matrix/spatial_convolution/generated",
+                dataset_root="compute_node/input_matrix/conv2d/generated",
                 device_overview={},
             )
 
@@ -227,8 +255,15 @@ class PerformanceMatricsTests(unittest.TestCase):
         )
         self.assertEqual(
             cuda_backend["notes"],
-            ["binary recompiled", "test autotune, runtime measurement"],
+            ["binary recompiled", "small autotune, large measurement"],
         )
+
+    def test_compact_note_tracks_small_to_mid_measurement_flow(self) -> None:
+        compact = result_format._compact_note(
+            "Autotuned on small-conv2d-256x256 and measured on mid-conv2d-512x512."
+        )
+
+        self.assertEqual(compact, "small autotune, mid measurement")
 
     def test_write_float32_file_parallelizes_even_when_one_chunk_would_cover_the_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
@@ -252,43 +287,309 @@ class PerformanceMatricsTests(unittest.TestCase):
     def test_windows_default_backend_order_routes_gpu_by_display_adapter(self) -> None:
         with (
             mock.patch(
-                "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.os.name",
+                "compute_node.performance_metrics.gemv.backends.os.name",
                 "nt",
             ),
             mock.patch(
-                "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.detect_nvidia_windows_adapter",
+                "compute_node.performance_metrics.gemv.backends.detect_nvidia_windows_adapter",
                 return_value=("NVIDIA GeForce RTX 4060 Laptop GPU", ""),
             ),
         ):
             names = [backend.name for backend in backend_registry.build_backends()]
 
-        self.assertEqual(names, ["cpu", "cuda"])
+        self.assertEqual(names, ["cuda"])
 
     def test_spatial_windows_default_backend_order_routes_gpu_by_display_adapter(self) -> None:
         with (
             mock.patch(
-                "compute_node.performance_metrics.spatial_convolution.backends.os.name",
+                "compute_node.performance_metrics.conv2d.backends.os.name",
                 "nt",
             ),
             mock.patch(
-                "compute_node.performance_metrics.spatial_convolution.backends.detect_nvidia_windows_adapter",
+                "compute_node.performance_metrics.conv2d.backends.detect_nvidia_windows_adapter",
                 return_value=("NVIDIA GeForce RTX 4060 Laptop GPU", ""),
             ),
         ):
-            names = [backend.name for backend in spatial_backend_registry.build_backends()]
+            names = [backend.name for backend in conv2d_backend_registry.build_backends()]
 
-        self.assertEqual(names, ["cpu", "cuda"])
+        self.assertEqual(names, ["cuda"])
+
+    def test_windows_default_backend_order_falls_back_to_cpu_without_gpu(self) -> None:
+        with (
+            mock.patch(
+                "compute_node.performance_metrics.gemv.backends.os.name",
+                "nt",
+            ),
+            mock.patch(
+                "compute_node.performance_metrics.gemv.backends.detect_nvidia_windows_adapter",
+                return_value=(None, "no adapter"),
+            ),
+        ):
+            names = [backend.name for backend in backend_registry.build_backends()]
+
+        self.assertEqual(names, ["cpu"])
+
+    def test_spatial_windows_default_backend_order_falls_back_to_cpu_without_gpu(self) -> None:
+        with (
+            mock.patch(
+                "compute_node.performance_metrics.conv2d.backends.os.name",
+                "nt",
+            ),
+            mock.patch(
+                "compute_node.performance_metrics.conv2d.backends.detect_nvidia_windows_adapter",
+                return_value=(None, "no adapter"),
+            ),
+        ):
+            names = [backend.name for backend in conv2d_backend_registry.build_backends()]
+
+        self.assertEqual(names, ["cpu"])
+
+    def test_macos_default_backend_order_keeps_cpu_with_metal(self) -> None:
+        with (
+            mock.patch(
+                "compute_node.performance_metrics.gemv.backends.os.name",
+                "posix",
+            ),
+            mock.patch(
+                "compute_node.performance_metrics.gemv.backends.sys.platform",
+                "darwin",
+            ),
+        ):
+            names = [backend.name for backend in backend_registry.build_backends()]
+
+        self.assertEqual(names, ["cpu", "metal"])
+
+    def test_spatial_macos_default_backend_order_keeps_cpu_with_metal(self) -> None:
+        with (
+            mock.patch(
+                "compute_node.performance_metrics.conv2d.backends.os.name",
+                "posix",
+            ),
+            mock.patch(
+                "compute_node.performance_metrics.conv2d.backends.sys.platform",
+                "darwin",
+            ),
+        ):
+            names = [backend.name for backend in conv2d_backend_registry.build_backends()]
+
+        self.assertEqual(names, ["cpu", "metal"])
+
+    def test_top_level_conv2d_dispatch_defaults_to_full_workload(self) -> None:
+        args = argparse.Namespace(
+            workload_mode=None,
+            role="compute",
+            backend=None,
+            rebuild=False,
+            h=None,
+            w=None,
+            cin=None,
+            cout=None,
+            k=None,
+            pad=None,
+            stride=None,
+        )
+
+        captured_command: list[str] = []
+
+        class _FakeProcess:
+            def __init__(self) -> None:
+                self.stdout = iter(())
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def wait(self, timeout: float | None = None) -> int:
+                del timeout
+                return 0
+
+        def fake_popen(command, **kwargs):
+            del kwargs
+            captured_command[:] = list(command)
+            return _FakeProcess()
+
+        with (
+            tempfile.TemporaryDirectory() as temp_dir,
+            mock.patch.object(benchmark, "active_python_path", return_value=Path(sys.executable)),
+            mock.patch.object(benchmark, "emit_status"),
+            mock.patch.object(benchmark.tempfile, "TemporaryDirectory", return_value=tempfile.TemporaryDirectory(dir=temp_dir)),
+            mock.patch.object(benchmark.subprocess, "Popen", side_effect=fake_popen),
+            mock.patch.object(benchmark, "METHOD_DATASET_DIRS", {**benchmark.METHOD_DATASET_DIRS, METHOD_CONV2D: Path(temp_dir)}),
+            mock.patch.object(Path, "read_text", return_value=json.dumps({"usable_backends": [], "ranking": []})),
+        ):
+            benchmark._run_conv2d_benchmark(args)
+
+        self.assertIn("--workload-mode", captured_command)
+        self.assertEqual(captured_command[captured_command.index("--workload-mode") + 1], "full")
+
+    def test_conv2d_small_only_timeout_floor_is_extended(self) -> None:
+        timeout_seconds = spatial_benchmark._backend_timeout_seconds(
+            "small",
+            "small",
+            spatial_benchmark.get_small_spec(),
+        )
+
+        self.assertEqual(timeout_seconds, 300.0)
+
+    def test_conv2d_small_to_mid_timeout_floor_is_extended(self) -> None:
+        timeout_seconds = spatial_benchmark._backend_timeout_seconds(
+            "small",
+            "mid",
+            spatial_benchmark.get_mid_spec(),
+        )
+
+        self.assertEqual(timeout_seconds, 360.0)
+
+    def test_gemv_measurement_phase_title_uses_full_run_for_large_measurement(self) -> None:
+        title = benchmark.gemv_runner._measurement_phase_title("small", "large")
+
+        self.assertEqual(title, "Full run stage")
+
+    def test_conv2d_measurement_phase_title_uses_final_measurement_for_same_dataset(self) -> None:
+        title = spatial_benchmark._measurement_phase_title("small", "small")
+
+        self.assertEqual(title, "Final measurement stage")
+
+    def test_conv2d_measurement_phase_title_uses_full_run_for_mid_measurement(self) -> None:
+        title = spatial_benchmark._measurement_phase_title("small", "mid")
+
+        self.assertEqual(title, "Full run stage")
+
+    def test_conv2d_default_workload_plan_uses_small_autotune_and_mid_measurement(self) -> None:
+        args = argparse.Namespace(
+            workload_mode="full",
+            h=None,
+            w=None,
+            cin=None,
+            cout=None,
+            k=None,
+            pad=None,
+            stride=None,
+        )
+
+        (
+            workload_mode,
+            autotune_variant,
+            measurement_variant,
+            autotune_spec,
+            measurement_spec,
+        ) = spatial_benchmark._resolve_workload_plan(args)
+
+        self.assertEqual(workload_mode, "full")
+        self.assertEqual(autotune_variant, "small")
+        self.assertEqual(measurement_variant, "mid")
+        self.assertEqual(autotune_spec.name, spatial_benchmark.get_small_spec().name)
+        self.assertEqual(measurement_spec.name, spatial_benchmark.get_mid_spec().name)
+
+    def test_conv2d_selected_config_format_is_compact(self) -> None:
+        formatted = spatial_benchmark._format_selected_config(
+            {
+                "transpose": False,
+                "block_size": 256,
+                "tile_size": 16,
+                "output_channel_batch": 128,
+            }
+        )
+
+        self.assertEqual(
+            formatted,
+            "transpose=false block_size=256 tile_size=16 output_channel_batch=128",
+        )
+
+    def test_gemv_selected_config_format_is_compact(self) -> None:
+        formatted = benchmark.gemv_runner._format_selected_config(
+            {
+                "transpose": False,
+                "block_size": 128,
+                "tile_size": 4,
+            }
+        )
+
+        self.assertEqual(
+            formatted,
+            "transpose=false block_size=128 tile_size=4",
+        )
+
+    def test_conv2d_phase_callback_prints_final_measurement_separately(self) -> None:
+        args = argparse.Namespace(
+            backend=None,
+            dataset_dir=Path("C:/tmp/generated"),
+            output=Path("C:/tmp/result.json"),
+            role="compute",
+            h=None,
+            w=None,
+            cin=None,
+            cout=None,
+            k=None,
+            pad=None,
+            stride=None,
+            workload_mode="small",
+            output_channel_batch=None,
+            output_channel_batch_scale=None,
+            cooldown_ms=None,
+            rebuild=False,
+        )
+
+        class _FakeBackend:
+            name = "cuda"
+
+            def diagnostic_context(self, _spec=None):
+                return {"device_name": "Fake GPU"}
+
+            def probe(self):
+                return True, "CUDA backend available for 'Fake GPU'."
+
+            def run(
+                self,
+                spec,
+                dataset,
+                *,
+                measurement_spec=None,
+                measurement_dataset=None,
+                time_budget_seconds,
+                force_rebuild=False,
+                phase_callback=None,
+            ):
+                del spec, dataset, measurement_spec, measurement_dataset, time_budget_seconds, force_rebuild
+                if callable(phase_callback):
+                    phase_callback("final_measurement", {"block_size": 256, "tile_size": 16})
+                return {
+                    "available": True,
+                    "best_trial": {"effective_gflops": 1.0},
+                    "notes": [],
+                }
+
+        with (
+            tempfile.TemporaryDirectory() as temp_dir,
+            mock.patch.object(spatial_benchmark, "build_backends", return_value=[_FakeBackend()]),
+            mock.patch.object(spatial_benchmark, "_generate_if_needed"),
+            mock.patch.object(spatial_benchmark, "METHOD_DATASET_DIR", Path(temp_dir)),
+            mock.patch("builtins.print") as print_mock,
+        ):
+            args.dataset_dir = Path(temp_dir)
+            spatial_benchmark.run_benchmark(args)
+
+        printed_lines = [" ".join(str(part) for part in call.args) for call in print_mock.call_args_list]
+        autotune_index = next(
+            index for index, line in enumerate(printed_lines) if "Autotune stage on Fake GPU:" in line
+        )
+        measurement_index = next(
+            index for index, line in enumerate(printed_lines) if "Final measurement stage on Fake GPU:" in line
+        )
+        self.assertLess(autotune_index, measurement_index)
 
     def test_cpu_artifacts_follow_platform(self) -> None:
         windows_artifacts = _cpu_artifacts_for_platform("win32")
         assert windows_artifacts is not None
         self.assertEqual(windows_artifacts.platform_key, "windows")
-        self.assertEqual(windows_artifacts.executable_path.name, "fmvm_cpu_windows.exe")
+        self.assertEqual(windows_artifacts.executable_path.name, "gemv_cpu_windows.exe")
 
         macos_artifacts = _cpu_artifacts_for_platform("darwin")
         assert macos_artifacts is not None
         self.assertEqual(macos_artifacts.platform_key, "macos")
-        self.assertEqual(macos_artifacts.executable_path.name, "fmvm_cpu_macos")
+        self.assertEqual(macos_artifacts.executable_path.name, "gemv_cpu_macos")
 
         self.assertIsNone(_cpu_artifacts_for_platform("linux"))
 
@@ -299,9 +600,9 @@ class PerformanceMatricsTests(unittest.TestCase):
             artifacts = CpuArtifacts(
                 platform_key="macos",
                 platform_label="macOS",
-                source_path=temp_root / "fmvm_cpu_macos.cpp",
+                source_path=temp_root / "gemv_cpu_macos.cpp",
                 build_dir=temp_root / "build",
-                executable_path=temp_root / "build" / "fmvm_cpu_macos",
+                executable_path=temp_root / "build" / "gemv_cpu_macos",
             )
             artifacts.build_dir.mkdir(parents=True, exist_ok=True)
             artifacts.source_path.write_text("// source placeholder\n", encoding="utf-8")
@@ -320,9 +621,9 @@ class PerformanceMatricsTests(unittest.TestCase):
             artifacts = CpuArtifacts(
                 platform_key="macos",
                 platform_label="macOS",
-                source_path=temp_root / "fmvm_cpu_macos.cpp",
+                source_path=temp_root / "gemv_cpu_macos.cpp",
                 build_dir=temp_root / "build",
-                executable_path=temp_root / "build" / "fmvm_cpu_macos",
+                executable_path=temp_root / "build" / "gemv_cpu_macos",
             )
             artifacts.build_dir.mkdir(parents=True, exist_ok=True)
             artifacts.source_path.write_text("// source placeholder\n", encoding="utf-8")
@@ -345,13 +646,13 @@ class PerformanceMatricsTests(unittest.TestCase):
         self.assertEqual(spec.matrix_bytes, 2 * 1024**3)
         self.assertEqual(spec.vector_bytes, 32_768 * 4)
 
-    def test_small_default_workloads_are_doubled(self) -> None:
-        fmvm_spec = get_fmvm_test_input_matrix_spec()
+    def test_small_default_workloads_are_reduced(self) -> None:
+        gemv_spec = get_gemv_test_input_matrix_spec()
         conv_spec = get_conv_test_input_matrix_spec()
 
-        self.assertEqual((fmvm_spec.rows, fmvm_spec.cols), (4_096, 8_192))
-        self.assertEqual((conv_spec.h, conv_spec.w), (512, 512))
-        self.assertEqual((conv_spec.c_in, conv_spec.c_out), (64, 128))
+        self.assertEqual((gemv_spec.rows, gemv_spec.cols), (2_048, 4_096))
+        self.assertEqual((conv_spec.h, conv_spec.w), (256, 256))
+        self.assertEqual((conv_spec.c_in, conv_spec.c_out), (32, 64))
 
     def test_generate_dataset_with_small_override(self) -> None:
         spec = build_input_matrix_spec(rows=8, cols=16)
@@ -397,7 +698,7 @@ class PerformanceMatricsTests(unittest.TestCase):
 
             self.assertFalse(dataset_is_generated(layout, spec))
 
-    def test_spatial_convolution_dataset_generation_supports_small_override(self) -> None:
+    def test_conv2d_dataset_generation_supports_small_override(self) -> None:
         spec = build_conv_input_matrix_spec(h=16, w=16, c_in=4, c_out=8, k=3, pad=1, stride=1)
         with tempfile.TemporaryDirectory() as temp_dir:
             layout = build_conv_dataset_layout(Path(temp_dir), prefix="test_")
@@ -406,7 +707,7 @@ class PerformanceMatricsTests(unittest.TestCase):
             self.assertEqual(layout.input_path.stat().st_size, spec.input_bytes)
             self.assertEqual(layout.weight_path.stat().st_size, spec.weight_bytes)
 
-    def test_normalize_spatial_dataset_uses_runtime_artifacts_for_large_only_mode(self) -> None:
+    def test_normalize_conv2d_dataset_uses_runtime_artifacts_for_large_only_mode(self) -> None:
         raw_method = {
             "workload": {
                 "autotune_dataset_variant": "large",
@@ -416,28 +717,28 @@ class PerformanceMatricsTests(unittest.TestCase):
         }
 
         normalized = result_format.normalize_method_report(
-            method_name=METHOD_SPATIAL_CONVOLUTION,
+            method_name=METHOD_CONV2D,
             raw_method=raw_method,
-            dataset_root="compute_node/input_matrix/spatial_convolution/generated",
+            dataset_root="compute_node/input_matrix/conv2d/generated",
             device_overview={},
         )
 
         dataset = normalized["dataset"]
         self.assertEqual(
             dataset["artifacts"]["autotune_input"],
-            "compute_node/input_matrix/spatial_convolution/generated/runtime_input.bin",
+            "compute_node/input_matrix/conv2d/generated/large_input.bin",
         )
         self.assertEqual(
             dataset["artifacts"]["autotune_weight"],
-            "compute_node/input_matrix/spatial_convolution/generated/runtime_weight.bin",
+            "compute_node/input_matrix/conv2d/generated/large_weight.bin",
         )
         self.assertEqual(
             dataset["artifacts"]["measurement_input"],
-            "compute_node/input_matrix/spatial_convolution/generated/runtime_input.bin",
+            "compute_node/input_matrix/conv2d/generated/large_input.bin",
         )
         self.assertEqual(
             dataset["artifacts"]["measurement_weight"],
-            "compute_node/input_matrix/spatial_convolution/generated/runtime_weight.bin",
+            "compute_node/input_matrix/conv2d/generated/large_weight.bin",
         )
 
     @require_integration("Dataset override flow is validated through a real benchmark run.")
@@ -446,7 +747,7 @@ class PerformanceMatricsTests(unittest.TestCase):
             temp_root = Path(temp_dir)
             default_dataset_dir = temp_root / "generated"
             args = argparse.Namespace(
-                method=METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
+                method=METHOD_GEMV,
                 backend=["cpu"],
                 dataset_dir=default_dataset_dir,
                 output=temp_root / "result.json",
@@ -467,7 +768,7 @@ class PerformanceMatricsTests(unittest.TestCase):
             with mock.patch.object(benchmark, "DEFAULT_DATASET_DIR", default_dataset_dir):
                 report = benchmark.run_benchmark(args)
 
-        method_report = report["methods"][METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION]
+        method_report = report["methods"][METHOD_GEMV]
         dataset_root = Path(method_report["dataset"]["root_dir"])
         self.assertEqual(dataset_root.parts[-3:], ("generated", "overrides", "8x16"))
 
@@ -479,11 +780,11 @@ class PerformanceMatricsTests(unittest.TestCase):
             self.skipTest("CPU backend is unavailable in this environment.")
 
         with tempfile.TemporaryDirectory() as temp_dir, mock.patch(
-            "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.cpu_backend.os.cpu_count",
+            "compute_node.performance_metrics.gemv.backends.cpu_backend.os.cpu_count",
             return_value=1,
         ):
             args = argparse.Namespace(
-                method=METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
+                method=METHOD_GEMV,
                 backend=["cpu"],
                 dataset_dir=Path(temp_dir),
                 output=Path(temp_dir) / "result.json",
@@ -506,8 +807,8 @@ class PerformanceMatricsTests(unittest.TestCase):
         self.assertEqual(report["schema_version"], 5)
         self.assertIn("device_overview", report)
         self.assertIn("methods", report)
-        method_report = report["methods"][METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION]
-        self.assertEqual(method_report["method"], METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION)
+        method_report = report["methods"][METHOD_GEMV]
+        self.assertEqual(method_report["method"], METHOD_GEMV)
         self.assertEqual(method_report["best_backend"], "cpu")
         self.assertEqual(method_report["ranking"], ["cpu"])
         self.assertIn("workload", method_report)
@@ -573,7 +874,7 @@ class PerformanceMatricsTests(unittest.TestCase):
         self.assertIn("-gencode=arch=compute_90,code=sm_90", args)
         self.assertIn("-gencode=arch=compute_120,code=sm_120", args)
 
-    def test_fmvm_dx12_backend_request_is_rejected(self) -> None:
+    def test_gemv_dx12_backend_request_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, re.escape(DX12_BACKEND_DISABLED_REASON)):
             backend_registry.build_backends(["dx12"])
 
@@ -581,26 +882,26 @@ class PerformanceMatricsTests(unittest.TestCase):
         backend = CudaBackend()
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
-            binary_path = temp_root / "fmvm_cuda_runner.exe"
-            source_path = temp_root / "fmvm_cuda_runner.cu"
+            binary_path = temp_root / "gemv_cuda_runner.exe"
+            source_path = temp_root / "gemv_cuda_runner.cu"
             binary_path.write_text("binary placeholder\n", encoding="utf-8")
             source_path.write_text("// source placeholder\n", encoding="utf-8")
 
             with (
                 mock.patch(
-                    "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.cuda_backend.os.name",
+                    "compute_node.performance_metrics.gemv.backends.cuda_backend.os.name",
                     "nt",
                 ),
                 mock.patch(
-                    "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.cuda_backend.CUDA_EXECUTABLE_PATH",
+                    "compute_node.performance_metrics.gemv.backends.cuda_backend.CUDA_EXECUTABLE_PATH",
                     binary_path,
                 ),
                 mock.patch(
-                    "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.cuda_backend.CUDA_SOURCE_PATH",
+                    "compute_node.performance_metrics.gemv.backends.cuda_backend.CUDA_SOURCE_PATH",
                     source_path,
                 ),
                 mock.patch(
-                    "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.cuda_backend._detect_compute_capability",
+                    "compute_node.performance_metrics.gemv.backends.cuda_backend._detect_compute_capability",
                     return_value="89",
                 ),
                 mock.patch.object(backend, "_toolchain_status", return_value=(False, "nvcc missing")),
@@ -614,18 +915,18 @@ class PerformanceMatricsTests(unittest.TestCase):
         backend = CudaBackend()
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
-            binary_path = temp_root / "fmvm_cuda_runner.exe"
-            source_path = temp_root / "fmvm_cuda_runner.cu"
+            binary_path = temp_root / "gemv_cuda_runner.exe"
+            source_path = temp_root / "gemv_cuda_runner.cu"
             binary_path.write_text("binary placeholder\n", encoding="utf-8")
             source_path.write_text("// source placeholder\n", encoding="utf-8")
 
             with (
                 mock.patch(
-                    "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.cuda_backend.CUDA_EXECUTABLE_PATH",
+                    "compute_node.performance_metrics.gemv.backends.cuda_backend.CUDA_EXECUTABLE_PATH",
                     binary_path,
                 ),
                 mock.patch(
-                    "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.cuda_backend.CUDA_SOURCE_PATH",
+                    "compute_node.performance_metrics.gemv.backends.cuda_backend.CUDA_SOURCE_PATH",
                     source_path,
                 ),
                 mock.patch.object(backend, "_toolchain_status", return_value=(False, "nvcc missing")),
@@ -635,7 +936,7 @@ class PerformanceMatricsTests(unittest.TestCase):
 
     def test_spatial_dx12_backend_request_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, re.escape(DX12_BACKEND_DISABLED_REASON)):
-            spatial_backend_registry.build_backends(["dx12"])
+            conv2d_backend_registry.build_backends(["dx12"])
 
     def test_spatial_cuda_runner_command_includes_batch_candidates_and_cooldown_flags(self) -> None:
         backend = SpatialCudaBackend()
@@ -660,15 +961,15 @@ class PerformanceMatricsTests(unittest.TestCase):
 
         with (
             mock.patch(
-                "compute_node.performance_metrics.spatial_convolution.backends.cuda_backend.SPATIAL_CUDA_OUTPUT_CHANNEL_BATCH_OVERRIDE",
+                "compute_node.performance_metrics.conv2d.backends.cuda_backend.CONV2D_CUDA_OUTPUT_CHANNEL_BATCH_OVERRIDE",
                 (8,),
             ),
             mock.patch(
-                "compute_node.performance_metrics.spatial_convolution.backends.cuda_backend.SPATIAL_CUDA_COOLDOWN_MS",
+                "compute_node.performance_metrics.conv2d.backends.cuda_backend.CONV2D_CUDA_COOLDOWN_MS",
                 2.5,
             ),
             mock.patch(
-                "compute_node.performance_metrics.spatial_convolution.backends.cuda_backend.subprocess.run",
+                "compute_node.performance_metrics.conv2d.backends.cuda_backend.subprocess.run",
                 side_effect=fake_run,
             ),
         ):
@@ -743,7 +1044,7 @@ class PerformanceMatricsTests(unittest.TestCase):
             self.skipTest("CPU/Metal cross-implementation comparison is unavailable in this environment.")
 
         with tempfile.TemporaryDirectory() as temp_dir, mock.patch(
-            "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.cpu_backend.os.cpu_count",
+            "compute_node.performance_metrics.gemv.backends.cpu_backend.os.cpu_count",
             return_value=1,
         ):
             spec = build_benchmark_spec(rows=8, cols=16)
@@ -817,7 +1118,7 @@ class PerformanceMatricsTests(unittest.TestCase):
             self.skipTest("CPU/CUDA cross-implementation comparison is unavailable in this environment.")
 
         with tempfile.TemporaryDirectory() as temp_dir, mock.patch(
-            "compute_node.performance_metrics.fixed_matrix_vector_multiplication.backends.cpu_backend.os.cpu_count",
+            "compute_node.performance_metrics.gemv.backends.cpu_backend.os.cpu_count",
             return_value=1,
         ):
             spec = build_benchmark_spec(rows=8, cols=16)

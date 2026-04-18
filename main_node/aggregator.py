@@ -1,7 +1,7 @@
 """Validate task slices and stitch worker outputs into one final result.
 
 Use this module when the main node has collected per-worker ``TaskResult``
-objects and needs to merge them back into one FMVM or spatial-convolution
+objects and needs to merge them back into one GEMV or conv2d
 response buffer.
 """
 
@@ -16,7 +16,7 @@ from wire.internal_protocol.runtime_transport import TaskResult
 class ResultAggregator:
     """Merge validated worker slice results into one response payload."""
 
-    def _validate_spatial_result(
+    def _validate_conv2d_result(
         self,
         *,
         result: TaskResult,
@@ -24,9 +24,9 @@ class ResultAggregator:
         out_w: int,
         spatial_size: int,
     ) -> int:
-        """Validate one spatial result header and return its channel count.
+        """Validate one conv2d result header and return its channel count.
 
-        Use this before merging a spatial result so both inline-byte and
+        Use this before merging a conv2d result so both inline-byte and
         file-backed result paths share the same dimensionality checks.
 
         Args:
@@ -64,10 +64,10 @@ class ResultAggregator:
             )
         return expected_channels
 
-    def collect_fixed_matrix_vector_result(self, *, rows: int, results: list[TaskResult]) -> bytes:
-        """Merge row-partitioned FMVM task results into one vector buffer.
+    def collect_gemv_result(self, *, rows: int, results: list[TaskResult]) -> bytes:
+        """Merge row-partitioned GEMV task results into one vector buffer.
 
-        Use this after FMVM worker slices finish so the final response preserves
+        Use this after GEMV worker slices finish so the final response preserves
         row order and validates that all rows were covered exactly once.
 
         Args:
@@ -107,7 +107,7 @@ class ResultAggregator:
             raise ValueError(f"task results cover only {next_row} rows out of {rows}")
         return bytes(merged)
 
-    def collect_spatial_convolution_result(
+    def collect_conv2d_result(
         self,
         *,
         out_h: int,
@@ -117,7 +117,7 @@ class ResultAggregator:
     ) -> bytes:
         """Merge channel-partitioned conv2d results into one output tensor.
 
-        Use this when the caller wants the final spatial-convolution output in
+        Use this when the caller wants the final conv2d output in
         memory and needs each worker slice copied into its channel range.
 
         Args:
@@ -139,7 +139,7 @@ class ResultAggregator:
                 raise ValueError(
                     f"task results do not cover a contiguous output-channel range: expected {next_oc}, got {result.start_oc}"
                 )
-            expected_channels = self._validate_spatial_result(
+            expected_channels = self._validate_conv2d_result(
                 result=result,
                 out_h=out_h,
                 out_w=out_w,
@@ -172,7 +172,7 @@ class ResultAggregator:
             raise ValueError(f"task results cover only {next_oc} output channels out of {total_cout}")
         return merged.tobytes()
 
-    def collect_spatial_convolution_result_to_file(
+    def collect_conv2d_result_to_file(
         self,
         *,
         out_h: int,
@@ -204,7 +204,7 @@ class ResultAggregator:
         with output_path.open("w+b") as handle:
             handle.truncate(spatial_size * total_cout * bytes_per_float)
             for result in results:
-                expected_channels = self._validate_spatial_result(
+                expected_channels = self._validate_conv2d_result(
                     result=result,
                     out_h=out_h,
                     out_w=out_w,

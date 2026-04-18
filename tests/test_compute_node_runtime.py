@@ -1,4 +1,4 @@
-﻿"""Compute-node runtime tests."""
+"""Compute-node runtime tests."""
 
 import threading
 import unittest
@@ -12,11 +12,11 @@ from app.config import AppConfig
 from app.constants import (
     COMPUTE_NODE_NAME,
     MAIN_NODE_NAME,
-    METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
+    METHOD_GEMV,
     STATUS_OK,
 )
 from wire.internal_protocol.runtime_transport import (
-    FixedMatrixVectorResultPayload,
+    GemvResultPayload,
     Heartbeat,
     MessageKind,
     RegisterOk,
@@ -123,12 +123,14 @@ class ComputeNodeRuntimeTests(unittest.TestCase):
     """Validate compute-node runtime behavior after discovery succeeds."""
 
     @mock.patch("builtins.print")
+    @mock.patch("compute_node.runtime.write_audit_event")
     @mock.patch("compute_node.runtime.load_runtime_processor_inventory")
     @mock.patch("compute_node.runtime.collect_hardware_profile")
     def test_run_registers_records_heartbeat_and_executes_task(
         self,
         collect_hardware_profile_mock: mock.Mock,
         load_runtime_processor_inventory_mock: mock.Mock,
+        write_audit_event_mock: mock.Mock,
         print_mock: mock.Mock,
     ) -> None:
         hardware = HardwareProfile(
@@ -155,7 +157,8 @@ class ComputeNodeRuntimeTests(unittest.TestCase):
                 request_id="req-1",
                 node_id=COMPUTE_NODE_NAME,
                 task_id="task-1",
-                method=METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
+                method=METHOD_GEMV,
+                size="small",
                 object_id="input_matrix/default",
                 stream_id="stream-1",
                 timestamp_ms=123456,
@@ -218,9 +221,15 @@ class ComputeNodeRuntimeTests(unittest.TestCase):
         self.assertEqual(fake_session.sent_messages[2].task_result.node_id, "worker-1")
         self.assertEqual(fake_session.sent_messages[2].task_result.iteration_count, 5)
         self.assertEqual(fake_session.sent_messages[2].task_result.output_length, 2)
-        self.assertIsInstance(fake_session.sent_messages[2].task_result.result_payload, FixedMatrixVectorResultPayload)
+        self.assertIsInstance(fake_session.sent_messages[2].task_result.result_payload, GemvResultPayload)
         self.assertEqual(len(fake_executor.tasks), 1)
         self.assertTrue(print_mock.called)
+        self.assertTrue(
+            any(
+                "started as compute node" in call.args[0]
+                for call in write_audit_event_mock.call_args_list
+            )
+        )
 
     @mock.patch("builtins.print")
     @mock.patch("compute_node.runtime.load_runtime_processor_inventory")
@@ -260,7 +269,8 @@ class ComputeNodeRuntimeTests(unittest.TestCase):
                 request_id="req-1",
                 node_id=COMPUTE_NODE_NAME,
                 task_id="task-1",
-                method=METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
+                method=METHOD_GEMV,
+                size="small",
                 object_id="input_matrix/default",
                 stream_id="stream-1",
                 timestamp_ms=123456,

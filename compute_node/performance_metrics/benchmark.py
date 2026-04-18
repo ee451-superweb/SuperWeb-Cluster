@@ -1,7 +1,7 @@
 """Run one or more benchmark methods and normalize their reports.
 
 Use this module as the top-level benchmark CLI when the project should execute
-FMVM, spatial convolution, or both in sequence and emit a unified report.
+GEMV, conv2d, or both in sequence and emit a unified report.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app.runtime_environment import relaunch_with_project_python_if_needed
 from setup import active_python_path
-from app.constants import DX12_BACKEND_DISABLED_REASON, METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION, METHOD_SPATIAL_CONVOLUTION
+from app.constants import DX12_BACKEND_DISABLED_REASON, METHOD_GEMV, METHOD_CONV2D
 from compute_node.performance_metrics.benchmark_status import (
     configure_status_environment,
     emit_status,
@@ -30,33 +30,34 @@ from compute_node.performance_metrics.benchmark_status import (
     resolve_status_paths,
 )
 from compute_node.performance_metrics.device_overview import collect_device_overview
-from compute_node.performance_metrics.fixed_matrix_vector_multiplication.config import (
-    DATASET_DIR as FMVM_DATASET_DIR,
-    RESULT_PATH as FMVM_RESULT_PATH,
+from compute_node.performance_metrics.gemv.config import (
+    DATASET_DIR as GEMV_DATASET_DIR,
+    RESULT_PATH as GEMV_RESULT_PATH,
 )
-from compute_node.performance_metrics.fixed_matrix_vector_multiplication import runner as fmvm_runner
+from compute_node.performance_metrics.gemv import runner as gemv_runner
 from compute_node.performance_metrics.result_format import build_report as build_normalized_report
 from compute_node.performance_metrics.result_format import normalize_method_report
-from compute_node.performance_metrics.spatial_convolution.config import (
-    DATASET_DIR as SPATIAL_DATASET_DIR,
-    RAW_BENCHMARK_PATH as SPATIAL_CONV_BENCHMARK_PATH,
-    RESULT_PATH as SPATIAL_RESULT_PATH,
+from compute_node.performance_metrics.conv2d.config import (
+    DATASET_DIR as CONV2D_DATASET_DIR,
+    RAW_BENCHMARK_PATH as CONV2D_BENCHMARK_PATH,
+    RESULT_PATH as CONV2D_RESULT_PATH,
 )
 from compute_node.performance_metrics.workload_modes import (
     BENCHMARK_WORKLOAD_MODE_CHOICES,
     WORKLOAD_MODE_FULL,
+    WORKLOAD_MODE_SMALL,
 )
 
 ROOT_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_PATH = ROOT_DIR / "result.json"
-DEFAULT_DATASET_DIR = fmvm_runner.DEFAULT_DATASET_DIR
+DEFAULT_DATASET_DIR = gemv_runner.DEFAULT_DATASET_DIR
 METHOD_RESULT_PATHS = {
-    METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION: FMVM_RESULT_PATH,
-    METHOD_SPATIAL_CONVOLUTION: SPATIAL_RESULT_PATH,
+    METHOD_GEMV: GEMV_RESULT_PATH,
+    METHOD_CONV2D: CONV2D_RESULT_PATH,
 }
 METHOD_DATASET_DIRS = {
-    METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION: FMVM_DATASET_DIR,
-    METHOD_SPATIAL_CONVOLUTION: SPATIAL_DATASET_DIR,
+    METHOD_GEMV: GEMV_DATASET_DIR,
+    METHOD_CONV2D: CONV2D_DATASET_DIR,
 }
 
 
@@ -77,8 +78,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--method",
         choices=(
-            METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
-            METHOD_SPATIAL_CONVOLUTION,
+            METHOD_GEMV,
+            METHOD_CONV2D,
             "all",
         ),
         default="all",
@@ -94,7 +95,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--dataset-dir",
         type=Path,
         default=DEFAULT_DATASET_DIR,
-        help="Dataset directory override for FMVM. Spatial-convolution uses its own method-local dataset workspace.",
+        help="Dataset directory override for GEMV. Conv2d uses its own method-local dataset workspace.",
     )
     parser.add_argument(
         "--output",
@@ -118,7 +119,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--time-budget",
         type=float,
         default=240.0,
-        help="FMVM benchmark time budget in seconds. Spatial-convolution keeps its native benchmark flow.",
+        help="GEMV benchmark time budget in seconds. Conv2d keeps its native benchmark flow.",
     )
     parser.add_argument(
         "--rebuild",
@@ -129,19 +130,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--accumulation-precision",
         choices=("fp32", "fp64_accumulate"),
         default="fp32",
-        help="FMVM numeric accumulation mode. Spatial-convolution keeps its native runner behavior.",
+        help="GEMV numeric accumulation mode. Conv2d keeps its native runner behavior.",
     )
-    parser.add_argument("--rows", type=int, help="Optional FMVM matrix row-count override.")
-    parser.add_argument("--cols", type=int, help="Optional FMVM matrix column-count override.")
+    parser.add_argument("--rows", type=int, help="Optional GEMV matrix row-count override.")
+    parser.add_argument("--cols", type=int, help="Optional GEMV matrix column-count override.")
     parser.add_argument(
         "--workload-mode",
         choices=BENCHMARK_WORKLOAD_MODE_CHOICES,
-        default=WORKLOAD_MODE_FULL,
-        help="Benchmark only the small, medium, or large dataset, or run the default small->large flow.",
+        default=None,
+        help="Optional workload-size override. When omitted, GEMV keeps its default full flow and conv2d defaults to small autotune plus mid final measurement.",
     )
-    parser.add_argument("--role", choices=("compute", "main"), default="compute", help="Spatial-convolution dataset role.")
-    parser.add_argument("--h", type=int, help="Optional Conv2D test height override.")
-    parser.add_argument("--w", type=int, help="Optional Conv2D test width override.")
+    parser.add_argument("--role", choices=("compute", "main"), default="compute", help="Conv2d dataset role.")
+    parser.add_argument("--h", type=int, help="Optional Conv2D small-size height override.")
+    parser.add_argument("--w", type=int, help="Optional Conv2D small-size width override.")
     parser.add_argument("--cin", type=int, help="Optional Conv2D input-channel override.")
     parser.add_argument("--cout", type=int, help="Optional Conv2D output-channel override.")
     parser.add_argument("--k", type=int, help="Optional Conv2D kernel-size override.")
@@ -163,34 +164,35 @@ def _selected_methods(method_arg: str) -> list[str]:
         The ordered list of method names to benchmark.
     """
     if method_arg == "all":
-        return [METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION, METHOD_SPATIAL_CONVOLUTION]
+        return [METHOD_GEMV, METHOD_CONV2D]
     return [method_arg]
 
 
-def _run_fmvm_benchmark(args: argparse.Namespace) -> dict[str, object]:
-    """Run the FMVM benchmark entrypoint and return its raw report.
+def _run_gemv_benchmark(args: argparse.Namespace) -> dict[str, object]:
+    """Run the GEMV benchmark entrypoint and return its raw report.
 
-    Use this helper from the combined benchmark flow so FMVM can keep its own
+    Use this helper from the combined benchmark flow so GEMV can keep its own
     runner while still contributing to the unified top-level report.
 
     Args:
         args: Parsed top-level benchmark CLI arguments.
 
     Returns:
-        The raw JSON-like FMVM report dictionary.
+        The raw JSON-like GEMV report dictionary.
     """
+    workload_mode = getattr(args, "workload_mode", None) or WORKLOAD_MODE_FULL
     emit_status(
-        "method.fmvm.dispatch",
+        "method.gemv.dispatch",
         status="running",
-        method=METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
+        method=METHOD_GEMV,
         requested_backends=args.backend or ["auto"],
         rebuild=bool(getattr(args, "rebuild", False)),
-        workload_mode=getattr(args, "workload_mode", WORKLOAD_MODE_FULL),
+        workload_mode=workload_mode,
         rows=args.rows,
         cols=args.cols,
         accumulation_precision=getattr(args, "accumulation_precision", "fp32"),
     )
-    fmvm_args = argparse.Namespace(
+    gemv_args = argparse.Namespace(
         backend=args.backend,
         dataset_dir=args.dataset_dir,
         output=args.output,
@@ -199,45 +201,46 @@ def _run_fmvm_benchmark(args: argparse.Namespace) -> dict[str, object]:
         accumulation_precision=getattr(args, "accumulation_precision", "fp32"),
         rows=args.rows,
         cols=args.cols,
-        workload_mode=getattr(args, "workload_mode", WORKLOAD_MODE_FULL),
+        workload_mode=workload_mode,
     )
-    previous_default_dataset_dir = fmvm_runner.DEFAULT_DATASET_DIR
+    previous_default_dataset_dir = gemv_runner.DEFAULT_DATASET_DIR
     try:
-        fmvm_runner.DEFAULT_DATASET_DIR = DEFAULT_DATASET_DIR
-        return fmvm_runner.run_benchmark(fmvm_args)
+        gemv_runner.DEFAULT_DATASET_DIR = DEFAULT_DATASET_DIR
+        return gemv_runner.run_benchmark(gemv_args)
     finally:
-        fmvm_runner.DEFAULT_DATASET_DIR = previous_default_dataset_dir
+        gemv_runner.DEFAULT_DATASET_DIR = previous_default_dataset_dir
 
 
-def _run_spatial_convolution_benchmark(args: argparse.Namespace) -> dict[str, object]:
-    """Run the spatial-convolution benchmark as a subprocess.
+def _run_conv2d_benchmark(args: argparse.Namespace) -> dict[str, object]:
+    """Run the conv2d benchmark as a subprocess.
 
     Use this helper from the combined benchmark flow so the method-specific
-    spatial benchmark can keep its own CLI and workspace conventions.
+    conv2d benchmark can keep its own CLI and workspace conventions.
 
     Args:
         args: Parsed top-level benchmark CLI arguments.
 
     Returns:
-        The raw JSON-like spatial-convolution report dictionary.
+        The raw JSON-like conv2d report dictionary.
     """
-    if not SPATIAL_CONV_BENCHMARK_PATH.exists():
-        raise FileNotFoundError(f"missing spatial_convolution benchmark entrypoint: {SPATIAL_CONV_BENCHMARK_PATH}")
+    workload_mode = getattr(args, "workload_mode", None) or WORKLOAD_MODE_FULL
+    if not CONV2D_BENCHMARK_PATH.exists():
+        raise FileNotFoundError(f"missing conv2d benchmark entrypoint: {CONV2D_BENCHMARK_PATH}")
 
     started = time.perf_counter()
     with tempfile.TemporaryDirectory(prefix="superweb-spatial-benchmark-") as temp_dir:
-        temp_output_path = Path(temp_dir) / "spatial_convolution_result.json"
+        temp_output_path = Path(temp_dir) / "conv2d_result.json"
         command = [
             str(active_python_path()),
-            str(SPATIAL_CONV_BENCHMARK_PATH),
+            str(CONV2D_BENCHMARK_PATH),
             "--output",
             str(temp_output_path),
             "--role",
             args.role,
             "--dataset-dir",
-            str(METHOD_DATASET_DIRS[METHOD_SPATIAL_CONVOLUTION]),
+            str(METHOD_DATASET_DIRS[METHOD_CONV2D]),
             "--workload-mode",
-            getattr(args, "workload_mode", WORKLOAD_MODE_FULL),
+            workload_mode,
         ]
         if args.backend:
             for backend in args.backend:
@@ -258,43 +261,67 @@ def _run_spatial_convolution_benchmark(args: argparse.Namespace) -> dict[str, ob
                 command.extend([cli_flag, str(value)])
 
         emit_status(
-            "method.spatial_convolution.subprocess.start",
+            "method.conv2d.subprocess.start",
             status="running",
-            method=METHOD_SPATIAL_CONVOLUTION,
+            method=METHOD_CONV2D,
             command=command,
             cwd=str(PROJECT_ROOT),
-            dataset_dir=str(METHOD_DATASET_DIRS[METHOD_SPATIAL_CONVOLUTION]),
+            dataset_dir=str(METHOD_DATASET_DIRS[METHOD_CONV2D]),
             role=args.role,
         )
+        output_lines: list[str] = []
         try:
-            subprocess.run(
+            with subprocess.Popen(
                 command,
-                check=True,
                 cwd=PROJECT_ROOT,
-                timeout=3600.0,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
+                bufsize=1,
+            ) as process:
+                assert process.stdout is not None
+                for line in process.stdout:
+                    print(line, end="", flush=True)
+                    output_lines.append(line)
+                return_code = process.wait(timeout=3600.0)
+            if return_code != 0:
+                error_text = "".join(output_lines).strip() or f"conv2d benchmark exited with code {return_code}"
+                if DX12_BACKEND_DISABLED_REASON in error_text:
+                    error_text = DX12_BACKEND_DISABLED_REASON
+                emit_status(
+                    "method.conv2d.subprocess.error",
+                    status="failed",
+                    method=METHOD_CONV2D,
+                    error=error_text,
+                    returncode=return_code,
+                )
+                raise RuntimeError(error_text)
+        except subprocess.TimeoutExpired as exc:
+            error_text = f"conv2d benchmark timed out after {exc.timeout} seconds"
+            emit_status(
+                "method.conv2d.subprocess.error",
+                status="failed",
+                method=METHOD_CONV2D,
+                error=error_text,
             )
-        except subprocess.CalledProcessError as exc:
-            stderr = (exc.stderr or "").strip()
-            stdout = (exc.stdout or "").strip()
-            error_text = stderr or stdout or str(exc)
+            raise RuntimeError(error_text) from exc
+        except OSError as exc:
+            error_text = str(exc)
             if DX12_BACKEND_DISABLED_REASON in error_text:
                 error_text = DX12_BACKEND_DISABLED_REASON
             emit_status(
-                "method.spatial_convolution.subprocess.error",
+                "method.conv2d.subprocess.error",
                 status="failed",
-                method=METHOD_SPATIAL_CONVOLUTION,
+                method=METHOD_CONV2D,
                 error=error_text,
-                returncode=exc.returncode,
             )
             raise RuntimeError(error_text) from exc
         payload = json.loads(temp_output_path.read_text(encoding="utf-8"))
         payload.setdefault("benchmark_elapsed_seconds", time.perf_counter() - started)
         emit_status(
-            "method.spatial_convolution.subprocess.complete",
+            "method.conv2d.subprocess.complete",
             status="running",
-            method=METHOD_SPATIAL_CONVOLUTION,
+            method=METHOD_CONV2D,
             elapsed_seconds=payload.get("benchmark_elapsed_seconds"),
             usable_backends=payload.get("usable_backends", []),
             ranking=payload.get("ranking", []),
@@ -327,7 +354,7 @@ def _dataset_root_for_method(method_name: str, raw_report: dict[str, object]) ->
     Returns:
         A portable dataset-root string, or ``None`` if unavailable.
     """
-    if method_name == METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION:
+    if method_name == METHOD_GEMV:
         dataset_root = str((raw_report.get("dataset") or {}).get("root_dir") or "")
         if not dataset_root:
             return None
@@ -404,6 +431,47 @@ def _write_method_reports(normalized_report: dict[str, object]) -> None:
         target_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
+def _print_benchmark_summary(normalized_report: dict[str, object]) -> None:
+    """Print one concise operator-facing summary for each completed method.
+
+    Args:
+        normalized_report: Combined normalized benchmark report.
+
+    Returns:
+        ``None`` after summary lines have been written to stdout.
+    """
+
+    methods = normalized_report.get("methods", {})
+    if not isinstance(methods, dict):
+        return
+
+    print("\nBenchmark Summary:", flush=True)
+    for method_name, method_report in methods.items():
+        if not isinstance(method_report, dict):
+            continue
+        best_backend = str(method_report.get("best_backend") or "")
+        backends = method_report.get("backends", {})
+        best_result = None
+        if best_backend and isinstance(backends, dict):
+            best_backend_report = backends.get(best_backend)
+            if isinstance(best_backend_report, dict):
+                best_result = best_backend_report.get("best_result")
+        effective_gflops = None
+        if isinstance(best_result, dict):
+            effective_gflops = best_result.get("effective_gflops")
+        if best_backend and effective_gflops is not None:
+            print(
+                f"[benchmark] {method_name} best result: "
+                f"backend={best_backend} effective_gflops={float(effective_gflops):.2f}",
+                flush=True,
+            )
+        else:
+            print(
+                f"[benchmark] {method_name} best result: no available backend",
+                flush=True,
+            )
+
+
 def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
     """Run the requested benchmarks and return a normalized report.
 
@@ -417,7 +485,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
         The normalized multi-method benchmark report.
     """
 
-    methods = _selected_methods(getattr(args, "method", METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION))
+    methods = _selected_methods(getattr(args, "method", METHOD_GEMV))
     started = time.perf_counter()
     raw_method_reports: dict[str, dict[str, object]] = {}
     total_steps = len(methods) + 2
@@ -434,10 +502,10 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
             f"[benchmark] Step {method_index}/{total_steps}: running {method_name} benchmark...",
             flush=True,
         )
-        if method_name == METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION:
-            raw_method_reports[method_name] = _run_fmvm_benchmark(args)
-        elif method_name == METHOD_SPATIAL_CONVOLUTION:
-            raw_method_reports[method_name] = _run_spatial_convolution_benchmark(args)
+        if method_name == METHOD_GEMV:
+            raw_method_reports[method_name] = _run_gemv_benchmark(args)
+        elif method_name == METHOD_CONV2D:
+            raw_method_reports[method_name] = _run_conv2d_benchmark(args)
         else:
             raise ValueError(f"unsupported benchmark method: {method_name}")
         elapsed = time.perf_counter() - started
@@ -522,7 +590,7 @@ def main(argv: list[str] | None = None) -> int:
         trace_path=args.trace_output,
     )
     configure_status_environment(status_path=status_path, trace_path=trace_path)
-    methods = _selected_methods(getattr(args, "method", METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION))
+    methods = _selected_methods(getattr(args, "method", METHOD_GEMV))
     mark_benchmark_started(
         argv=list(sys.argv[1:] if argv is None else argv),
         cwd=PROJECT_ROOT,
@@ -536,7 +604,7 @@ def main(argv: list[str] | None = None) -> int:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         report_text = json.dumps(report, indent=2)
         args.output.write_text(report_text, encoding="utf-8")
-        print(report_text, flush=True)
+        _print_benchmark_summary(report)
         mark_benchmark_finished(
             output_path=args.output,
             methods_completed=methods,

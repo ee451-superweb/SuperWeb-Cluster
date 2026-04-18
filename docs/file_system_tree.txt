@@ -99,26 +99,26 @@ superweb-cluster/
 │   ├── compute_methods/
 │   │   ├── __init__.py
 │   │   ├── README.md
-│   │   └── fixed_matrix_vector_multiplication/
+│   │   └── gemv/
 │   │       ├── __init__.py
 │   │       ├── README.md
 │   │       ├── paths.py
 │   │       ├── cpu/
 │   │       │   ├── macos/
-│   │       │   │   ├── fmvm_cpu_macos.cpp
+│   │       │   │   ├── gemv_cpu_macos.cpp
 │   │       │   │   └── build/                    [binary may be tracked]
 │   │       │   └── windows/
-│   │       │       ├── fmvm_cpu_windows.cpp
+│   │       │       ├── gemv_cpu_windows.cpp
 │   │       │       └── build/                    [exe may be tracked]
 │   │       ├── cuda/
-│   │       │   ├── fmvm_cuda_runner.cu
+│   │       │   ├── gemv_cuda_runner.cu
 │   │       │   └── build/                        [exe may be tracked]
 │   │       ├── dx12/
-│   │       │   ├── fmvm_dx12_runner.cpp
+│   │       │   ├── gemv_dx12_runner.cpp
 │   │       │   └── build/                        [local-only, git-ignored]
 │   │       └── metal/
-│   │           ├── fmvm_metal_kernels.metal
-│   │           ├── fmvm_metal_runner.mm
+│   │           ├── gemv_metal_kernels.metal
+│   │           ├── gemv_metal_runner.mm
 │   │           └── build/                        [binary may be tracked]
 │   │   - Shared compute-method implementations and native runners
 │   │

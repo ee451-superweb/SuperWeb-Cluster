@@ -1,4 +1,4 @@
-﻿# superweb-cluster
+# superweb-cluster
 
 ## Status
 
@@ -20,7 +20,7 @@ can be added without collapsing everything back into one runtime path.
 | **Auto-Discovery** | Zero-configuration LAN discovery via mDNS, with `discover` and `announce` bootstrap roles |
 | **Method-Aware Benchmarking** | Each node benchmarks supported methods locally and reports per-method GFLOPS summaries during registration |
 | **GFLOPS-Aware Scheduling** | The main node tracks benchmark-derived processor inventories and partitions work proportionally to measured throughput |
-| **Deterministic Input Data** | Shared fixed-seed generators create byte-stable FMVM and spatial-convolution datasets on every machine |
+| **Deterministic Input Data** | Shared fixed-seed generators create byte-stable GEMV and conv2d datasets on every machine |
 | **Native Runner Stack** | In-tree CPU, CUDA, and Metal runners back both benchmarking and compute-node task execution |
 | **Structured Runtime Protocol** | Registration, heartbeat, client requests, task assignment, worker updates, and task results all flow through framed protobuf messages, with large artifacts moved onto a separate TCP data plane |
 | **Crash-Survivable Benchmark Tracing** | Benchmark progress is persisted to `result_status.json` and `result_trace.jsonl` for postmortem analysis |
@@ -63,18 +63,18 @@ The project currently uses two representative methods:
 
 | Method | Autotune Workload | Reported Workload | Primary Partition |
 |---|---|---|---|
-| `fixed_matrix_vector_multiplication` | `4096 x 8192` | `16384 x 32768` (`2 GiB` matrix) | contiguous row ranges |
-| `spatial_convolution` | `512 x 512`, `64 -> 128`, `k=3`, `pad=1`, `stride=1` | `2048 x 2048`, `128 -> 256`, `k=3`, `pad=1`, `stride=1` | contiguous output-channel ranges |
+| `gemv` | `4096 x 8192` | `16384 x 32768` (`2 GiB` matrix) | contiguous row ranges |
+| `conv2d` | `512 x 512`, `64 -> 128`, `k=3`, `pad=1`, `stride=1` | `2048 x 2048`, `128 -> 256`, `k=3`, `pad=1`, `stride=1` | contiguous output-channel ranges |
 
 We use them as two different workload styles:
 
-- `fixed_matrix_vector_multiplication`
+- `gemv`
   - represents a more bandwidth-sensitive, inference-like proxy workload
-- `spatial_convolution`
+- `conv2d`
   - represents a more compute-dense, training-like proxy workload
 
 The benchmark autotunes on the smaller workload, then reports speed on the
-larger workload. For `spatial_convolution`, protocol and runtime plumbing are
+larger workload. For `conv2d`, protocol and runtime plumbing are
 already in-tree, while the large-result data-plane path is still being
 hardened for very large outputs. This is also a deliberate fallback tradeoff:
 Windows places practical constraints on very large Python memory materialization,
@@ -105,14 +105,14 @@ Sprint 2 delivered the current baseline:
 - a cleaner repository split across `app/`, `common/`, `wire/`, `main_node/`, and `compute_node/`
 - explicit separation between `setup.py` environment preparation and `bootstrap.py` runtime startup
 - shared compute-method source trees under `compute_node/compute_methods/`
-- a deterministic shared FMVM dataset workspace under `compute_node/input_matrix/`
-- three active in-tree FMVM backend families: CPU, CUDA, and Metal
+- a deterministic shared GEMV dataset workspace under `compute_node/input_matrix/`
+- three active in-tree GEMV backend families: CPU, CUDA, and Metal
 - the DX12 source tree is retained for debugging, but its entry points are disabled because the module can trigger fatal system instability
 - Windows GPU backend routing now defaults to the routine-safe CUDA path when an NVIDIA adapter is present
 - a two-phase benchmark flow with autotune plus measurement for the reported result
 - runtime use of benchmark summaries to register worker compute capacity
 - expanded tests and documentation for the reorganized runtime model
-- planning groundwork for method-aware runtime evolution beyond FMVM
+- planning groundwork for method-aware runtime evolution beyond GEMV
 
 ## Sprint 3 Plan
 
@@ -122,8 +122,8 @@ user-facing frontends.
 
 Compute-method goals:
 
-- add more executable methods beyond `fixed_matrix_vector_multiplication`
-- start with `spatial_convolution` / `conv2d` as the next major method
+- add more executable methods beyond `gemv`
+- start with `conv2d` / `conv2d` as the next major method
 - make worker registration method-aware so one worker can report different GFLOPS summaries for different methods
 - make main-node dispatch and aggregation method-aware so scheduling follows the client-requested method
 - continue restructuring the compute-node runtime around method handlers and reusable task routing
@@ -304,10 +304,10 @@ The main runtime protobuf messages are:
 
 The runtime and benchmark stack now recognize two methods:
 
-- `fixed_matrix_vector_multiplication`
-- `spatial_convolution`
+- `gemv`
+- `conv2d`
 
-`fixed_matrix_vector_multiplication` is the most mature end-to-end path today:
+`gemv` is the most mature end-to-end path today:
 
 - the client sends one FP32 vector payload
 - the main node partitions matrix rows by registered GFLOPS
@@ -315,7 +315,7 @@ The runtime and benchmark stack now recognize two methods:
   survived local benchmark filtering
 - the main node aggregates row slices into one `CLIENT_RESPONSE`
 
-`spatial_convolution` is already integrated into the method registry, benchmark
+`conv2d` is already integrated into the method registry, benchmark
 workspace, and runtime handler structure:
 
 - the benchmark path is fully method-aware and uses test/runtime dataset pairs
@@ -380,16 +380,16 @@ python "compute_node/input_matrix/generate.py"
 - Shared compute-method implementations now live under
   `compute_node/compute_methods/`, so runtime executors and benchmark backends
   no longer hide method source trees inside `performance_metrics/`.
-- The FMVM compute method currently exposes three routine-safe native backend
+- The GEMV compute method currently exposes three routine-safe native backend
   families in-tree: CPU, CUDA, and Metal.
 - The DX12 module is currently disabled in this build. Repeated
-  `spatial_convolution` benchmark runs on the AMD Radeon 780M path caused
+  `conv2d` benchmark runs on the AMD Radeon 780M path caused
   system-level crashes severe enough to require a BIOS power reset before the
   machine would respond to the power button again.
 - DX12 source files are still kept in-tree for postmortem debugging, but
   benchmark and runtime entry points now reject DX12 requests with a fatal
   warning instead of attempting to run them.
-- The fixed FMVM benchmark uses a two-phase workload:
+- The fixed GEMV benchmark uses a two-phase workload:
   autotune each candidate config with `3` repeats, then measure the winning
   config with `20` repeats for the reported result.
 - The dataset generator is independent from `performance_metrics/`; the

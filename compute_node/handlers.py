@@ -8,9 +8,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.constants import METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION, METHOD_SPATIAL_CONVOLUTION
-from compute_node.compute_methods.fixed_matrix_vector_multiplication.handler import FixedMatrixVectorMethodHandler
-from compute_node.compute_methods.spatial_convolution.handler import SpatialConvolutionMethodHandler
+from app.constants import METHOD_GEMV, METHOD_CONV2D
+from compute_node.compute_methods.gemv.handler import GemvMethodHandler
+from compute_node.compute_methods.conv2d.handler import Conv2dMethodHandler
 
 
 @dataclass(slots=True)
@@ -50,7 +50,7 @@ def build_default_method_handlers() -> MethodHandlerRegistry:
 
     return MethodHandlerRegistry(
         handlers={
-            METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION: FixedMatrixVectorMethodHandler(),
-            METHOD_SPATIAL_CONVOLUTION: SpatialConvolutionMethodHandler(),
+            METHOD_GEMV: GemvMethodHandler(),
+            METHOD_CONV2D: Conv2dMethodHandler(),
         }
     )

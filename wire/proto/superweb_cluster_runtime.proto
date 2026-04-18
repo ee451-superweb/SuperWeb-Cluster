@@ -19,6 +19,7 @@ enum MessageKind {
   WORKER_UPDATE = 13;
   CLIENT_INFO_REQUEST = 14;
   CLIENT_INFO_REPLY = 15;
+  CLIENT_REQUEST_OK = 16;
 }
 
 message HardwareProfile {
@@ -110,7 +111,7 @@ message ClientInfoReply {
   uint64 reply_timestamp_ms = 3;
   uint64 timeout_ms = 4;
   bool has_active_tasks = 5;
-  repeated string active_request_ids = 6;
+  repeated string active_task_ids = 6;
 }
 
 message ArtifactDescriptor {
@@ -128,22 +129,33 @@ message ArtifactDescriptor {
 message ClientRequest {
   string request_id = 1;
   string client_name = 2;
-  // Structured method name, such as fixed_matrix_vector_multiplication.
+  // Structured method name, such as gemv.
   string method = 3;
+  string size = 10;
   string object_id = 4;
   string stream_id = 5;
   uint64 timestamp_ms = 6;
   // How many times the cluster should execute the same computation request.
   uint32 iteration_count = 7;
   oneof request_payload {
-    FixedMatrixVectorRequestPayload fixed_matrix_vector_multiplication = 8;
-    SpatialConvolutionRequestPayload spatial_convolution = 9;
+    GemvRequestPayload gemv = 8;
+    Conv2dRequestPayload conv2d = 9;
   }
+}
+
+message ClientRequestOk {
+  string client_id = 1;
+  string task_id = 2;
+  string method = 3;
+  string size = 6;
+  string object_id = 4;
+  uint64 accepted_timestamp_ms = 5;
 }
 
 message ClientResponse {
   string request_id = 1;
   string method = 2;
+  string size = 17;
   string object_id = 3;
   string stream_id = 4;
   uint64 timestamp_ms = 5;
@@ -156,10 +168,12 @@ message ClientResponse {
   // Echoes the iteration_count from the matching ClientRequest.
   uint32 iteration_count = 11;
   oneof response_payload {
-    FixedMatrixVectorResponsePayload fixed_matrix_vector_multiplication = 12;
-    SpatialConvolutionResponsePayload spatial_convolution = 13;
+    GemvResponsePayload gemv = 12;
+    Conv2dResponsePayload conv2d = 13;
   }
   ArtifactDescriptor result_artifact = 14;
+  string task_id = 15;
+  uint64 elapsed_ms = 16;
 }
 
 message TaskAssign {
@@ -168,14 +182,15 @@ message TaskAssign {
   string node_id = 2;
   string task_id = 3;
   string method = 4;
+  string size = 12;
   string object_id = 5;
   string stream_id = 6;
   uint64 timestamp_ms = 7;
   // How many times the assigned processor slice should execute this math.
   uint32 iteration_count = 8;
   oneof task_payload {
-    FixedMatrixVectorTaskPayload fixed_matrix_vector_multiplication = 9;
-    SpatialConvolutionTaskPayload spatial_convolution = 10;
+    GemvTaskPayload gemv = 9;
+    Conv2dTaskPayload conv2d = 10;
   }
   TransferMode transfer_mode = 11;
   string artifact_id = 13;
@@ -208,8 +223,8 @@ message TaskResult {
   // Echoes the iteration_count from the matching TaskAssign.
   uint32 iteration_count = 6;
   oneof result_payload {
-    FixedMatrixVectorResultPayload fixed_matrix_vector_multiplication = 7;
-    SpatialConvolutionResultPayload spatial_convolution = 8;
+    GemvResultPayload gemv = 7;
+    Conv2dResultPayload conv2d = 8;
   }
   ArtifactDescriptor result_artifact = 9;
 }
@@ -227,12 +242,12 @@ message WorkerUpdate {
   ComputePerformanceSummary performance = 3;
 }
 
-message FixedMatrixVectorRequestPayload {
+message GemvRequestPayload {
   uint32 vector_length = 1;
   bytes vector_data = 2;
 }
 
-message SpatialConvolutionRequestPayload {
+message Conv2dRequestPayload {
   uint32 tensor_h = 1;
   uint32 tensor_w = 2;
   uint32 channels_in = 3;
@@ -242,25 +257,25 @@ message SpatialConvolutionRequestPayload {
   uint32 stride = 7;
 }
 
-message FixedMatrixVectorResponsePayload {
+message GemvResponsePayload {
   uint32 output_length = 1;
   bytes output_vector = 2;
 }
 
-message SpatialConvolutionResponsePayload {
+message Conv2dResponsePayload {
   uint32 output_length = 1;
   bytes output_vector = 2;
   string result_artifact_id = 3;
 }
 
-message FixedMatrixVectorTaskPayload {
+message GemvTaskPayload {
   uint32 row_start = 1;
   uint32 row_end = 2;
   uint32 vector_length = 3;
   bytes vector_data = 4;
 }
 
-message SpatialConvolutionTaskPayload {
+message Conv2dTaskPayload {
   uint32 start_oc = 1;
   uint32 end_oc = 2;
   uint32 tensor_h = 3;
@@ -273,14 +288,14 @@ message SpatialConvolutionTaskPayload {
   bytes weight_data = 10;
 }
 
-message FixedMatrixVectorResultPayload {
+message GemvResultPayload {
   uint32 row_start = 1;
   uint32 row_end = 2;
   uint32 output_length = 3;
   bytes output_vector = 4;
 }
 
-message SpatialConvolutionResultPayload {
+message Conv2dResultPayload {
   uint32 start_oc = 1;
   uint32 end_oc = 2;
   uint32 output_h = 3;
@@ -307,4 +322,5 @@ message RuntimeEnvelope {
   WorkerUpdate worker_update = 14;
   ClientInfoRequest client_info_request = 15;
   ClientInfoReply client_info_reply = 16;
+  ClientRequestOk client_request_ok = 17;
 }

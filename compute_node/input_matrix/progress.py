@@ -29,14 +29,29 @@ def build_progress_reporter() -> tuple[Callable[[str, int, int], None], Callable
     """Create one `(report, close)` pair for dataset-generation progress."""
 
     bars: dict[str, object] = {}
+    milestone_progress: dict[str, int] = {}
+    supports_live_tqdm = tqdm is not None and bool(getattr(sys.stdout, "isatty", lambda: False)())
 
     def report(label: str, written_bytes: int, total_bytes: int) -> None:
         """Update or print progress for one labeled generation stream."""
-        if tqdm is None:
-            print(
-                f"{label}: wrote {_format_binary_size(written_bytes)} / {_format_binary_size(total_bytes)}",
-                flush=True,
-            )
+        if not supports_live_tqdm:
+            if total_bytes <= 0:
+                return
+            previous_milestone = milestone_progress.get(label, -10)
+            current_percent = int((written_bytes / total_bytes) * 100)
+            current_milestone = min(100, (current_percent // 10) * 10)
+            if written_bytes >= total_bytes:
+                current_milestone = 100
+            if current_milestone > previous_milestone:
+                print(
+                    f"{label}: {current_milestone}% "
+                    f"({_format_binary_size(written_bytes)} / {_format_binary_size(total_bytes)})",
+                    flush=True,
+                )
+                if current_milestone >= 100:
+                    milestone_progress.pop(label, None)
+                else:
+                    milestone_progress[label] = current_milestone
             return
 
         bar = bars.get(label)
@@ -65,8 +80,18 @@ def build_progress_reporter() -> tuple[Callable[[str, int, int], None], Callable
         for bar in list(bars.values()):
             bar.close()
         bars.clear()
+        milestone_progress.clear()
 
     return report, close
 
 
-__all__ = ["build_progress_reporter"]
+def emit_progress_message(message: str) -> None:
+    """Write one dataset-generation status line without corrupting tqdm bars."""
+
+    if tqdm is None:
+        print(message, flush=True)
+        return
+    tqdm.write(message, file=sys.stdout)
+
+
+__all__ = ["build_progress_reporter", "emit_progress_message"]

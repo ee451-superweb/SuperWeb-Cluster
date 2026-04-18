@@ -1,4 +1,4 @@
-﻿"""Track connected runtime peers and their abstract scheduling capabilities.
+"""Track connected runtime peers and their abstract scheduling capabilities.
 
 Use this module when the main node needs a thread-safe view of registered
 workers, registered clients, active tasks, active client requests, and the
@@ -14,8 +14,8 @@ from dataclasses import dataclass, field
 
 from common.types import ComputePerformanceSummary, HardwareProfile, MethodPerformanceSummary
 from app.constants import (
-    METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
-    METHOD_SPATIAL_CONVOLUTION,
+    METHOD_GEMV,
+    METHOD_CONV2D,
     RUNTIME_ROLE_CLIENT,
     RUNTIME_ROLE_WORKER,
 )
@@ -79,8 +79,26 @@ class ClusterRegistry:
         self._next_hardware_id = 1
         self._next_worker_id = 1
         self._next_client_id = 1
+        self._next_task_id = 1
         self._total_effective_gflops = 0.0
         self._lock = threading.Lock()
+
+    def _normalize_task_prefix(self, method: str) -> str:
+        """Return a compact task-id prefix derived from the requested method."""
+        prefix = (method or "task").strip().lower()
+        return "".join(char for char in prefix if char.isalnum() or char in {"-", "_"}) or "task"
+
+    @trace_function
+    def allocate_task_id(self, method: str) -> str:
+        """Use this when the main node accepts a client request and needs a cluster task id.
+
+        Args: method requested client method used to build a readable task-id prefix.
+        Returns: A main-node-assigned task id unique within the current process lifetime.
+        """
+        with self._lock:
+            task_id = f"{self._normalize_task_prefix(method)}-{self._next_task_id}"
+            self._next_task_id += 1
+            return task_id
 
     def _remove_worker_hardware_locked(self, connection: RuntimePeerConnection) -> None:
         """Use this inside the registry lock before removing or replacing worker performance.
@@ -114,7 +132,7 @@ class ClusterRegistry:
         if not method_summaries and performance.ranked_hardware:
             method_summaries = [
                 MethodPerformanceSummary(
-                    method=METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
+                    method=METHOD_GEMV,
                     hardware_count=performance.hardware_count,
                     ranked_hardware=list(performance.ranked_hardware),
                 )
@@ -363,30 +381,31 @@ class ClusterRegistry:
                 connection.active_method = ""
 
     @trace_function
-    def mark_client_request_state(self, peer_id: str, *, request_id: str, method: str) -> None:
+    def mark_client_request_state(self, peer_id: str, *, task_id: str, method: str) -> None:
         """Use this when one client begins an application-level request.
 
-        Args: peer_id client registry key plus request_id and method now active for that client.
-        Returns: None after the client's active-request fields are updated.
+        Args: peer_id client registry key plus task_id and method now active for that client.
+        Returns: None after the client's active-task fields are updated.
         """
         with self._lock:
             connection = self._clients.get(peer_id)
             if connection is not None:
-                connection.active_request_id = request_id
-                connection.active_task_id = ""
+                connection.active_request_id = task_id
+                connection.active_task_id = task_id
                 connection.active_method = method
 
     @trace_function
-    def clear_client_request_state(self, peer_id: str, *, request_id: str | None = None) -> None:
+    def clear_client_request_state(self, peer_id: str, *, task_id: str | None = None) -> None:
         """Use this after a client request finishes or is cancelled.
 
-        Args: peer_id client registry key and request_id optional guard for the active request.
+        Args: peer_id client registry key and task_id optional guard for the active task.
         Returns: None after matching client-request state is cleared.
         """
         with self._lock:
             connection = self._clients.get(peer_id)
-            if connection is not None and (request_id is None or connection.active_request_id == request_id):
+            if connection is not None and (task_id is None or connection.active_task_id == task_id):
                 connection.active_request_id = ""
+                connection.active_task_id = ""
                 connection.active_method = ""
 
     @trace_function
@@ -475,8 +494,8 @@ class ClusterRegistry:
         Returns: A dictionary keyed by method name with summed effective GFLOPS.
         """
         totals = {
-            METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION: 0.0,
-            METHOD_SPATIAL_CONVOLUTION: 0.0,
+            METHOD_GEMV: 0.0,
+            METHOD_CONV2D: 0.0,
         }
         with self._lock:
             for worker_hardware in self._worker_hardware.values():
@@ -534,17 +553,17 @@ class ClusterRegistry:
         return None
 
     @trace_function
-    def get_client_active_request_ids(self, peer_id: str) -> tuple[str, ...]:
+    def get_client_active_task_ids(self, peer_id: str) -> tuple[str, ...]:
         """Use this when answering CLIENT_INFO_REQUEST for one client session.
 
         Args: peer_id registry key for the client connection being queried.
-        Returns: A tuple containing the current active request id, or an empty tuple when idle.
+        Returns: A tuple containing the current active task id, or an empty tuple when idle.
         """
         with self._lock:
             connection = self._clients.get(peer_id)
-            if connection is None or not connection.active_request_id:
+            if connection is None or not connection.active_task_id:
                 return ()
-            return (connection.active_request_id,)
+            return (connection.active_task_id,)
 
 ComputeNodeRegistry = ClusterRegistry
 WorkerRegistry = ClusterRegistry

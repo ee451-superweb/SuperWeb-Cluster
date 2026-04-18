@@ -18,7 +18,7 @@ from compute_node.performance_refresh import (
 )
 from common.types import ComputeHardwarePerformance, ComputePerformanceSummary, MethodPerformanceSummary
 from compute_node.runtime_services import IdlePerformanceRefreshService, format_compute_performance_summary
-from app.constants import METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION, METHOD_SPATIAL_CONVOLUTION
+from app.constants import METHOD_GEMV, METHOD_CONV2D
 
 
 class ComputeNodePerformanceRefreshTests(unittest.TestCase):
@@ -72,11 +72,11 @@ class ComputeNodePerformanceRefreshTests(unittest.TestCase):
         summary = ComputePerformanceSummary(
             method_summaries=[
                 MethodPerformanceSummary(
-                    method=METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
+                    method=METHOD_GEMV,
                     ranked_hardware=[ComputeHardwarePerformance(hardware_type="cpu", effective_gflops=24.0, rank=1)],
                 ),
                 MethodPerformanceSummary(
-                    method=METHOD_SPATIAL_CONVOLUTION,
+                    method=METHOD_CONV2D,
                     ranked_hardware=[ComputeHardwarePerformance(hardware_type="cuda", effective_gflops=125.0, rank=1)],
                 ),
             ]
@@ -84,11 +84,11 @@ class ComputeNodePerformanceRefreshTests(unittest.TestCase):
 
         formatted = format_compute_performance_summary(summary)
 
-        self.assertIn("fmvm=cpu:24.000GFLOPS", formatted)
+        self.assertIn("gemv=cpu:24.000GFLOPS", formatted)
         self.assertIn("conv2d=cuda:125.000GFLOPS", formatted)
 
-    @mock.patch("builtins.print")
-    def test_idle_refresh_success_prints_method_gflops(self, print_mock: mock.Mock) -> None:
+    @mock.patch("compute_node.runtime_services.write_audit_event")
+    def test_idle_refresh_success_logs_method_gflops(self, audit_mock: mock.Mock) -> None:
         logger = mock.Mock()
         service = IdlePerformanceRefreshService(
             config=SimpleNamespace(idle_worker_update_interval=60.0),
@@ -98,11 +98,11 @@ class ComputeNodePerformanceRefreshTests(unittest.TestCase):
         refreshed_performance = ComputePerformanceSummary(
             method_summaries=[
                 MethodPerformanceSummary(
-                    method=METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
+                    method=METHOD_GEMV,
                     ranked_hardware=[ComputeHardwarePerformance(hardware_type="cpu", effective_gflops=24.0, rank=1)],
                 ),
                 MethodPerformanceSummary(
-                    method=METHOD_SPATIAL_CONVOLUTION,
+                    method=METHOD_CONV2D,
                     ranked_hardware=[ComputeHardwarePerformance(hardware_type="cuda", effective_gflops=125.0, rank=1)],
                 ),
             ]
@@ -125,19 +125,19 @@ class ComputeNodePerformanceRefreshTests(unittest.TestCase):
 
         sent_update = session.send.call_args.args[0]
         self.assertEqual(sent_update.kind.name, "WORKER_UPDATE")
-        printed = " ".join(str(call.args[0]) for call in print_mock.call_args_list)
-        self.assertIn("fmvm=cpu:24.000GFLOPS", printed)
-        self.assertIn("conv2d=cuda:125.000GFLOPS", printed)
+        logged = " ".join(str(call.args[0]) for call in audit_mock.call_args_list)
+        self.assertIn("gemv=cpu:24.000GFLOPS", logged)
+        self.assertIn("conv2d=cuda:125.000GFLOPS", logged)
 
     def test_validate_idle_refresh_requirements_reports_progress_steps(self) -> None:
         progress_messages: list[tuple[int, int, str]] = []
         payload = {
             "methods": {
-                "fixed_matrix_vector_multiplication": {
+                "gemv": {
                     "best_backend": "cuda",
                     "backends": {"cuda": {"best_config": {"block_size": 128}}},
                 },
-                "spatial_convolution": {
+                "conv2d": {
                     "best_backend": "cpu",
                     "backends": {"cpu": {"best_config": {"tile_size": 16}}},
                 },
@@ -146,10 +146,10 @@ class ComputeNodePerformanceRefreshTests(unittest.TestCase):
 
         with (
             mock.patch("compute_node.performance_refresh._load_result_payload", return_value=payload),
-            mock.patch("compute_node.performance_refresh._ensure_fmvm_refresh_dataset"),
-            mock.patch("compute_node.performance_refresh._ensure_fmvm_refresh_runner"),
-            mock.patch("compute_node.performance_refresh._ensure_spatial_refresh_dataset"),
-            mock.patch("compute_node.performance_refresh._ensure_spatial_refresh_runner"),
+            mock.patch("compute_node.performance_refresh._ensure_gemv_refresh_dataset"),
+            mock.patch("compute_node.performance_refresh._ensure_gemv_refresh_runner"),
+            mock.patch("compute_node.performance_refresh._ensure_conv2d_refresh_dataset"),
+            mock.patch("compute_node.performance_refresh._ensure_conv2d_refresh_runner"),
         ):
             validate_idle_refresh_requirements(
                 progress_callback=lambda step, total, description: progress_messages.append(
@@ -160,8 +160,8 @@ class ComputeNodePerformanceRefreshTests(unittest.TestCase):
         self.assertEqual(len(progress_messages), 7)
         self.assertEqual(progress_messages[0][0:2], (1, 7))
         self.assertIn("Loading persisted benchmark result metadata.", progress_messages[0][2])
-        self.assertIn("fixed_matrix_vector_multiplication small input matrix", progress_messages[2][2])
-        self.assertIn("spatial_convolution runner binary", progress_messages[-1][2])
+        self.assertIn("gemv small input matrix", progress_messages[2][2])
+        self.assertIn("conv2d runner binary", progress_messages[-1][2])
 
 
 if __name__ == "__main__":

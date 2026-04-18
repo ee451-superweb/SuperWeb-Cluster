@@ -1,4 +1,4 @@
-﻿"""Run the main-node control plane for discovery, client sessions, and workers.
+"""Run the main-node control plane for discovery, client sessions, and workers.
 
 Use this module when one process is acting as the cluster's main node. It
 accepts worker and client TCP sessions, answers discovery packets, dispatches
@@ -14,16 +14,17 @@ import time
 from collections.abc import Callable
 
 from adapters import network
+from adapters.audit_log import write_audit_event
 from common.types import DiscoveryResult
-from compute_node.compute_methods.spatial_convolution import (
-    DEFAULT_DATASET_DIR as SPATIAL_DATASET_DIR,
+from compute_node.compute_methods.conv2d import (
+    DEFAULT_DATASET_DIR as CONV2D_DATASET_DIR,
 )
 from compute_node.input_matrix import build_input_matrix_spec
 from app.config import AppConfig
 from app.constants import (
     MAIN_NODE_NAME,
-    METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
-    METHOD_SPATIAL_CONVOLUTION,
+    METHOD_GEMV,
+    METHOD_CONV2D,
 )
 from discovery import multicast
 from main_node import client_session_service as client_session_service_module
@@ -71,41 +72,45 @@ class MainNodeRuntime:
         self.registry = ClusterRegistry()
         self.dispatcher = TaskDispatcher()
         self.aggregator = ResultAggregator()
-        self.fixed_matvec_spec = build_input_matrix_spec()
-        self.spatial_dataset_dir = SPATIAL_DATASET_DIR
+        self.gemv_spec = build_input_matrix_spec()
+        self.conv2d_dataset_dir = CONV2D_DATASET_DIR
         self.artifact_manager = ArtifactManager(
-            root_dir=self.spatial_dataset_dir / "artifacts",
+            root_dir=self.conv2d_dataset_dir / "artifacts",
             public_host="127.0.0.1",
             chunk_size=self.config.artifact_chunk_size,
         )
         self._stop_event = threading.Event()
         self.task_exchange = WorkerTaskExchange(
             config=self.config,
-            spatial_dataset_dir=self.spatial_dataset_dir,
+            conv2d_dataset_dir=self.conv2d_dataset_dir,
             remove_worker_connection=self._remove_worker_connection,
             artifact_manager=self.artifact_manager,
+            logger=self.logger,
         )
         self.client_request_handler = ClientRequestHandler(
             config=self.config,
             registry=self.registry,
             dispatcher=self.dispatcher,
             aggregator=self.aggregator,
-            fixed_matvec_spec=self.fixed_matvec_spec,
-            spatial_dataset_dir=self.spatial_dataset_dir,
+            gemv_spec=self.gemv_spec,
+            conv2d_dataset_dir=self.conv2d_dataset_dir,
             task_exchange=self.task_exchange,
             artifact_manager=self.artifact_manager,
             cluster_counts=self._cluster_counts,
+            logger=self.logger,
         )
         self.heartbeat_coordinator = HeartbeatCoordinator(
             config=self.config,
             registry=self.registry,
             remove_connection=self._remove_runtime_connection,
+            logger=self.logger,
         )
         self.client_session_service = ClientSessionService(
             config=self.config,
             registry=self.registry,
             build_client_response_for_request=self._build_client_response_for_request,
             remove_client_connection=self._remove_client_connection,
+            logger=self.logger,
         )
         self.connection_service = RuntimeConnectionService(
             config=self.config,
@@ -115,6 +120,7 @@ class MainNodeRuntime:
             serve_client_connection=self._serve_client_connection,
             cluster_counts=self._cluster_counts,
             on_runtime_connection_registered=self._start_runtime_connection_reader,
+            logger=self.logger,
         )
         self.runtime_connection_handler = RuntimeConnectionHandler(
             config=self.config,
@@ -122,26 +128,34 @@ class MainNodeRuntime:
             format_reported_hardware=self._format_reported_hardware,
             print_cluster_compute_capacity=self._print_cluster_compute_capacity,
             runtime_should_stop=self._runtime_should_stop,
+            logger=self.logger,
         )
 
     @trace_function
     def _print_startup_banner(self, local_ip: str, local_mac: str) -> None:
         """Print the information that identifies this process as the main node."""
 
-        if self.config.role == "announce":
-            print("Starting main-node runtime.", flush=True)
-        else:
-            print("No main node discovered after retry limit. Promoting self to main node.", flush=True)
-        print(f"main_node_ip={local_ip}", flush=True)
-        print(f"main_node_mac={local_mac}", flush=True)
-        print(f"main_node_tcp_port={self.config.tcp_port}", flush=True)
-        print(
-            f"Listening for superweb-cluster mDNS discovery on {self.config.multicast_group}:{self.config.udp_port}",
-            flush=True,
+        startup_mode = "announce" if self.config.role == "announce" else "promoted"
+        write_audit_event(
+            f"started as main node mode={startup_mode} endpoint={local_ip}:{self.config.tcp_port}",
+            stdout=True,
+            logger=self.logger,
         )
-        print(
-            f"Listening for superweb-cluster runtime connections on 0.0.0.0:{self.config.tcp_port}",
-            flush=True,
+        if self.config.role == "announce":
+            self.logger.info("Starting main-node runtime.")
+        else:
+            self.logger.info("No main node discovered after retry limit. Promoting self to main node.")
+        self.logger.info("main_node_ip=%s", local_ip)
+        self.logger.info("main_node_mac=%s", local_mac)
+        self.logger.info("main_node_tcp_port=%s", self.config.tcp_port)
+        self.logger.info(
+            "Listening for superweb-cluster mDNS discovery on %s:%s",
+            self.config.multicast_group,
+            self.config.udp_port,
+        )
+        self.logger.info(
+            "Listening for superweb-cluster runtime connections on 0.0.0.0:%s",
+            self.config.tcp_port,
         )
 
     def _runtime_should_stop(self) -> bool:
@@ -165,10 +179,16 @@ class MainNodeRuntime:
             ``None`` after services and helper modules point at current bindings.
         """
         self.connection_service.registry = self.registry
+        self.connection_service.logger = self.logger
         self.client_session_service.registry = self.registry
+        self.client_session_service.logger = self.logger
         self.heartbeat_coordinator.registry = self.registry
+        self.heartbeat_coordinator.logger = self.logger
         self.client_request_handler.registry = self.registry
+        self.client_request_handler.logger = self.logger
+        self.task_exchange.logger = self.logger
         self.runtime_connection_handler.registry = self.registry
+        self.runtime_connection_handler.logger = self.logger
         self.connection_service.serve_client_connection = self._serve_client_connection
         self.runtime_connection_handler.runtime_should_stop = self._runtime_should_stop
         self.runtime_connection_handler.format_reported_hardware = self._format_reported_hardware
@@ -211,9 +231,9 @@ class MainNodeRuntime:
     def _method_display_name(self, method: str) -> str:
         """Return a short operator-facing label for one method name."""
 
-        if method == METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION:
-            return "fmvm"
-        if method == METHOD_SPATIAL_CONVOLUTION:
+        if method == METHOD_GEMV:
+            return "gemv"
+        if method == METHOD_CONV2D:
             return "conv2d"
         return method
 
@@ -263,14 +283,14 @@ class MainNodeRuntime:
             except (TypeError, ValueError):
                 return 0.0
 
-        print(
-            "Current cluster compute capacity "
-            f"total_effective_gflops={self.registry.total_registered_gflops():.3f} "
-            f"worker_count={self.registry.count_workers()} "
-            f"hardware_count={self.registry.count_registered_hardware()} "
-            f"fmvm_effective_gflops={_safe_method_total(METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION):.3f} "
-            f"conv2d_effective_gflops={_safe_method_total(METHOD_SPATIAL_CONVOLUTION):.3f}",
-            flush=True,
+        self.logger.info(
+            "Current cluster compute capacity total_effective_gflops=%.3f worker_count=%s "
+            "hardware_count=%s gemv_effective_gflops=%.3f conv2d_effective_gflops=%.3f",
+            self.registry.total_registered_gflops(),
+            self.registry.count_workers(),
+            self.registry.count_registered_hardware(),
+            _safe_method_total(METHOD_GEMV),
+            _safe_method_total(METHOD_CONV2D),
         )
 
     @trace_function
@@ -379,34 +399,34 @@ class MainNodeRuntime:
         self._refresh_runtime_service_bindings()
         self.runtime_connection_handler.handle_client_info_request(connection, client_info_request)
 
-    def _ensure_spatial_convolution_dataset_ready(self) -> None:
+    def _ensure_conv2d_dataset_ready(self) -> None:
         """Use this before convolution dispatch so the shared dataset files are ready.
 
         Args: self runtime instance delegating dataset preparation to task exchange.
-        Returns: None after required spatial dataset files are ensured on disk.
+        Returns: None after required conv2d dataset files are ensured on disk.
         """
-        self.task_exchange.ensure_spatial_convolution_dataset_ready()
+        self.task_exchange.ensure_conv2d_dataset_ready()
 
-    def _spatial_weight_slice(self, *, variant: str, spec, start_oc: int, end_oc: int) -> bytes:
-        """Use this when one spatial task needs only a slice of the full weight tensor.
+    def _conv2d_weight_slice(self, *, variant: str, spec, start_oc: int, end_oc: int) -> bytes:
+        """Use this when one conv2d task needs only a slice of the full weight tensor.
 
         Args: variant workload name, spec convolution spec, and start_oc/end_oc output-channel bounds.
         Returns: The serialized weight bytes for the requested output-channel slice.
         """
-        return self.task_exchange.spatial_weight_slice(
+        return self.task_exchange.conv2d_weight_slice(
             variant=variant,
             spec=spec,
             start_oc=start_oc,
             end_oc=end_oc,
         )
 
-    def _max_spatial_channels_per_task(self, spec) -> int:
-        """Use this when dispatch needs the largest in-band channel chunk for a spatial task.
+    def _max_conv2d_channels_per_task(self, spec) -> int:
+        """Use this when dispatch needs the largest in-band channel chunk for a conv2d task.
 
         Args: spec convolution workload spec whose wire-size limits are being checked.
         Returns: The maximum output-channel count allowed in one task payload.
         """
-        return self.task_exchange.max_spatial_channels_per_task(spec)
+        return self.task_exchange.max_conv2d_channels_per_task(spec)
 
     @trace_function
     def _run_worker_task_slice(self, request, assignment: WorkerTaskSlice):
@@ -439,8 +459,8 @@ class MainNodeRuntime:
         self.client_request_handler.registry = self.registry
         self.client_request_handler.dispatcher = self.dispatcher
         self.client_request_handler.aggregator = self.aggregator
-        self.client_request_handler.fixed_matvec_spec = self.fixed_matvec_spec
-        self.client_request_handler.spatial_dataset_dir = self.spatial_dataset_dir
+        self.client_request_handler.gemv_spec = self.gemv_spec
+        self.client_request_handler.conv2d_dataset_dir = self.conv2d_dataset_dir
         self.client_request_handler.task_exchange = self.task_exchange
         self.client_request_handler.artifact_manager = self.artifact_manager
         self.client_request_handler.run_worker_task_slice = self._run_worker_task_slice
@@ -540,9 +560,13 @@ class MainNodeRuntime:
             return
 
         description = multicast.describe_packet(message)
-        print(f"mDNS packet from {addr[0]}:{addr[1]} -> {description}", flush=True)
+        self.logger.info("mDNS packet from %s:%s -> %s", addr[0], addr[1], description)
         announce_host = multicast.send_announce(endpoint, addr, self.config, MAIN_NODE_NAME)
-        print(f"Sent main-node mDNS response using {announce_host}:{self.config.tcp_port}", flush=True)
+        self.logger.info(
+            "Sent main-node mDNS response using %s:%s",
+            announce_host,
+            self.config.tcp_port,
+        )
 
     @trace_function
     def run(self) -> DiscoveryResult:

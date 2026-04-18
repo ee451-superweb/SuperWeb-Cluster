@@ -58,6 +58,7 @@ cover/
 
 # Django stuff:
 *.log
+/logs/
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
@@ -229,15 +230,15 @@ __marimo__/
 !/compute_node/compute_methods/**/build/*.cmd
 # Git cannot enforce file size limits here, so we explicitly whitelist only the
 # runner binaries that are currently verified to stay below 4 MB.
-!/compute_node/compute_methods/fixed_matrix_vector_multiplication/cpu/macos/build/fmvm_cpu_macos
-!/compute_node/compute_methods/fixed_matrix_vector_multiplication/cpu/windows/build/fmvm_cpu_windows.exe
-!/compute_node/compute_methods/fixed_matrix_vector_multiplication/cuda/build/fmvm_cuda_runner.exe
-!/compute_node/compute_methods/fixed_matrix_vector_multiplication/metal/build/fmvm_metal_runner
-!/compute_node/compute_methods/spatial_convolution/cpu/macos/build/spatial_conv_cpu_macos
-!/compute_node/compute_methods/spatial_convolution/cpu/windows/build/spatial_conv_cpu_windows.exe
-!/compute_node/compute_methods/spatial_convolution/cuda/build/spatial_conv_cuda_runner.exe
-!/compute_node/compute_methods/spatial_convolution/dx12/build/spatial_conv_dx12_runner.exe
-!/compute_node/compute_methods/spatial_convolution/metal/build/spatial_conv_metal_runner
+!/compute_node/compute_methods/gemv/cpu/macos/build/gemv_cpu_macos
+!/compute_node/compute_methods/gemv/cpu/windows/build/gemv_cpu_windows.exe
+!/compute_node/compute_methods/gemv/cuda/build/gemv_cuda_runner.exe
+!/compute_node/compute_methods/gemv/metal/build/gemv_metal_runner
+!/compute_node/compute_methods/conv2d/cpu/macos/build/conv2d_cpu_macos
+!/compute_node/compute_methods/conv2d/cpu/windows/build/conv2d_cpu_windows.exe
+!/compute_node/compute_methods/conv2d/cuda/build/conv2d_cuda_runner.exe
+!/compute_node/compute_methods/conv2d/dx12/build/conv2d_dx12_runner.exe
+!/compute_node/compute_methods/conv2d/metal/build/conv2d_metal_runner
 /compute_node/compute_methods/**/*.obj
 /compute_node/compute_methods/**/*.o
 /compute_node/compute_methods/**/*.a
@@ -249,8 +250,11 @@ __marimo__/
 /compute_node/compute_methods/**/*.so
 /compute_node/compute_methods/**/*.dylib
 /compute_node/compute_methods/**/*.pyd
-/compute_node/compute_methods/**/fmvm_cpu_output.bin
-/compute_node/compute_methods/**/fmvm_cuda_output.bin
-/compute_node/compute_methods/**/fmvm_dx12_output.bin
+/compute_node/compute_methods/**/gemv_cpu_output.bin
+/compute_node/compute_methods/**/gemv_cuda_output.bin
+/compute_node/compute_methods/**/gemv_dx12_output.bin
+/compute_node/compute_methods/**/conv2d_cpu_output.bin
+/compute_node/compute_methods/**/conv2d_cuda_output.bin
+/compute_node/compute_methods/**/conv2d_dx12_output.bin
 /compute_node/compute_methods/**/runtime_output*.bin
 /compute_node/compute_methods/**/execution_result.json

@@ -186,38 +186,38 @@ def _from_pb_artifact_descriptor(payload: runtime_pb2.ArtifactDescriptor) -> Art
     )
 
 
-def _to_pb_fixed_matrix_vector_request_payload(payload) -> runtime_pb2.FixedMatrixVectorRequestPayload:
-    """Use this during protobuf encoding to convert an FMVM client-request payload.
+def _to_pb_gemv_request_payload(payload) -> runtime_pb2.GemvRequestPayload:
+    """Use this during protobuf encoding to convert an GEMV client-request payload.
 
-    Args: payload internal FixedMatrixVectorRequestPayload object.
+    Args: payload internal GemvRequestPayload object.
     Returns: The generated protobuf request payload message.
     """
-    return runtime_pb2.FixedMatrixVectorRequestPayload(
+    return runtime_pb2.GemvRequestPayload(
         vector_length=payload.vector_length,
         vector_data=payload.vector_data,
     )
 
 
-def _from_pb_fixed_matrix_vector_request_payload(payload: runtime_pb2.FixedMatrixVectorRequestPayload):
-    """Use this during protobuf parsing to convert a generated FMVM request payload.
+def _from_pb_gemv_request_payload(payload: runtime_pb2.GemvRequestPayload):
+    """Use this during protobuf parsing to convert a generated GEMV request payload.
 
-    Args: payload generated protobuf FixedMatrixVectorRequestPayload message.
-    Returns: The internal FixedMatrixVectorRequestPayload object.
+    Args: payload generated protobuf GemvRequestPayload message.
+    Returns: The internal GemvRequestPayload object.
     """
     runtime = _runtime()
-    return runtime.FixedMatrixVectorRequestPayload(
+    return runtime.GemvRequestPayload(
         vector_length=payload.vector_length,
         vector_data=payload.vector_data,
     )
 
 
-def _to_pb_spatial_convolution_request_payload(payload) -> runtime_pb2.SpatialConvolutionRequestPayload:
-    """Use this during protobuf encoding to convert a spatial-convolution client-request payload.
+def _to_pb_conv2d_request_payload(payload) -> runtime_pb2.Conv2dRequestPayload:
+    """Use this during protobuf encoding to convert a conv2d client-request payload.
 
-    Args: payload internal SpatialConvolutionRequestPayload object.
+    Args: payload internal Conv2dRequestPayload object.
     Returns: The generated protobuf request payload message.
     """
-    return runtime_pb2.SpatialConvolutionRequestPayload(
+    return runtime_pb2.Conv2dRequestPayload(
         tensor_h=payload.tensor_h,
         tensor_w=payload.tensor_w,
         channels_in=payload.channels_in,
@@ -228,14 +228,14 @@ def _to_pb_spatial_convolution_request_payload(payload) -> runtime_pb2.SpatialCo
     )
 
 
-def _from_pb_spatial_convolution_request_payload(payload: runtime_pb2.SpatialConvolutionRequestPayload):
-    """Use this during protobuf parsing to convert a generated spatial-convolution request payload.
+def _from_pb_conv2d_request_payload(payload: runtime_pb2.Conv2dRequestPayload):
+    """Use this during protobuf parsing to convert a generated conv2d request payload.
 
-    Args: payload generated protobuf SpatialConvolutionRequestPayload message.
-    Returns: The internal SpatialConvolutionRequestPayload object.
+    Args: payload generated protobuf Conv2dRequestPayload message.
+    Returns: The internal Conv2dRequestPayload object.
     """
     runtime = _runtime()
-    return runtime.SpatialConvolutionRequestPayload(
+    return runtime.Conv2dRequestPayload(
         tensor_h=payload.tensor_h,
         tensor_w=payload.tensor_w,
         channels_in=payload.channels_in,
@@ -246,65 +246,65 @@ def _from_pb_spatial_convolution_request_payload(payload: runtime_pb2.SpatialCon
     )
 
 
-def _to_pb_fixed_matrix_vector_response_payload(payload) -> runtime_pb2.FixedMatrixVectorResponsePayload:
-    """Use this during protobuf encoding to convert an FMVM client-response payload.
+def _to_pb_gemv_response_payload(payload) -> runtime_pb2.GemvResponsePayload:
+    """Use this during protobuf encoding to convert an GEMV client-response payload.
 
-    Args: payload internal FixedMatrixVectorResponsePayload object.
+    Args: payload internal GemvResponsePayload object.
     Returns: The generated protobuf response payload message.
     """
-    return runtime_pb2.FixedMatrixVectorResponsePayload(
+    return runtime_pb2.GemvResponsePayload(
         output_length=payload.output_length,
         output_vector=payload.output_vector,
     )
 
 
-def _from_pb_fixed_matrix_vector_response_payload(payload: runtime_pb2.FixedMatrixVectorResponsePayload):
-    """Use this during protobuf parsing to convert a generated FMVM response payload.
+def _from_pb_gemv_response_payload(payload: runtime_pb2.GemvResponsePayload):
+    """Use this during protobuf parsing to convert a generated GEMV response payload.
 
-    Args: payload generated protobuf FixedMatrixVectorResponsePayload message.
-    Returns: The internal FixedMatrixVectorResponsePayload object.
+    Args: payload generated protobuf GemvResponsePayload message.
+    Returns: The internal GemvResponsePayload object.
     """
     runtime = _runtime()
-    return runtime.FixedMatrixVectorResponsePayload(
+    return runtime.GemvResponsePayload(
         output_length=payload.output_length,
         output_vector=payload.output_vector,
     )
 
 
-def _to_pb_spatial_convolution_response_payload(payload) -> runtime_pb2.SpatialConvolutionResponsePayload:
-    """Use this during protobuf encoding to convert a spatial-convolution client-response payload.
+def _to_pb_conv2d_response_payload(payload) -> runtime_pb2.Conv2dResponsePayload:
+    """Use this during protobuf encoding to convert a conv2d client-response payload.
 
-    Args: payload internal SpatialConvolutionResponsePayload object.
+    Args: payload internal Conv2dResponsePayload object.
     Returns: The generated protobuf response payload message.
     """
-    return runtime_pb2.SpatialConvolutionResponsePayload(
+    return runtime_pb2.Conv2dResponsePayload(
         output_length=payload.output_length,
         output_vector=payload.output_vector,
         result_artifact_id=payload.result_artifact_id,
     )
 
 
-def _from_pb_spatial_convolution_response_payload(payload: runtime_pb2.SpatialConvolutionResponsePayload):
-    """Use this during protobuf parsing to convert a generated spatial-convolution response payload.
+def _from_pb_conv2d_response_payload(payload: runtime_pb2.Conv2dResponsePayload):
+    """Use this during protobuf parsing to convert a generated conv2d response payload.
 
-    Args: payload generated protobuf SpatialConvolutionResponsePayload message.
-    Returns: The internal SpatialConvolutionResponsePayload object.
+    Args: payload generated protobuf Conv2dResponsePayload message.
+    Returns: The internal Conv2dResponsePayload object.
     """
     runtime = _runtime()
-    return runtime.SpatialConvolutionResponsePayload(
+    return runtime.Conv2dResponsePayload(
         output_length=payload.output_length,
         output_vector=payload.output_vector,
         result_artifact_id=payload.result_artifact_id,
     )
 
 
-def _to_pb_fixed_matrix_vector_task_payload(payload) -> runtime_pb2.FixedMatrixVectorTaskPayload:
-    """Use this during protobuf encoding to convert an FMVM task payload.
+def _to_pb_gemv_task_payload(payload) -> runtime_pb2.GemvTaskPayload:
+    """Use this during protobuf encoding to convert an GEMV task payload.
 
-    Args: payload internal FixedMatrixVectorTaskPayload object.
+    Args: payload internal GemvTaskPayload object.
     Returns: The generated protobuf task payload message.
     """
-    return runtime_pb2.FixedMatrixVectorTaskPayload(
+    return runtime_pb2.GemvTaskPayload(
         row_start=payload.row_start,
         row_end=payload.row_end,
         vector_length=payload.vector_length,
@@ -312,14 +312,14 @@ def _to_pb_fixed_matrix_vector_task_payload(payload) -> runtime_pb2.FixedMatrixV
     )
 
 
-def _from_pb_fixed_matrix_vector_task_payload(payload: runtime_pb2.FixedMatrixVectorTaskPayload):
-    """Use this during protobuf parsing to convert a generated FMVM task payload.
+def _from_pb_gemv_task_payload(payload: runtime_pb2.GemvTaskPayload):
+    """Use this during protobuf parsing to convert a generated GEMV task payload.
 
-    Args: payload generated protobuf FixedMatrixVectorTaskPayload message.
-    Returns: The internal FixedMatrixVectorTaskPayload object.
+    Args: payload generated protobuf GemvTaskPayload message.
+    Returns: The internal GemvTaskPayload object.
     """
     runtime = _runtime()
-    return runtime.FixedMatrixVectorTaskPayload(
+    return runtime.GemvTaskPayload(
         row_start=payload.row_start,
         row_end=payload.row_end,
         vector_length=payload.vector_length,
@@ -327,13 +327,13 @@ def _from_pb_fixed_matrix_vector_task_payload(payload: runtime_pb2.FixedMatrixVe
     )
 
 
-def _to_pb_spatial_convolution_task_payload(payload) -> runtime_pb2.SpatialConvolutionTaskPayload:
-    """Use this during protobuf encoding to convert a spatial-convolution task payload.
+def _to_pb_conv2d_task_payload(payload) -> runtime_pb2.Conv2dTaskPayload:
+    """Use this during protobuf encoding to convert a conv2d task payload.
 
-    Args: payload internal SpatialConvolutionTaskPayload object.
+    Args: payload internal Conv2dTaskPayload object.
     Returns: The generated protobuf task payload message.
     """
-    return runtime_pb2.SpatialConvolutionTaskPayload(
+    return runtime_pb2.Conv2dTaskPayload(
         start_oc=payload.start_oc,
         end_oc=payload.end_oc,
         tensor_h=payload.tensor_h,
@@ -347,14 +347,14 @@ def _to_pb_spatial_convolution_task_payload(payload) -> runtime_pb2.SpatialConvo
     )
 
 
-def _from_pb_spatial_convolution_task_payload(payload: runtime_pb2.SpatialConvolutionTaskPayload):
-    """Use this during protobuf parsing to convert a generated spatial-convolution task payload.
+def _from_pb_conv2d_task_payload(payload: runtime_pb2.Conv2dTaskPayload):
+    """Use this during protobuf parsing to convert a generated conv2d task payload.
 
-    Args: payload generated protobuf SpatialConvolutionTaskPayload message.
-    Returns: The internal SpatialConvolutionTaskPayload object.
+    Args: payload generated protobuf Conv2dTaskPayload message.
+    Returns: The internal Conv2dTaskPayload object.
     """
     runtime = _runtime()
-    return runtime.SpatialConvolutionTaskPayload(
+    return runtime.Conv2dTaskPayload(
         start_oc=payload.start_oc,
         end_oc=payload.end_oc,
         tensor_h=payload.tensor_h,
@@ -368,13 +368,13 @@ def _from_pb_spatial_convolution_task_payload(payload: runtime_pb2.SpatialConvol
     )
 
 
-def _to_pb_fixed_matrix_vector_result_payload(payload) -> runtime_pb2.FixedMatrixVectorResultPayload:
-    """Use this during protobuf encoding to convert an FMVM task-result payload.
+def _to_pb_gemv_result_payload(payload) -> runtime_pb2.GemvResultPayload:
+    """Use this during protobuf encoding to convert an GEMV task-result payload.
 
-    Args: payload internal FixedMatrixVectorResultPayload object.
+    Args: payload internal GemvResultPayload object.
     Returns: The generated protobuf result payload message.
     """
-    return runtime_pb2.FixedMatrixVectorResultPayload(
+    return runtime_pb2.GemvResultPayload(
         row_start=payload.row_start,
         row_end=payload.row_end,
         output_length=payload.output_length,
@@ -382,14 +382,14 @@ def _to_pb_fixed_matrix_vector_result_payload(payload) -> runtime_pb2.FixedMatri
     )
 
 
-def _from_pb_fixed_matrix_vector_result_payload(payload: runtime_pb2.FixedMatrixVectorResultPayload):
-    """Use this during protobuf parsing to convert a generated FMVM result payload.
+def _from_pb_gemv_result_payload(payload: runtime_pb2.GemvResultPayload):
+    """Use this during protobuf parsing to convert a generated GEMV result payload.
 
-    Args: payload generated protobuf FixedMatrixVectorResultPayload message.
-    Returns: The internal FixedMatrixVectorResultPayload object.
+    Args: payload generated protobuf GemvResultPayload message.
+    Returns: The internal GemvResultPayload object.
     """
     runtime = _runtime()
-    return runtime.FixedMatrixVectorResultPayload(
+    return runtime.GemvResultPayload(
         row_start=payload.row_start,
         row_end=payload.row_end,
         output_length=payload.output_length,
@@ -397,13 +397,13 @@ def _from_pb_fixed_matrix_vector_result_payload(payload: runtime_pb2.FixedMatrix
     )
 
 
-def _to_pb_spatial_convolution_result_payload(payload) -> runtime_pb2.SpatialConvolutionResultPayload:
-    """Use this during protobuf encoding to convert a spatial-convolution task-result payload.
+def _to_pb_conv2d_result_payload(payload) -> runtime_pb2.Conv2dResultPayload:
+    """Use this during protobuf encoding to convert a conv2d task-result payload.
 
-    Args: payload internal SpatialConvolutionResultPayload object.
+    Args: payload internal Conv2dResultPayload object.
     Returns: The generated protobuf result payload message.
     """
-    return runtime_pb2.SpatialConvolutionResultPayload(
+    return runtime_pb2.Conv2dResultPayload(
         start_oc=payload.start_oc,
         end_oc=payload.end_oc,
         output_h=payload.output_h,
@@ -414,14 +414,14 @@ def _to_pb_spatial_convolution_result_payload(payload) -> runtime_pb2.SpatialCon
     )
 
 
-def _from_pb_spatial_convolution_result_payload(payload: runtime_pb2.SpatialConvolutionResultPayload):
-    """Use this during protobuf parsing to convert a generated spatial-convolution result payload.
+def _from_pb_conv2d_result_payload(payload: runtime_pb2.Conv2dResultPayload):
+    """Use this during protobuf parsing to convert a generated conv2d result payload.
 
-    Args: payload generated protobuf SpatialConvolutionResultPayload message.
-    Returns: The internal SpatialConvolutionResultPayload object.
+    Args: payload generated protobuf Conv2dResultPayload message.
+    Returns: The internal Conv2dResultPayload object.
     """
     runtime = _runtime()
-    return runtime.SpatialConvolutionResultPayload(
+    return runtime.Conv2dResultPayload(
         start_oc=payload.start_oc,
         end_oc=payload.end_oc,
         output_h=payload.output_h,
@@ -488,32 +488,43 @@ def encode_envelope(message) -> bytes:
         envelope.client_info_reply.reply_timestamp_ms = message.client_info_reply.reply_timestamp_ms
         envelope.client_info_reply.timeout_ms = message.client_info_reply.timeout_ms
         envelope.client_info_reply.has_active_tasks = message.client_info_reply.has_active_tasks
-        envelope.client_info_reply.active_request_ids.extend(message.client_info_reply.active_request_ids)
+        envelope.client_info_reply.active_task_ids.extend(message.client_info_reply.active_task_ids)
+    elif message.kind == runtime.MessageKind.CLIENT_REQUEST_OK:
+        if message.client_request_ok is None:
+            raise ValueError("CLIENT_REQUEST_OK envelope missing payload")
+        envelope.client_request_ok.client_id = message.client_request_ok.client_id
+        envelope.client_request_ok.task_id = message.client_request_ok.task_id
+        envelope.client_request_ok.method = message.client_request_ok.method
+        envelope.client_request_ok.size = message.client_request_ok.size
+        envelope.client_request_ok.object_id = message.client_request_ok.object_id
+        envelope.client_request_ok.accepted_timestamp_ms = message.client_request_ok.accepted_timestamp_ms
     elif message.kind == runtime.MessageKind.CLIENT_REQUEST:
         if message.client_request is None:
             raise ValueError("CLIENT_REQUEST envelope missing payload")
         envelope.client_request.request_id = message.client_request.request_id
         envelope.client_request.client_name = message.client_request.client_name
         envelope.client_request.method = message.client_request.method
+        envelope.client_request.size = message.client_request.size
         envelope.client_request.object_id = message.client_request.object_id
         envelope.client_request.stream_id = message.client_request.stream_id
         envelope.client_request.timestamp_ms = message.client_request.timestamp_ms
         envelope.client_request.iteration_count = message.client_request.iteration_count
-        if message.client_request.fixed_matrix_vector_multiplication_payload is not None:
-            envelope.client_request.fixed_matrix_vector_multiplication.CopyFrom(
-                _to_pb_fixed_matrix_vector_request_payload(
-                    message.client_request.fixed_matrix_vector_multiplication_payload
+        if message.client_request.gemv_payload is not None:
+            envelope.client_request.gemv.CopyFrom(
+                _to_pb_gemv_request_payload(
+                    message.client_request.gemv_payload
                 )
             )
-        elif message.client_request.spatial_convolution_payload is not None:
-            envelope.client_request.spatial_convolution.CopyFrom(
-                _to_pb_spatial_convolution_request_payload(message.client_request.spatial_convolution_payload)
+        elif message.client_request.conv2d_payload is not None:
+            envelope.client_request.conv2d.CopyFrom(
+                _to_pb_conv2d_request_payload(message.client_request.conv2d_payload)
             )
     elif message.kind == runtime.MessageKind.CLIENT_RESPONSE:
         if message.client_response is None:
             raise ValueError("CLIENT_RESPONSE envelope missing payload")
         envelope.client_response.request_id = message.client_response.request_id
         envelope.client_response.method = message.client_response.method
+        envelope.client_response.size = message.client_response.size
         envelope.client_response.object_id = message.client_response.object_id
         envelope.client_response.stream_id = message.client_response.stream_id
         envelope.client_response.timestamp_ms = message.client_response.timestamp_ms
@@ -523,15 +534,17 @@ def encode_envelope(message) -> bytes:
         envelope.client_response.client_count = message.client_response.client_count
         envelope.client_response.client_id = message.client_response.client_id
         envelope.client_response.iteration_count = message.client_response.iteration_count
-        if message.client_response.fixed_matrix_vector_multiplication_payload is not None:
-            envelope.client_response.fixed_matrix_vector_multiplication.CopyFrom(
-                _to_pb_fixed_matrix_vector_response_payload(
-                    message.client_response.fixed_matrix_vector_multiplication_payload
+        envelope.client_response.task_id = message.client_response.task_id
+        envelope.client_response.elapsed_ms = message.client_response.elapsed_ms
+        if message.client_response.gemv_payload is not None:
+            envelope.client_response.gemv.CopyFrom(
+                _to_pb_gemv_response_payload(
+                    message.client_response.gemv_payload
                 )
             )
-        elif message.client_response.spatial_convolution_payload is not None:
-            envelope.client_response.spatial_convolution.CopyFrom(
-                _to_pb_spatial_convolution_response_payload(message.client_response.spatial_convolution_payload)
+        elif message.client_response.conv2d_payload is not None:
+            envelope.client_response.conv2d.CopyFrom(
+                _to_pb_conv2d_response_payload(message.client_response.conv2d_payload)
             )
         if message.client_response.result_artifact is not None:
             envelope.client_response.result_artifact.CopyFrom(
@@ -544,6 +557,7 @@ def encode_envelope(message) -> bytes:
         envelope.task_assign.node_id = message.task_assign.node_id
         envelope.task_assign.task_id = message.task_assign.task_id
         envelope.task_assign.method = message.task_assign.method
+        envelope.task_assign.size = message.task_assign.size
         envelope.task_assign.object_id = message.task_assign.object_id
         envelope.task_assign.stream_id = message.task_assign.stream_id
         envelope.task_assign.timestamp_ms = message.task_assign.timestamp_ms
@@ -551,15 +565,15 @@ def encode_envelope(message) -> bytes:
         envelope.task_assign.transfer_mode = int(message.task_assign.transfer_mode)
         envelope.task_assign.artifact_id = message.task_assign.artifact_id
         envelope.task_assign.artifact_timeout_ms = message.task_assign.artifact_timeout_ms
-        if message.task_assign.fixed_matrix_vector_multiplication_payload is not None:
-            envelope.task_assign.fixed_matrix_vector_multiplication.CopyFrom(
-                _to_pb_fixed_matrix_vector_task_payload(
-                    message.task_assign.fixed_matrix_vector_multiplication_payload
+        if message.task_assign.gemv_payload is not None:
+            envelope.task_assign.gemv.CopyFrom(
+                _to_pb_gemv_task_payload(
+                    message.task_assign.gemv_payload
                 )
             )
-        elif message.task_assign.spatial_convolution_payload is not None:
-            envelope.task_assign.spatial_convolution.CopyFrom(
-                _to_pb_spatial_convolution_task_payload(message.task_assign.spatial_convolution_payload)
+        elif message.task_assign.conv2d_payload is not None:
+            envelope.task_assign.conv2d.CopyFrom(
+                _to_pb_conv2d_task_payload(message.task_assign.conv2d_payload)
             )
     elif message.kind == runtime.MessageKind.TASK_ACCEPT:
         if message.task_accept is None:
@@ -587,15 +601,15 @@ def encode_envelope(message) -> bytes:
         envelope.task_result.timestamp_ms = message.task_result.timestamp_ms
         envelope.task_result.status_code = message.task_result.status_code
         envelope.task_result.iteration_count = message.task_result.iteration_count
-        if message.task_result.fixed_matrix_vector_multiplication_payload is not None:
-            envelope.task_result.fixed_matrix_vector_multiplication.CopyFrom(
-                _to_pb_fixed_matrix_vector_result_payload(
-                    message.task_result.fixed_matrix_vector_multiplication_payload
+        if message.task_result.gemv_payload is not None:
+            envelope.task_result.gemv.CopyFrom(
+                _to_pb_gemv_result_payload(
+                    message.task_result.gemv_payload
                 )
             )
-        elif message.task_result.spatial_convolution_payload is not None:
-            envelope.task_result.spatial_convolution.CopyFrom(
-                _to_pb_spatial_convolution_result_payload(message.task_result.spatial_convolution_payload)
+        elif message.task_result.conv2d_payload is not None:
+            envelope.task_result.conv2d.CopyFrom(
+                _to_pb_conv2d_result_payload(message.task_result.conv2d_payload)
             )
         if message.task_result.result_artifact is not None:
             envelope.task_result.result_artifact.CopyFrom(
@@ -639,6 +653,7 @@ def parse_envelope(payload: bytes):
     client_join = None
     client_info_request = None
     client_info_reply = None
+    client_request_ok = None
     client_request = None
     client_response = None
     task_assign = None
@@ -691,22 +706,32 @@ def parse_envelope(payload: bytes):
             reply_timestamp_ms=envelope_pb.client_info_reply.reply_timestamp_ms,
             timeout_ms=envelope_pb.client_info_reply.timeout_ms,
             has_active_tasks=envelope_pb.client_info_reply.has_active_tasks,
-            active_request_ids=tuple(envelope_pb.client_info_reply.active_request_ids),
+            active_task_ids=tuple(envelope_pb.client_info_reply.active_task_ids),
+        )
+    if envelope_pb.HasField("client_request_ok"):
+        client_request_ok = runtime.ClientRequestOk(
+            client_id=envelope_pb.client_request_ok.client_id,
+            task_id=envelope_pb.client_request_ok.task_id,
+            method=envelope_pb.client_request_ok.method,
+            size=envelope_pb.client_request_ok.size,
+            object_id=envelope_pb.client_request_ok.object_id,
+            accepted_timestamp_ms=envelope_pb.client_request_ok.accepted_timestamp_ms,
         )
     if envelope_pb.HasField("client_request"):
         request_payload = None
-        if envelope_pb.client_request.HasField("fixed_matrix_vector_multiplication"):
-            request_payload = _from_pb_fixed_matrix_vector_request_payload(
-                envelope_pb.client_request.fixed_matrix_vector_multiplication
+        if envelope_pb.client_request.HasField("gemv"):
+            request_payload = _from_pb_gemv_request_payload(
+                envelope_pb.client_request.gemv
             )
-        elif envelope_pb.client_request.HasField("spatial_convolution"):
-            request_payload = _from_pb_spatial_convolution_request_payload(
-                envelope_pb.client_request.spatial_convolution
+        elif envelope_pb.client_request.HasField("conv2d"):
+            request_payload = _from_pb_conv2d_request_payload(
+                envelope_pb.client_request.conv2d
             )
         client_request = runtime.ClientRequest(
             request_id=envelope_pb.client_request.request_id,
             client_name=envelope_pb.client_request.client_name,
             method=envelope_pb.client_request.method,
+            size=envelope_pb.client_request.size,
             object_id=envelope_pb.client_request.object_id,
             stream_id=envelope_pb.client_request.stream_id,
             timestamp_ms=envelope_pb.client_request.timestamp_ms,
@@ -715,17 +740,18 @@ def parse_envelope(payload: bytes):
         )
     if envelope_pb.HasField("client_response"):
         response_payload = None
-        if envelope_pb.client_response.HasField("fixed_matrix_vector_multiplication"):
-            response_payload = _from_pb_fixed_matrix_vector_response_payload(
-                envelope_pb.client_response.fixed_matrix_vector_multiplication
+        if envelope_pb.client_response.HasField("gemv"):
+            response_payload = _from_pb_gemv_response_payload(
+                envelope_pb.client_response.gemv
             )
-        elif envelope_pb.client_response.HasField("spatial_convolution"):
-            response_payload = _from_pb_spatial_convolution_response_payload(
-                envelope_pb.client_response.spatial_convolution
+        elif envelope_pb.client_response.HasField("conv2d"):
+            response_payload = _from_pb_conv2d_response_payload(
+                envelope_pb.client_response.conv2d
             )
         client_response = runtime.ClientResponse(
             request_id=envelope_pb.client_response.request_id,
             method=envelope_pb.client_response.method,
+            size=envelope_pb.client_response.size,
             object_id=envelope_pb.client_response.object_id,
             stream_id=envelope_pb.client_response.stream_id,
             timestamp_ms=envelope_pb.client_response.timestamp_ms,
@@ -735,6 +761,8 @@ def parse_envelope(payload: bytes):
             client_count=envelope_pb.client_response.client_count,
             client_id=envelope_pb.client_response.client_id,
             iteration_count=envelope_pb.client_response.iteration_count,
+            task_id=envelope_pb.client_response.task_id,
+            elapsed_ms=envelope_pb.client_response.elapsed_ms,
             response_payload=response_payload,
             result_artifact=(
                 _from_pb_artifact_descriptor(envelope_pb.client_response.result_artifact)
@@ -744,19 +772,20 @@ def parse_envelope(payload: bytes):
         )
     if envelope_pb.HasField("task_assign"):
         task_payload = None
-        if envelope_pb.task_assign.HasField("fixed_matrix_vector_multiplication"):
-            task_payload = _from_pb_fixed_matrix_vector_task_payload(
-                envelope_pb.task_assign.fixed_matrix_vector_multiplication
+        if envelope_pb.task_assign.HasField("gemv"):
+            task_payload = _from_pb_gemv_task_payload(
+                envelope_pb.task_assign.gemv
             )
-        elif envelope_pb.task_assign.HasField("spatial_convolution"):
-            task_payload = _from_pb_spatial_convolution_task_payload(
-                envelope_pb.task_assign.spatial_convolution
+        elif envelope_pb.task_assign.HasField("conv2d"):
+            task_payload = _from_pb_conv2d_task_payload(
+                envelope_pb.task_assign.conv2d
             )
         task_assign = runtime.TaskAssign(
             request_id=envelope_pb.task_assign.request_id,
             node_id=envelope_pb.task_assign.node_id,
             task_id=envelope_pb.task_assign.task_id,
             method=envelope_pb.task_assign.method,
+            size=envelope_pb.task_assign.size,
             object_id=envelope_pb.task_assign.object_id,
             stream_id=envelope_pb.task_assign.stream_id,
             timestamp_ms=envelope_pb.task_assign.timestamp_ms,
@@ -785,13 +814,13 @@ def parse_envelope(payload: bytes):
         )
     if envelope_pb.HasField("task_result"):
         result_payload = None
-        if envelope_pb.task_result.HasField("fixed_matrix_vector_multiplication"):
-            result_payload = _from_pb_fixed_matrix_vector_result_payload(
-                envelope_pb.task_result.fixed_matrix_vector_multiplication
+        if envelope_pb.task_result.HasField("gemv"):
+            result_payload = _from_pb_gemv_result_payload(
+                envelope_pb.task_result.gemv
             )
-        elif envelope_pb.task_result.HasField("spatial_convolution"):
-            result_payload = _from_pb_spatial_convolution_result_payload(
-                envelope_pb.task_result.spatial_convolution
+        elif envelope_pb.task_result.HasField("conv2d"):
+            result_payload = _from_pb_conv2d_result_payload(
+                envelope_pb.task_result.conv2d
             )
         task_result = runtime.TaskResult(
             request_id=envelope_pb.task_result.request_id,
@@ -830,6 +859,7 @@ def parse_envelope(payload: bytes):
         client_join=client_join,
         client_info_request=client_info_request,
         client_info_reply=client_info_reply,
+        client_request_ok=client_request_ok,
         client_request=client_request,
         client_response=client_response,
         task_assign=task_assign,

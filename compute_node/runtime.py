@@ -1,4 +1,4 @@
-﻿"""Run the long-lived compute-node control loop for one worker process.
+"""Run the long-lived compute-node control loop for one worker process.
 
 Use this module after discovery has resolved a main node and the worker needs to
 register itself, accept tasks, keep heartbeats flowing, publish artifacts, and
@@ -15,6 +15,7 @@ from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
 
+from adapters.audit_log import write_audit_event
 from app.config import AppConfig
 from app.trace_utils import trace_function
 from common.hardware import collect_hardware_profile
@@ -223,27 +224,37 @@ class ComputeNodeRuntime:
             assigned_node_id = register_ok.node_id or self.config.node_name
             artifact_manager = self._build_artifact_manager(session)
 
-            print(
+            write_audit_event(
+                f"started as compute node assigned_node_id={assigned_node_id} "
+                f"main_node={register_ok.main_node_ip}:{register_ok.main_node_port}",
+                stdout=True,
+                logger=self.logger,
+            )
+            write_audit_event(
                 f"Connected to main node {register_ok.main_node_name} "
                 f"at {register_ok.main_node_ip}:{register_ok.main_node_port} "
                 f"assigned_node_id={assigned_node_id}",
-                flush=True,
+                stdout=True,
+                logger=self.logger,
             )
-            print(
+            write_audit_event(
                 f"Registered compute node {self.config.node_name} "
                 f"with cpu={hardware.logical_cpu_count} memory_bytes={hardware.memory_bytes}",
-                flush=True,
+                stdout=True,
+                logger=self.logger,
             )
-            print(
+            write_audit_event(
                 "Reported compute methods "
                 f"count={len(performance.method_summaries) or 1} "
-                f"methods={[summary.method for summary in performance.method_summaries] or ['fixed_matrix_vector_multiplication']}",
-                flush=True,
+                f"methods={[summary.method for summary in performance.method_summaries] or ['gemv']}",
+                stdout=True,
+                logger=self.logger,
             )
-            print(
+            write_audit_event(
                 "Reported compute performance "
                 f"{format_compute_performance_summary(performance)}",
-                flush=True,
+                stdout=True,
+                logger=self.logger,
             )
             last_worker_update_at = time.monotonic()
 

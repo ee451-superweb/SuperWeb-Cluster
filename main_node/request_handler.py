@@ -9,22 +9,26 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor
 
+from adapters.audit_log import write_audit_event
 from app.constants import (
     MAIN_NODE_NAME,
-    METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
-    METHOD_SPATIAL_CONVOLUTION,
+    METHOD_FREE_CONTENT,
+    METHOD_GEMV,
+    METHOD_CONV2D,
     STATUS_BAD_REQUEST,
     STATUS_INTERNAL_ERROR,
     STATUS_NOT_FOUND,
     STATUS_OK,
 )
 from app.trace_utils import trace_function
-from compute_node.compute_methods.spatial_convolution.executor import load_named_workload_spec
+from compute_node.input_matrix.gemv import build_input_matrix_spec as build_gemv_input_matrix_spec
+from compute_node.compute_methods.conv2d.executor import load_named_workload_spec
 from wire.internal_protocol.runtime_transport import (
-    FixedMatrixVectorResponsePayload,
-    SpatialConvolutionResponsePayload,
+    GemvResponsePayload,
+    Conv2dResponsePayload,
     build_client_response,
 )
 
@@ -39,27 +43,60 @@ class ClientRequestHandler:
         registry,
         dispatcher,
         aggregator,
-        fixed_matvec_spec,
-        spatial_dataset_dir,
+        gemv_spec,
+        conv2d_dataset_dir,
         task_exchange,
         artifact_manager,
         cluster_counts,
+        logger=None,
     ) -> None:
         """Wire together the services needed to handle one client request end to end.
 
-        Args: config runtime settings, registry/dispatcher/aggregator cluster services, fixed_matvec_spec and spatial_dataset_dir workload metadata, task_exchange/artifact_manager transfer helpers, cluster_counts callable for reply metadata.
+        Args: config runtime settings, registry/dispatcher/aggregator cluster services, gemv_spec and conv2d_dataset_dir workload metadata, task_exchange/artifact_manager transfer helpers, cluster_counts callable for reply metadata, logger audit sink for operator progress messages.
         Returns: None after the handler stores references to its shared collaborators.
         """
         self.config = config
         self.registry = registry
         self.dispatcher = dispatcher
         self.aggregator = aggregator
-        self.fixed_matvec_spec = fixed_matvec_spec
-        self.spatial_dataset_dir = spatial_dataset_dir
+        self.gemv_spec = gemv_spec
+        self.conv2d_dataset_dir = conv2d_dataset_dir
         self.task_exchange = task_exchange
         self.run_worker_task_slice = task_exchange.run_worker_task_slice
         self.artifact_manager = artifact_manager
         self._cluster_counts = cluster_counts
+        self.logger = logger
+
+    def _safe_float(self, value) -> float:
+        """Convert one maybe-missing numeric value into a stable float."""
+
+        try:
+            return float(value or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _build_system_overview_text(self) -> str:
+        """Render one human-readable system overview for free-content replies."""
+
+        worker_count, client_count = self._cluster_counts()
+        total_effective_gflops = self._safe_float(self.registry.total_registered_gflops())
+        method_totals = self.registry.total_registered_gflops_by_method()
+        if not isinstance(method_totals, dict):
+            method_totals = {}
+        main_node_host = getattr(self.artifact_manager, "public_host", "127.0.0.1") or "127.0.0.1"
+        supported_methods = ", ".join((METHOD_GEMV, METHOD_CONV2D, METHOD_FREE_CONTENT))
+        return "\n".join(
+            (
+                "superweb-cluster system overview",
+                f"main_node_endpoint: {main_node_host}:{self.config.tcp_port}",
+                f"worker_count: {worker_count}",
+                f"client_count: {client_count}",
+                f"total_effective_gflops: {total_effective_gflops:.3f}",
+                f"gemv_effective_gflops: {self._safe_float(method_totals.get(METHOD_GEMV, 0.0)):.3f}",
+                f"conv2d_effective_gflops: {self._safe_float(method_totals.get(METHOD_CONV2D, 0.0)):.3f}",
+                f"supported_methods: {supported_methods}",
+            )
+        )
 
     def _cleanup_local_task_results(self, task_results) -> None:
         """Delete any temporary local result files attached to worker task results.
@@ -87,11 +124,38 @@ class ClientRequestHandler:
         Args: request decoded client request envelope with method-specific payload.
         Returns: A ready-to-send ClientResponse envelope, including inline bytes or an artifact descriptor.
         """
+        task_id = request.request_id
+        started_at = time.monotonic()
+
+        def build_response(*, status_code: int, **kwargs):
+            kwargs.setdefault("size", request.size)
+            return build_client_response(
+                request_id=task_id,
+                status_code=status_code,
+                task_id=task_id,
+                elapsed_ms=max(0, int((time.monotonic() - started_at) * 1000)),
+                **kwargs,
+            )
+
         worker_count, client_count = self._cluster_counts()
 
-        if request.method not in (METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION, METHOD_SPATIAL_CONVOLUTION):
-            return build_client_response(
-                request_id=request.request_id,
+        if request.method == METHOD_FREE_CONTENT:
+            overview_bytes = self._build_system_overview_text().encode("utf-8")
+            return build_response(
+                status_code=STATUS_OK,
+                method=request.method,
+                object_id=request.object_id,
+                stream_id=request.stream_id,
+                output_vector=overview_bytes,
+                output_length=len(overview_bytes),
+                worker_count=worker_count,
+                client_count=client_count,
+                client_id="",
+                iteration_count=request.iteration_count,
+            )
+
+        if request.method not in (METHOD_GEMV, METHOD_CONV2D):
+            return build_response(
                 status_code=STATUS_BAD_REQUEST,
                 method=request.method,
                 object_id=request.object_id,
@@ -103,16 +167,17 @@ class ClientRequestHandler:
                 iteration_count=request.iteration_count,
             )
 
-        if request.method == METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION and request.vector_length != self.fixed_matvec_spec.cols:
-            return build_client_response(
-                request_id=request.request_id,
+        gemv_spec = build_gemv_input_matrix_spec(default_variant=request.size or "large")
+
+        if request.method == METHOD_GEMV and request.vector_length != gemv_spec.cols:
+            return build_response(
                 status_code=STATUS_BAD_REQUEST,
                 method=request.method,
                 object_id=request.object_id,
                 stream_id=request.stream_id,
                 error_message=(
                     f"vector_length={request.vector_length} does not match "
-                    f"expected {self.fixed_matvec_spec.cols}"
+                    f"expected {gemv_spec.cols}"
                 ),
                 worker_count=worker_count,
                 client_count=client_count,
@@ -120,9 +185,8 @@ class ClientRequestHandler:
                 iteration_count=request.iteration_count,
             )
 
-        if request.method == METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION and len(request.vector_data) != request.vector_length * 4:
-            return build_client_response(
-                request_id=request.request_id,
+        if request.method == METHOD_GEMV and len(request.vector_data) != request.vector_length * 4:
+            return build_response(
                 status_code=STATUS_BAD_REQUEST,
                 method=request.method,
                 object_id=request.object_id,
@@ -134,8 +198,7 @@ class ClientRequestHandler:
                 iteration_count=request.iteration_count,
             )
         if request.iteration_count <= 0:
-            return build_client_response(
-                request_id=request.request_id,
+            return build_response(
                 status_code=STATUS_BAD_REQUEST,
                 method=request.method,
                 object_id=request.object_id,
@@ -148,19 +211,18 @@ class ClientRequestHandler:
             )
 
         workers = self.registry.list_workers()
-        if request.method == METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION:
-            assignments = self.dispatcher.dispatch_fixed_matrix_vector_multiplication(
+        if request.method == METHOD_GEMV:
+            assignments = self.dispatcher.dispatch_gemv(
                 request_id=request.request_id,
-                rows=self.fixed_matvec_spec.rows,
+                rows=gemv_spec.rows,
                 workers=workers,
-                worker_hardware=self.registry.list_worker_hardware(METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION),
+                worker_hardware=self.registry.list_worker_hardware(METHOD_GEMV),
             )
         else:
             try:
-                spec, _variant = load_named_workload_spec(request.object_id)
+                spec, _variant = load_named_workload_spec(request.object_id, size=request.size)
             except ValueError as exc:
-                return build_client_response(
-                    request_id=request.request_id,
+                return build_response(
                     status_code=STATUS_BAD_REQUEST,
                     method=request.method,
                     object_id=request.object_id,
@@ -172,15 +234,14 @@ class ClientRequestHandler:
                     iteration_count=request.iteration_count,
                 )
 
-            max_channels_per_task = self.task_exchange.max_spatial_channels_per_task(spec)
+            max_channels_per_task = self.task_exchange.max_conv2d_channels_per_task(spec)
             if max_channels_per_task <= 0:
-                return build_client_response(
-                    request_id=request.request_id,
+                return build_response(
                     status_code=STATUS_BAD_REQUEST,
                     method=request.method,
                     object_id=request.object_id,
                     stream_id=request.stream_id,
-                    error_message="spatial_convolution workload is too large for in-band task transport",
+                    error_message="conv2d workload is too large for in-band task transport",
                     worker_count=worker_count,
                     client_count=client_count,
                     client_id="",
@@ -188,31 +249,29 @@ class ClientRequestHandler:
                 )
 
             try:
-                self.task_exchange.ensure_spatial_convolution_dataset_ready()
+                self.task_exchange.ensure_conv2d_dataset_ready()
             except (OSError, subprocess.CalledProcessError) as exc:
-                return build_client_response(
-                    request_id=request.request_id,
+                return build_response(
                     status_code=STATUS_INTERNAL_ERROR,
                     method=request.method,
                     object_id=request.object_id,
                     stream_id=request.stream_id,
-                    error_message=f"failed to prepare spatial_convolution dataset: {exc}",
+                    error_message=f"failed to prepare conv2d dataset: {exc}",
                     worker_count=worker_count,
                     client_count=client_count,
                     client_id="",
                     iteration_count=request.iteration_count,
                 )
 
-            assignments = self.dispatcher.dispatch_spatial_convolution(
+            assignments = self.dispatcher.dispatch_conv2d(
                 request_id=request.request_id,
                 output_channels=spec.c_out,
                 workers=workers,
-                worker_hardware=self.registry.list_worker_hardware(METHOD_SPATIAL_CONVOLUTION),
+                worker_hardware=self.registry.list_worker_hardware(METHOD_CONV2D),
                 max_channels_per_task=max_channels_per_task,
             )
         if not assignments:
-            return build_client_response(
-                request_id=request.request_id,
+            return build_response(
                 status_code=STATUS_NOT_FOUND,
                 method=request.method,
                 object_id=request.object_id,
@@ -225,14 +284,19 @@ class ClientRequestHandler:
             )
 
         try:
-            if request.method == METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION:
+            if request.method == METHOD_GEMV:
                 with ThreadPoolExecutor(max_workers=len(assignments), thread_name_prefix="task-dispatch") as executor:
                     task_results = list(executor.map(lambda item: self.run_worker_task_slice(request, item), assignments))
-                output_vector = self.aggregator.collect_fixed_matrix_vector_result(
-                    rows=self.fixed_matvec_spec.rows,
+                write_audit_event(
+                    f"aggregating result task_id={task_id} method={request.method} size={request.size or 'large'} worker_slices={len(task_results)}",
+                    stdout=True,
+                    logger=self.logger,
+                )
+                output_vector = self.aggregator.collect_gemv_result(
+                    rows=gemv_spec.rows,
                     results=task_results,
                 )
-                output_length = self.fixed_matvec_spec.rows
+                output_length = gemv_spec.rows
                 result_artifact = None
                 if len(output_vector) > self.config.max_message_size:
                     result_artifact = self.artifact_manager.publish_bytes(
@@ -242,22 +306,28 @@ class ClientRequestHandler:
                         artifact_id=request.request_id,
                     )
                     output_vector = b""
-                response_payload = FixedMatrixVectorResponsePayload(
+                response_payload = GemvResponsePayload(
                     output_length=output_length,
                     output_vector=output_vector,
                 )
             else:
-                spec, _variant = load_named_workload_spec(request.object_id)
+                spec, _variant = load_named_workload_spec(request.object_id, size=request.size)
                 output_length = spec.output_h * spec.output_w * spec.c_out
                 output_vector = b""
                 result_artifact = None
                 if self.artifact_manager is None:
-                    raise RuntimeError("artifact manager is required for spatial_convolution responses")
+                    raise RuntimeError("artifact manager is required for conv2d responses")
                 artifact_path = self.artifact_manager.root_dir / f"{request.request_id}.bin"
                 with ThreadPoolExecutor(max_workers=len(assignments), thread_name_prefix="task-dispatch") as executor:
                     task_results = list(executor.map(lambda item: self.run_worker_task_slice(request, item), assignments))
+                write_audit_event(
+                    f"aggregating result task_id={task_id} method={request.method} size={request.size or 'large'} worker_slices={len(task_results)} "
+                    f"output_path={artifact_path}",
+                    stdout=True,
+                    logger=self.logger,
+                )
                 try:
-                    self.aggregator.collect_spatial_convolution_result_to_file(
+                    self.aggregator.collect_conv2d_result_to_file(
                         out_h=spec.output_h,
                         out_w=spec.output_w,
                         total_cout=spec.c_out,
@@ -272,14 +342,30 @@ class ClientRequestHandler:
                     content_type="application/octet-stream",
                     artifact_id=request.request_id,
                 )
-                response_payload = SpatialConvolutionResponsePayload(
+                response_payload = Conv2dResponsePayload(
                     output_length=output_length,
                     output_vector=output_vector,
                     result_artifact_id=result_artifact.artifact_id if result_artifact is not None else "",
                 )
+            completion_parts = [
+                f"task complete task_id={task_id}",
+                f"method={request.method}",
+                f"size={request.size or 'large'}",
+                f"elapsed_ms={max(0, int((time.monotonic() - started_at) * 1000))}",
+                f"output_length={output_length}",
+            ]
+            if result_artifact is not None:
+                completion_parts.append(f"artifact_id={result_artifact.artifact_id}")
+                completion_parts.append(f"artifact_bytes={result_artifact.size_bytes}")
+            else:
+                completion_parts.append(f"inline_bytes={len(response_payload.output_vector)}")
+            write_audit_event(
+                " ".join(completion_parts),
+                stdout=True,
+                logger=self.logger,
+            )
             worker_count, client_count = self._cluster_counts()
-            return build_client_response(
-                request_id=request.request_id,
+            return build_response(
                 status_code=STATUS_OK,
                 method=request.method,
                 object_id=request.object_id,
@@ -293,8 +379,7 @@ class ClientRequestHandler:
             )
         except (OSError, ValueError, ConnectionError, RuntimeError) as exc:
             worker_count, client_count = self._cluster_counts()
-            return build_client_response(
-                request_id=request.request_id,
+            return build_response(
                 status_code=STATUS_INTERNAL_ERROR,
                 method=request.method,
                 object_id=request.object_id,

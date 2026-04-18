@@ -1,6 +1,6 @@
-﻿"""Execute FMVM runtime tasks across the local compute-node processors.
+"""Execute GEMV runtime tasks across the local compute-node processors.
 
-Use this module when a compute node receives an FMVM ``TaskAssign`` and needs
+Use this module when a compute node receives an GEMV ``TaskAssign`` and needs
 to split the row range across its locally benchmarked processors.
 """
 
@@ -19,29 +19,31 @@ from pathlib import Path
 from app.constants import DX12_BACKEND_DISABLED_REASON
 from app.compute_resource_policy import resolve_capped_cpu_worker_count
 from common.work_partition import partition_contiguous_range
-from compute_node.compute_methods.fixed_matrix_vector_multiplication import (
+from compute_node.compute_methods.gemv import (
     CPU_MACOS_EXECUTABLE_PATH,
     CPU_WINDOWS_EXECUTABLE_PATH,
     CUDA_EXECUTABLE_PATH,
-    FMVM_METHOD_DIR,
+    GEMV_METHOD_DIR,
 )
-from compute_node.input_matrix.fixed_matrix_vector_multiplication import (
+from compute_node.input_matrix.gemv import (
     build_dataset_layout,
     build_input_matrix_spec,
+    dataset_prefix_for_size,
     dataset_is_generated,
+    normalize_size_variant,
 )
-from compute_node.performance_metrics.fixed_matrix_vector_multiplication.config import DATASET_DIR as FMVM_DATASET_DIR
+from compute_node.performance_metrics.gemv.config import DATASET_DIR as GEMV_DATASET_DIR
 from compute_node.performance_summary import RuntimeProcessorInventory, RuntimeProcessorProfile, load_runtime_processor_inventory
-from app.constants import METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION
+from app.constants import METHOD_GEMV
 from wire.internal_protocol.runtime_transport import TaskAssign, TaskResult
 
 ROOT_DIR = Path(__file__).resolve().parent
-INPUT_MATRIX_GENERATED_DIR = FMVM_DATASET_DIR
+INPUT_MATRIX_GENERATED_DIR = GEMV_DATASET_DIR
 
 
 @dataclass(frozen=True, slots=True)
 class ProcessorTaskSlice:
-    """Describe one local processor and the FMVM rows assigned to it."""
+    """Describe one local processor and the GEMV rows assigned to it."""
 
     processor: RuntimeProcessorProfile
     row_start: int
@@ -55,8 +57,8 @@ class _Dx12ResidentRunner:
         """Start the DX12 resident runner for all local DX12 processors.
 
         Args:
-            dataset_layout: Runtime FMVM dataset layout shared by the compute node.
-            spec: Runtime FMVM benchmark specification.
+            dataset_layout: Runtime GEMV dataset layout shared by the compute node.
+            spec: Runtime GEMV benchmark specification.
             processors: Local processor profiles that use the DX12 backend.
         """
         thread_group_sizes = sorted(
@@ -84,7 +86,7 @@ class _Dx12ResidentRunner:
                 "--thread-group-sizes",
                 ",".join(str(value) for value in thread_group_sizes),
             ],
-            cwd=FMVM_METHOD_DIR,
+            cwd=GEMV_METHOD_DIR,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -109,7 +111,7 @@ class _Dx12ResidentRunner:
         rows_per_thread: int,
         iteration_count: int,
     ) -> dict[str, object]:
-        """Execute one FMVM slice through the resident DX12 runner.
+        """Execute one GEMV slice through the resident DX12 runner.
 
         Args:
             vector_path: Temporary vector file for this task.
@@ -181,7 +183,7 @@ class _Dx12ResidentRunner:
         return line.rstrip("\r\n")
 
 
-class FixedMatrixVectorTaskExecutor:
+class GemvTaskExecutor:
     """Execute one fixed-matrix-vector task on the local compute node."""
 
     def __init__(
@@ -197,9 +199,7 @@ class FixedMatrixVectorTaskExecutor:
             dataset_root: Optional runtime dataset directory override.
         """
         self.inventory = inventory or load_runtime_processor_inventory()
-        self.spec = build_input_matrix_spec(default_variant="runtime")
         self.dataset_root = INPUT_MATRIX_GENERATED_DIR if dataset_root is None else Path(dataset_root)
-        self.dataset_layout = build_dataset_layout(self.dataset_root, prefix="runtime_")
         self._dx12_runner = self._build_dx12_resident_runner()
 
     def close(self) -> None:
@@ -212,13 +212,14 @@ class FixedMatrixVectorTaskExecutor:
         """Run one assigned row slice and return its output bytes.
 
         Args:
-            task: FMVM task assignment received from the main node.
+            task: GEMV task assignment received from the main node.
 
         Returns:
-            A ``TaskResult`` containing the merged FMVM output slice.
+            A ``TaskResult`` containing the merged GEMV output slice.
         """
 
-        self._validate_task(task)
+        spec, dataset_layout = self._resolve_task_dataset(task)
+        self._validate_task(task, spec=spec, dataset_layout=dataset_layout)
         processor_slices = self._build_local_processor_slices(task)
 
         with tempfile.TemporaryDirectory(prefix="superweb-task-") as temp_dir:
@@ -231,7 +232,14 @@ class FixedMatrixVectorTaskExecutor:
                     executor.map(
                         lambda processor_slice: (
                             processor_slice.row_start,
-                            self._run_processor_slice(processor_slice, task.iteration_count, vector_path, temp_root),
+                            self._run_processor_slice(
+                                processor_slice,
+                                task.iteration_count,
+                                vector_path,
+                                temp_root,
+                                spec=spec,
+                                dataset_layout=dataset_layout,
+                            ),
                         ),
                         processor_slices,
                     )
@@ -251,37 +259,56 @@ class FixedMatrixVectorTaskExecutor:
             iteration_count=task.iteration_count,
         )
 
-    def _validate_task(self, task: TaskAssign) -> None:
-        """Validate that an FMVM task matches the local runtime dataset.
+    def _resolve_task_dataset(self, task: TaskAssign):
+        """Resolve the named GEMV dataset variant referenced by one task.
 
         Args:
-            task: FMVM task assignment to validate.
+            task: GEMV task assignment that may carry a canonical size string.
+
+        Returns:
+            A tuple of ``(spec, dataset_layout)`` for the requested task size.
+        """
+        variant = normalize_size_variant(getattr(task, "size", ""), default="large")
+        spec = build_input_matrix_spec(default_variant=variant)
+        dataset_layout = build_dataset_layout(
+            self.dataset_root,
+            prefix=dataset_prefix_for_size(variant, default="large"),
+        )
+        return spec, dataset_layout
+
+    def _validate_task(self, task: TaskAssign, *, spec, dataset_layout) -> None:
+        """Validate that an GEMV task matches the local runtime dataset.
+
+        Args:
+            task: GEMV task assignment to validate.
+            spec: Resolved GEMV dataset specification for this task size.
+            dataset_layout: Resolved GEMV dataset layout for this task size.
 
         Returns:
             ``None`` when the task is valid for local execution.
         """
-        if task.method != METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION:
+        if task.method != METHOD_GEMV:
             raise ValueError(f"unsupported task method: {task.method}")
-        if task.row_start < 0 or task.row_end > self.spec.rows or task.row_end <= task.row_start:
+        if task.row_start < 0 or task.row_end > spec.rows or task.row_end <= task.row_start:
             raise ValueError("task row range is invalid")
-        if task.vector_length != self.spec.cols:
-            raise ValueError(f"task vector length {task.vector_length} does not match expected {self.spec.cols}")
+        if task.vector_length != spec.cols:
+            raise ValueError(f"task vector length {task.vector_length} does not match expected {spec.cols}")
         if len(task.vector_data) != task.vector_length * 4:
             raise ValueError("task vector byte size does not match vector_length")
         if task.iteration_count <= 0:
             raise ValueError("task iteration_count must be positive")
-        if not dataset_is_generated(self.dataset_layout, self.spec):
+        if not dataset_is_generated(dataset_layout, spec):
             raise FileNotFoundError(
-                f"missing generated input matrix at {self.dataset_layout.root_dir}; run compute_node/input_matrix/generate.py"
+                f"missing generated input matrix at {dataset_layout.root_dir}; run compute_node/input_matrix/generate.py"
             )
         if not self.inventory.processors:
             raise RuntimeError("no locally registered processors are available for task execution")
 
     def _build_local_processor_slices(self, task: TaskAssign) -> list[ProcessorTaskSlice]:
-        """Partition the FMVM row range across local processor profiles.
+        """Partition the GEMV row range across local processor profiles.
 
         Args:
-            task: FMVM task assignment received from the main node.
+            task: GEMV task assignment received from the main node.
 
         Returns:
             Processor-task slices ordered by local inventory.
@@ -310,14 +337,19 @@ class FixedMatrixVectorTaskExecutor:
         iteration_count: int,
         vector_path: Path,
         temp_root: Path,
+        *,
+        spec,
+        dataset_layout,
     ) -> bytes:
-        """Run one processor-specific FMVM slice and return raw output bytes.
+        """Run one processor-specific GEMV slice and return raw output bytes.
 
         Args:
             processor_slice: Local processor slice to execute.
             iteration_count: Number of times to repeat the local computation.
             vector_path: Temporary vector file for this task.
             temp_root: Temporary directory for per-slice outputs.
+            spec: Resolved GEMV dataset specification for this task size.
+            dataset_layout: Resolved GEMV dataset layout for this task size.
 
         Returns:
             Raw float32 output bytes for the requested row slice.
@@ -336,13 +368,20 @@ class FixedMatrixVectorTaskExecutor:
                 iteration_count=iteration_count,
             )
         else:
-            command = self._build_runtime_command(processor_slice, iteration_count, vector_path, output_path)
+            command = self._build_runtime_command(
+                processor_slice,
+                iteration_count,
+                vector_path,
+                output_path,
+                spec=spec,
+                dataset_layout=dataset_layout,
+            )
             completed = subprocess.run(
                 command,
                 check=True,
                 capture_output=True,
                 text=True,
-                cwd=FMVM_METHOD_DIR,
+                cwd=GEMV_METHOD_DIR,
                 timeout=300.0,
             )
             if not output_path.exists():
@@ -378,7 +417,10 @@ class FixedMatrixVectorTaskExecutor:
         iteration_count: int,
         vector_path: Path,
         output_path: Path,
-) -> list[str]:
+        *,
+        spec=None,
+        dataset_layout=None,
+    ) -> list[str]:
         """Build the native runtime command for one local processor slice.
 
         Args:
@@ -386,10 +428,18 @@ class FixedMatrixVectorTaskExecutor:
             iteration_count: Number of times to repeat the local computation.
             vector_path: Temporary vector file for this task.
             output_path: Destination file for the slice output.
+            spec: Resolved GEMV dataset specification for this task size.
+            dataset_layout: Resolved GEMV dataset layout for this task size.
 
         Returns:
             The subprocess command list for the selected backend.
         """
+        if spec is None or dataset_layout is None:
+            spec = build_input_matrix_spec(default_variant="large")
+            dataset_layout = build_dataset_layout(
+                self.dataset_root,
+                prefix=dataset_prefix_for_size("large", default="large"),
+            )
         processor = processor_slice.processor
         if processor.hardware_type == "cpu":
             executable_path = CPU_WINDOWS_EXECUTABLE_PATH if sys.platform == "win32" else CPU_MACOS_EXECUTABLE_PATH
@@ -399,20 +449,20 @@ class FixedMatrixVectorTaskExecutor:
                 or resolve_capped_cpu_worker_count()
             )
             workers = max(1, min(resolve_capped_cpu_worker_count(), configured_workers))
-            tile_size = int(processor.best_config.get("tile_size") or self.spec.cols)
+            tile_size = int(processor.best_config.get("tile_size") or spec.cols)
             accumulation_precision = str(processor.best_config.get("accumulation_precision") or "fp32")
             return [
                 str(executable_path),
                 "--matrix",
-                str(self.dataset_layout.matrix_path),
+                str(dataset_layout.matrix_path),
                 "--vector",
                 str(vector_path),
                 "--output",
                 str(output_path),
                 "--rows",
-                str(self.spec.rows),
+                str(spec.rows),
                 "--cols",
-                str(self.spec.cols),
+                str(spec.cols),
                 "--accumulation-precision",
                 accumulation_precision,
                 "--row-start",
@@ -438,15 +488,15 @@ class FixedMatrixVectorTaskExecutor:
             return [
                 str(executable_path),
                 "--matrix",
-                str(self.dataset_layout.matrix_path),
+                str(dataset_layout.matrix_path),
                 "--vector",
                 str(vector_path),
                 "--output",
                 str(output_path),
                 "--rows",
-                str(self.spec.rows),
+                str(spec.rows),
                 "--cols",
-                str(self.spec.cols),
+                str(spec.cols),
                 "--accumulation-precision",
                 accumulation_precision,
                 "--row-start",

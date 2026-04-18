@@ -1,13 +1,13 @@
 """Input matrix dataset package.
 
-Top-level exports remain FMVM-compatible for existing callers, while method-local
-packages under `fixed_matrix_vector_multiplication/` and `spatial_convolution/`
+Top-level exports remain GEMV-compatible for existing callers, while method-local
+packages under `gemv/` and `conv2d/`
 provide symmetric dataset generation flows.
 """
 
-from app.constants import METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION, METHOD_SPATIAL_CONVOLUTION
+from app.constants import METHOD_GEMV, METHOD_CONV2D
 
-from .fixed_matrix_vector_multiplication import (
+from .gemv import (
     DEFAULT_CHUNK_VALUES,
     DEFAULT_COLS,
     DEFAULT_MATRIX_SEED,
@@ -37,6 +37,6 @@ __all__ = [
     "dataset_is_generated",
     "generate_dataset",
     "load_float32_file",
-    "METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION",
-    "METHOD_SPATIAL_CONVOLUTION",
+    "METHOD_GEMV",
+    "METHOD_CONV2D",
 ]

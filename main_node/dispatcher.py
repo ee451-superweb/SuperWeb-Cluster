@@ -1,15 +1,15 @@
 """Plan worker slices for one request from abstract per-method performance data.
 
 Use this module when the main node has already accepted a client request and
-needs to turn registered worker GFLOPS rankings into contiguous FMVM row ranges
-or spatial-convolution output-channel ranges.
+needs to turn registered worker GFLOPS rankings into contiguous GEMV row ranges
+or conv2d output-channel ranges.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.constants import METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION, METHOD_SPATIAL_CONVOLUTION
+from app.constants import METHOD_GEMV, METHOD_CONV2D
 from common.work_partition import partition_contiguous_range
 from main_node.registry import RuntimePeerConnection, WorkerHardwareCapability
 
@@ -24,7 +24,7 @@ class WorkerTaskSlice:
     row_start: int
     row_end: int
     effective_gflops: float
-    method: str = METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION
+    method: str = METHOD_GEMV
     start_oc: int = 0
     end_oc: int = 0
 
@@ -32,7 +32,7 @@ class WorkerTaskSlice:
 class TaskDispatcher:
     """Convert registered worker performance into weighted request partitions."""
 
-    def dispatch_fixed_matrix_vector_multiplication(
+    def dispatch_gemv(
         self,
         *,
         request_id: str,
@@ -40,10 +40,10 @@ class TaskDispatcher:
         workers: list[RuntimePeerConnection],
         worker_hardware: list[WorkerHardwareCapability],
     ) -> list[WorkerTaskSlice]:
-        """Use this when one FMVM request needs row partitions across active workers.
+        """Use this when one GEMV request needs row partitions across active workers.
 
-        Args: request_id logical task id, rows total matrix rows, workers live workers, worker_hardware FMVM performance entries.
-        Returns: Weighted row slices, or an empty list when no worker has usable FMVM capacity.
+        Args: request_id logical task id, rows total matrix rows, workers live workers, worker_hardware GEMV performance entries.
+        Returns: Weighted row slices, or an empty list when no worker has usable GEMV capacity.
         """
         worker_gflops: dict[str, float] = {worker.peer_id: 0.0 for worker in workers}
         for hardware in worker_hardware:
@@ -68,7 +68,7 @@ class TaskDispatcher:
                     connection=worker,
                     task_id=request_id,
                     artifact_id=f"{request_id}:{worker.runtime_id}",
-                    method=METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
+                    method=METHOD_GEMV,
                     row_start=partition.start,
                     row_end=partition.end,
                     effective_gflops=worker_gflops[worker.peer_id],
@@ -76,7 +76,7 @@ class TaskDispatcher:
             )
         return assignments
 
-    def dispatch_spatial_convolution(
+    def dispatch_conv2d(
         self,
         *,
         request_id: str,
@@ -117,7 +117,7 @@ class TaskDispatcher:
                         connection=worker,
                         task_id=request_id,
                         artifact_id=f"{request_id}:{worker.runtime_id}:{chunk_index}",
-                        method=METHOD_SPATIAL_CONVOLUTION,
+                        method=METHOD_CONV2D,
                         row_start=0,
                         row_end=0,
                         start_oc=start_oc,

@@ -2,7 +2,7 @@
 """Generate input datasets for one or more compute methods.
 
 Use this module as the top-level dataset-generation CLI when the project should
-prepare FMVM, spatial-convolution, or both datasets in one invocation.
+prepare GEMV, conv2d, or both datasets in one invocation.
 """
 
 from __future__ import annotations
@@ -17,9 +17,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.runtime_environment import relaunch_with_project_python_if_needed
-from app.constants import METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION, METHOD_SPATIAL_CONVOLUTION
-from compute_node.input_matrix.fixed_matrix_vector_multiplication.generate import main as generate_fmvm_main
-from compute_node.input_matrix.spatial_convolution.generate import main as generate_spatial_main
+from app.constants import METHOD_GEMV, METHOD_CONV2D
+from compute_node.input_matrix.gemv.generate import main as generate_gemv_main
+from compute_node.input_matrix.conv2d.generate import main as generate_conv2d_main
 
 DEFAULT_GENERATOR_WORKERS = max(1, os.cpu_count() or 1)
 DEFAULT_CHUNK_MIB = 8
@@ -34,7 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate input datasets for one or more compute methods.")
     parser.add_argument(
         "--method",
-        choices=(METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION, METHOD_SPATIAL_CONVOLUTION, "all"),
+        choices=(METHOD_GEMV, METHOD_CONV2D, "all"),
         default="all",
         help="Which method dataset to generate. Default: generate both in sequence.",
     )
@@ -57,21 +57,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Chunk size in MiB used while streaming data.",
     )
     parser.add_argument("--skip-small", action="store_true", help="Skip the small dataset.")
-    parser.add_argument("--skip-medium", action="store_true", help="Skip the medium dataset.")
+    parser.add_argument("--skip-mid", action="store_true", help="Skip the mid-sized dataset.")
+    parser.add_argument("--skip-medium", action="store_true", help="Alias for --skip-mid.")
     parser.add_argument("--skip-large", action="store_true", help="Skip the large dataset.")
     parser.add_argument("--skip-test", action="store_true", help="Alias for --skip-small.")
     parser.add_argument("--skip-runtime", action="store_true", help="Alias for --skip-large.")
-    parser.add_argument("--rows", type=int, help="FMVM test-only row-count override.")
-    parser.add_argument("--cols", type=int, help="FMVM test-only column-count override.")
-    parser.add_argument("--role", choices=("compute", "main"), default="compute", help="Spatial-convolution runtime dataset role.")
-    parser.add_argument("--h", type=int, help="Spatial-convolution test height override.")
-    parser.add_argument("--w", type=int, help="Spatial-convolution test width override.")
-    parser.add_argument("--cin", type=int, help="Spatial-convolution input-channel override.")
-    parser.add_argument("--cout", type=int, help="Spatial-convolution output-channel override.")
-    parser.add_argument("--k", type=int, help="Spatial-convolution kernel-size override.")
-    parser.add_argument("--pad", type=int, help="Spatial-convolution padding override.")
-    parser.add_argument("--stride", type=int, help="Spatial-convolution stride override.")
-    parser.add_argument("--include-runtime-weight", action="store_true", help="Generate runtime weights for compute-role spatial-convolution datasets.")
+    parser.add_argument("--rows", type=int, help="GEMV test-only row-count override.")
+    parser.add_argument("--cols", type=int, help="GEMV test-only column-count override.")
+    parser.add_argument("--role", choices=("compute", "main"), default="compute", help="Conv2d large-dataset role.")
+    parser.add_argument("--h", type=int, help="Conv2d small height override.")
+    parser.add_argument("--w", type=int, help="Conv2d small width override.")
+    parser.add_argument("--cin", type=int, help="Conv2d input-channel override.")
+    parser.add_argument("--cout", type=int, help="Conv2d output-channel override.")
+    parser.add_argument("--k", type=int, help="Conv2d kernel-size override.")
+    parser.add_argument("--pad", type=int, help="Conv2d padding override.")
+    parser.add_argument("--stride", type=int, help="Conv2d stride override.")
+    parser.add_argument("--include-large-weight", action="store_true", help="Generate large weights for compute-role conv2d datasets.")
+    parser.add_argument("--include-runtime-weight", action="store_true", help="Alias for --include-large-weight.")
     return parser
 
 
@@ -86,8 +88,8 @@ def _selected_methods(method_arg: str) -> list[str]:
     """
     if method_arg == "all":
         return [
-            METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION,
-            METHOD_SPATIAL_CONVOLUTION,
+            METHOD_GEMV,
+            METHOD_CONV2D,
         ]
     return [method_arg]
 
@@ -110,21 +112,21 @@ def _common_flags(args: argparse.Namespace) -> list[str]:
         argv.extend(["--chunk-mib", str(args.chunk_mib)])
     if args.skip_small or args.skip_test:
         argv.append("--skip-small")
-    if args.skip_medium:
-        argv.append("--skip-medium")
+    if args.skip_mid or args.skip_medium:
+        argv.append("--skip-mid")
     if args.skip_large or args.skip_runtime:
         argv.append("--skip-large")
     return argv
 
 
-def _build_fmvm_args(args: argparse.Namespace) -> list[str]:
-    """Build the forwarded CLI argument list for the FMVM generator.
+def _build_gemv_args(args: argparse.Namespace) -> list[str]:
+    """Build the forwarded CLI argument list for the GEMV generator.
 
     Args:
         args: Parsed top-level dataset-generation CLI arguments.
 
     Returns:
-        The FMVM-specific forwarded CLI argument list.
+        The GEMV-specific forwarded CLI argument list.
     """
     argv = _common_flags(args)
     if args.output_dir is not None:
@@ -136,21 +138,21 @@ def _build_fmvm_args(args: argparse.Namespace) -> list[str]:
     return argv
 
 
-def _build_spatial_args(args: argparse.Namespace) -> list[str]:
-    """Build the forwarded CLI argument list for the spatial generator.
+def _build_conv2d_args(args: argparse.Namespace) -> list[str]:
+    """Build the forwarded CLI argument list for the conv2d generator.
 
     Args:
         args: Parsed top-level dataset-generation CLI arguments.
 
     Returns:
-        The spatial-specific forwarded CLI argument list.
+        The conv2d-specific forwarded CLI argument list.
     """
     argv = _common_flags(args)
     if args.output_dir is not None:
         argv.extend(["--output-dir", str(args.output_dir)])
     argv.extend(["--role", str(args.role)])
-    if args.include_runtime_weight:
-        argv.append("--include-runtime-weight")
+    if args.include_large_weight or args.include_runtime_weight:
+        argv.append("--include-large-weight")
     for field, cli_flag in (
         ("h", "--h"),
         ("w", "--w"),
@@ -189,10 +191,10 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--output-dir can only be used when generating one method at a time")
 
     for method_name in methods:
-        if method_name == METHOD_FIXED_MATRIX_VECTOR_MULTIPLICATION:
-            generate_fmvm_main(_build_fmvm_args(args))
-        elif method_name == METHOD_SPATIAL_CONVOLUTION:
-            generate_spatial_main(_build_spatial_args(args))
+        if method_name == METHOD_GEMV:
+            generate_gemv_main(_build_gemv_args(args))
+        elif method_name == METHOD_CONV2D:
+            generate_conv2d_main(_build_conv2d_args(args))
         else:
             raise ValueError(f"unsupported input-matrix method: {method_name}")
     return 0

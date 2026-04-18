@@ -7,12 +7,14 @@ multicast group.
 
 from __future__ import annotations
 
+import logging
 import socket
 import sys
 import time
 from dataclasses import dataclass
 
 from adapters import network
+from app.constants import LOGGER_NAME
 from common.types import DiscoveryResult
 from app.config import AppConfig
 from wire.discovery_protocol.discovery import (
@@ -128,6 +130,11 @@ def recv_announce(endpoint: MulticastSocket, config: AppConfig) -> DiscoveryResu
             payload = parse_announce_message(data)
             if payload is None:
                 continue
+            logging.getLogger(LOGGER_NAME).info(
+                "UDP multicast announce from %s: %s",
+                addr,
+                describe_discovery_message(data),
+            )
 
             return DiscoveryResult(
                 success=True,
@@ -149,7 +156,6 @@ def recv_packet(endpoint: MulticastSocket, buffer_size: int) -> tuple[tuple[str,
 
     try:
         data, addr = endpoint.sock.recvfrom(buffer_size)
-        print(f"UDP multicast: received {len(data)} bytes from {addr}")
     except socket.timeout:
         return None
 
@@ -181,6 +187,11 @@ def recv_discover(endpoint: MulticastSocket, buffer_size: int) -> tuple[tuple[st
 
             addr, message = packet
             if parse_discover_message(message):
+                logging.getLogger(LOGGER_NAME).info(
+                    "UDP multicast discover from %s: %s",
+                    addr,
+                    describe_discovery_message(message),
+                )
                 return addr, message
     finally:
         endpoint.sock.settimeout(original_timeout)
