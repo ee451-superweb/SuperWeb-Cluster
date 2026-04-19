@@ -226,6 +226,7 @@ def _to_pb_conv2d_request_payload(payload) -> runtime_pb2.Conv2dRequestPayload:
         padding=payload.padding,
         stride=payload.stride,
         client_response_mode=payload.client_response_mode,
+        stats_max_samples=payload.stats_max_samples,
     )
 
 
@@ -245,6 +246,7 @@ def _from_pb_conv2d_request_payload(payload: runtime_pb2.Conv2dRequestPayload):
         padding=payload.padding,
         stride=payload.stride,
         client_response_mode=payload.client_response_mode,
+        stats_max_samples=payload.stats_max_samples,
     )
 
 
@@ -399,6 +401,8 @@ def _to_pb_conv2d_task_payload(payload) -> runtime_pb2.Conv2dTaskPayload:
         padding=payload.padding,
         stride=payload.stride,
         weight_data=payload.weight_data,
+        client_response_mode=payload.client_response_mode,
+        stats_max_samples=payload.stats_max_samples,
     )
 
 
@@ -420,6 +424,8 @@ def _from_pb_conv2d_task_payload(payload: runtime_pb2.Conv2dTaskPayload):
         padding=payload.padding,
         stride=payload.stride,
         weight_data=payload.weight_data,
+        client_response_mode=payload.client_response_mode,
+        stats_max_samples=payload.stats_max_samples,
     )
 
 
@@ -466,6 +472,10 @@ def _to_pb_conv2d_result_payload(payload) -> runtime_pb2.Conv2dResultPayload:
         output_length=payload.output_length,
         output_vector=payload.output_vector,
         result_artifact_id=payload.result_artifact_id,
+        stats_element_count=payload.stats_element_count,
+        stats_sum=payload.stats_sum,
+        stats_sum_squares=payload.stats_sum_squares,
+        stats_samples=list(payload.stats_samples),
     )
 
 
@@ -484,6 +494,10 @@ def _from_pb_conv2d_result_payload(payload: runtime_pb2.Conv2dResultPayload):
         output_length=payload.output_length,
         output_vector=payload.output_vector,
         result_artifact_id=payload.result_artifact_id,
+        stats_element_count=payload.stats_element_count,
+        stats_sum=payload.stats_sum,
+        stats_sum_squares=payload.stats_sum_squares,
+        stats_samples=tuple(payload.stats_samples),
     )
 
 

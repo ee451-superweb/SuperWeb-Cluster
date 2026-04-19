@@ -62,6 +62,8 @@ class Conv2dRequestPayload:
     stride: int = 1
     # Conv2dClientResponseMode: 0 = full output artifact, 1 = stats-only (see proto).
     client_response_mode: int = 0
+    # Cap on stats_samples returned when client_response_mode == STATS_ONLY. 0 means cluster default.
+    stats_max_samples: int = 0
 
 
 @dataclass(slots=True)
@@ -108,6 +110,7 @@ class ClientRequest:
     padding: InitVar[int] = 0
     stride: InitVar[int] = 1
     conv2d_client_response_mode: InitVar[int] = 0
+    conv2d_stats_max_samples: InitVar[int] = 0
 
     def __post_init__(
         self,
@@ -121,6 +124,7 @@ class ClientRequest:
         padding: int,
         stride: int,
         conv2d_client_response_mode: int,
+        conv2d_stats_max_samples: int,
     ) -> None:
         """Normalize legacy initvars into the typed client request payload."""
         vector_length = initvar_or_default(vector_length, 0)
@@ -133,6 +137,7 @@ class ClientRequest:
         padding = initvar_or_default(padding, 0)
         stride = initvar_or_default(stride, 1)
         conv2d_client_response_mode = initvar_or_default(conv2d_client_response_mode, 0)
+        conv2d_stats_max_samples = initvar_or_default(conv2d_stats_max_samples, 0)
         if self.request_payload is None:
             if self.method == METHOD_CONV2D or any(
                 value for value in (tensor_h, tensor_w, channels_in, channels_out, kernel_size, padding)
@@ -146,6 +151,7 @@ class ClientRequest:
                     padding=padding,
                     stride=stride,
                     client_response_mode=conv2d_client_response_mode,
+                    stats_max_samples=conv2d_stats_max_samples,
                 )
             else:
                 self.request_payload = GemvRequestPayload(

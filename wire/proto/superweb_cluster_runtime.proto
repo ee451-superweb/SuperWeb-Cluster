@@ -278,6 +278,10 @@ message Conv2dRequestPayload {
   uint32 padding = 6;
   uint32 stride = 7;
   Conv2dClientResponseMode client_response_mode = 8;
+  // Cap on stats_samples returned in STATS_ONLY mode. 0 means cluster default.
+  // Current implementation reads the first N float32 values per worker slice;
+  // future revisions may swap in a real downsampling strategy without protocol churn.
+  uint32 stats_max_samples = 9;
 }
 
 message GemvResponsePayload {
@@ -314,6 +318,8 @@ message Conv2dTaskPayload {
   uint32 padding = 8;
   uint32 stride = 9;
   bytes weight_data = 10;
+  Conv2dClientResponseMode client_response_mode = 11;
+  uint32 stats_max_samples = 12;
 }
 
 message GemvResultPayload {
@@ -331,6 +337,12 @@ message Conv2dResultPayload {
   uint32 output_length = 5;
   bytes output_vector = 6;
   string result_artifact_id = 7;
+  // Populated when the task ran in STATS_ONLY mode: per-slice running stats so
+  // the main node never has to materialize the merged tensor.
+  uint64 stats_element_count = 8;
+  double stats_sum = 9;
+  double stats_sum_squares = 10;
+  repeated float stats_samples = 11;
 }
 
 message RuntimeEnvelope {
