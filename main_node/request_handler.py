@@ -286,6 +286,7 @@ class ClientRequestHandler:
             )
 
         try:
+            completion_conv2d_stats_only = False
             if request.method == METHOD_GEMV:
                 with ThreadPoolExecutor(max_workers=len(assignments), thread_name_prefix="task-dispatch") as executor:
                     task_results = list(executor.map(lambda item: self.run_worker_task_slice(request, item), assignments))
@@ -346,10 +347,16 @@ class ClientRequestHandler:
                     stats_count, stats_sum, stats_sum_squares, stats_samples = summarize_conv2d_output_file(
                         artifact_path
                     )
+                    if stats_count != output_length:
+                        raise ValueError(
+                            f"conv2d merged output size mismatch: stats_element_count={stats_count} "
+                            f"expected output_length={output_length}"
+                        )
                     try:
                         artifact_path.unlink()
                     except OSError:
                         pass
+                    completion_conv2d_stats_only = True
                     response_payload = Conv2dResponsePayload(
                         output_length=output_length,
                         output_vector=b"",
@@ -381,6 +388,11 @@ class ClientRequestHandler:
             if result_artifact is not None:
                 completion_parts.append(f"artifact_id={result_artifact.artifact_id}")
                 completion_parts.append(f"artifact_bytes={result_artifact.size_bytes}")
+            elif completion_conv2d_stats_only:
+                completion_parts.append(
+                    f"conv2d_stats_only=1 stats_element_count={response_payload.stats_element_count} "
+                    f"stats_sample_count={len(response_payload.stats_samples)}"
+                )
             else:
                 completion_parts.append(f"inline_bytes={len(response_payload.output_vector)}")
             write_audit_event(
