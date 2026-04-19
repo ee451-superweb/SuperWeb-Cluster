@@ -12,6 +12,7 @@ import math
 import os
 import shutil
 import subprocess
+import time
 from functools import lru_cache
 from pathlib import Path
 
@@ -423,6 +424,7 @@ class CudaBackend:
         )
         autotune_output_channel_batches = _candidate_output_channel_batches(spec)
         try:
+            autotune_subprocess_started = time.perf_counter()
             autotune_metrics = self._run_runner(
                 executable_path,
                 spec,
@@ -435,6 +437,7 @@ class CudaBackend:
                 measurement_repeats=1,
                 timeout_seconds=max(time_budget_seconds, 30.0),
             )
+            autotune_subprocess_wall_s = time.perf_counter() - autotune_subprocess_started
         except Exception as exc:
             notes.append(_sanitize_note(f"CUDA autotune failed: {exc}"))
             return BackendResult(
@@ -484,6 +487,7 @@ class CudaBackend:
             phase_callback("final_measurement", selected_config)
 
         try:
+            measurement_subprocess_started = time.perf_counter()
             measurement_metrics = self._run_runner(
                 executable_path,
                 measurement_spec,
@@ -496,6 +500,7 @@ class CudaBackend:
                 measurement_repeats=final_measurement_repeats,
                 timeout_seconds=max(time_budget_seconds, 30.0),
             )
+            measurement_subprocess_wall_s = time.perf_counter() - measurement_subprocess_started
         except Exception as exc:
             notes.append(_sanitize_note(f"CUDA runtime measurement failed: {exc}"))
             return BackendResult(
@@ -588,6 +593,12 @@ class CudaBackend:
             measurement_score,
             list(trial_notes),
         )
+        notes.append(
+            "native_subprocess_wall_s: "
+            f"autotune_sweep={autotune_subprocess_wall_s:.6f}, "
+            f"measurement_pass={measurement_subprocess_wall_s:.6f}, "
+            f"sum={autotune_subprocess_wall_s + measurement_subprocess_wall_s:.6f}"
+        )
         return BackendResult(self.name, True, dict(measurement_config), autotune_trial, trial, [autotune_trial, trial], notes)
 
     def _run_runner(
@@ -673,6 +684,8 @@ class CudaBackend:
                 check=True,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout_seconds,
                 cwd=ROOT_DIR,
             )

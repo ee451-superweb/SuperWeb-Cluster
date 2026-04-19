@@ -457,6 +457,8 @@ class Conv2dTaskExecutor:
                     check=True,
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     cwd=METHOD_DIR,
                     timeout=900.0,
                 )

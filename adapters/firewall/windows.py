@@ -21,7 +21,14 @@ def _outbound_rule_name() -> str:
 
 def _run_firewall_command(command: list[str]) -> subprocess.CompletedProcess[str]:
     """Run one Windows firewall command and capture its output."""
-    return subprocess.run(command, capture_output=True, text=True, check=False)
+    return subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
 
 
 @trace_function

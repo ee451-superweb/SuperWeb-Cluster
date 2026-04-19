@@ -1,0 +1,87 @@
+{
+  "schema_version": 2,
+  "method": "Conv2D",
+  "generated_at_unix": 1776561219.352156,
+  "role": "compute",
+  "host": {
+    "system": "Windows",
+    "release": "11",
+    "machine": "AMD64"
+  },
+  "workload": {
+    "autotune": {
+      "name": "mid-conv2d-1024x1024",
+      "h": 1024,
+      "w": 1024,
+      "c_in": 128,
+      "c_out": 256,
+      "k": 3,
+      "pad": 1,
+      "stride": 1,
+      "ideal_seconds": 15.0,
+      "zero_score_seconds": 150.0
+    },
+    "measurement": {
+      "name": "mid-conv2d-1024x1024",
+      "h": 1024,
+      "w": 1024,
+      "c_in": 128,
+      "c_out": 256,
+      "k": 3,
+      "pad": 1,
+      "stride": 1,
+      "ideal_seconds": 15.0,
+      "zero_score_seconds": 150.0
+    },
+    "autotune_repeats": 3,
+    "measurement_repeats": 20,
+    "workload_mode": "mid",
+    "autotune_dataset_variant": "mid",
+    "measurement_dataset_variant": "mid",
+    "full_runtime_measurement": false,
+    "output_channel_batch_candidates": [
+      1,
+      2,
+      4,
+      8,
+      16,
+      32,
+      64,
+      128,
+      256
+    ],
+    "output_channel_batch_scale": 0.125,
+    "cooldown_ms": 2.5
+  },
+  "hardware_inventory": {
+    "cuda": {
+      "probe_available": true,
+      "probe_message": "CUDA backend available for 'NVIDIA GeForce RTX 5080 Laptop GPU' (detected sm_120) via ../../compute_methods/conv2d/cuda/build/conv2d_cuda_runner.exe."
+    }
+  },
+  "detected_backends": [
+    "cuda"
+  ],
+  "usable_backends": [],
+  "best_backend": null,
+  "ranking": [],
+  "backend_results": {
+    "cuda": {
+      "backend": "cuda",
+      "available": false,
+      "selected_config": null,
+      "autotune_trial": null,
+      "best_trial": null,
+      "trials": [],
+      "notes": [
+        "CUDA backend available for 'NVIDIA GeForce RTX 5080 Laptop GPU' (detected sm_120) via ../../compute_methods/conv2d/cuda/build/conv2d_cuda_runner.exe.",
+        "using CUDA runner at ../../compute_methods/conv2d/cuda/build/conv2d_cuda_runner.exe",
+        "CUDA autotune failed: Command '['D:\\\\Code\\\\Py\\\\SuperWeb-Cluster\\\\compute_node\\\\compute_methods\\\\conv2d\\\\cuda\\\\build\\\\conv2d_cuda_runner.exe', '--input', '..\\\\..\\\\input_matrix\\\\conv2d\\\\generated\\\\mid_input.bin', '--weight', '..\\\\..\\\\input_matrix\\\\conv2d\\\\generated\\\\mid_weight.bin', '--h', '1024', '--w', '1024', '--cin', '128', '--cout', '256', '--k', '3', '--pad', '1', '--stride', '1', '--transpose-modes', '0', '--block-sizes', '64,128,256,512', '--tile-sizes', '8,16,32', '--autotune-repeats', '3', '--measurement-repeats', '1', '--output-channel-batches', '1,2,4,8,16,32,64,128,256', '--cooldown-ms', '2.5']' timed out after 150.0 seconds"
+      ],
+      "rank": null,
+      "best_config": null,
+      "autotune_result": null,
+      "best_result": null
+    }
+  }
+}

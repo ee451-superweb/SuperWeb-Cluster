@@ -320,6 +320,11 @@ def _backend_timeout_seconds(
         WORKLOAD_MODE_MEDIUM,
     }:
         return max(timeout_seconds, 360.0)
+    # Autotune on mid/large tensors runs one long native sweep; zero_score_seconds is too small as a wall-clock cap.
+    if autotune_dataset_variant in {WORKLOAD_MODE_MID, WORKLOAD_MODE_MEDIUM}:
+        return max(timeout_seconds, 3600.0)
+    if autotune_dataset_variant == WORKLOAD_MODE_LARGE:
+        return max(timeout_seconds, 7200.0)
     return timeout_seconds
 
 
@@ -672,7 +677,10 @@ def run_benchmark(args: argparse.Namespace) -> dict:
             print(f"    Available on {hardware_name}. Performance: {gflops:.2f} GFLOPS", flush=True)
         else:
             notes = res.get("notes", ["No details"])
-            print(f"    Not available on {hardware_name}: {notes[0] if notes else 'No details'}", flush=True)
+            # Probe success is stored in notes[0]; real failure reasons are appended after it.
+            detail_parts = notes[1:] if len(notes) > 1 else notes
+            detail = "\n      ".join(detail_parts) if detail_parts else "No details"
+            print(f"    Not available on {hardware_name}: {detail}", flush=True)
 
     # 3. 生成排名
     ranking = sorted(

@@ -90,6 +90,7 @@ class _Dx12ResidentRunner:
             stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
+            errors="replace",
             bufsize=1,
         )
         ready_line = self._read_response_line()
@@ -380,6 +381,8 @@ class GemvTaskExecutor:
                 check=True,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 cwd=GEMV_METHOD_DIR,
                 timeout=300.0,
             )
