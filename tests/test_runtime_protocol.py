@@ -317,6 +317,7 @@ class RuntimeProtocolTests(unittest.TestCase):
                     padding=1,
                     stride=1,
                     conv2d_client_response_mode=CONV2D_CLIENT_RESPONSE_STATS_ONLY,
+                    conv2d_stats_max_samples=16,
                 )
             )
         )
@@ -326,6 +327,72 @@ class RuntimeProtocolTests(unittest.TestCase):
             request.client_request.conv2d_payload.client_response_mode,
             CONV2D_CLIENT_RESPONSE_STATS_ONLY,
         )
+        self.assertEqual(request.client_request.conv2d_payload.stats_max_samples, 16)
+
+        task_assign = parse_envelope(
+            encode_envelope(
+                build_task_assign(
+                    request_id="req-stats",
+                    node_id=COMPUTE_NODE_NAME,
+                    task_id="req-stats:worker-a:0",
+                    method=METHOD_CONV2D,
+                    size="small",
+                    object_id="conv2d/small",
+                    stream_id="stream-stats",
+                    iteration_count=1,
+                    transfer_mode=TransferMode.INLINE_PREFERRED,
+                    task_payload=Conv2dTaskPayload(
+                        start_oc=0,
+                        end_oc=4,
+                        tensor_h=8,
+                        tensor_w=8,
+                        channels_in=4,
+                        channels_out=8,
+                        kernel_size=3,
+                        padding=1,
+                        stride=1,
+                        weight_data=b"\x00" * (3 * 3 * 4 * 4 * 4),
+                        client_response_mode=CONV2D_CLIENT_RESPONSE_STATS_ONLY,
+                        stats_max_samples=16,
+                    ),
+                )
+            )
+        )
+        task_conv2d = task_assign.task_assign.conv2d_payload
+        assert task_conv2d is not None
+        self.assertEqual(task_conv2d.client_response_mode, CONV2D_CLIENT_RESPONSE_STATS_ONLY)
+        self.assertEqual(task_conv2d.stats_max_samples, 16)
+
+        worker_result = parse_envelope(
+            encode_envelope(
+                build_task_result(
+                    "req-stats",
+                    COMPUTE_NODE_NAME,
+                    "req-stats:worker-a:0",
+                    STATUS_OK,
+                    iteration_count=1,
+                    result_payload=Conv2dResultPayload(
+                        start_oc=0,
+                        end_oc=4,
+                        output_h=8,
+                        output_w=8,
+                        output_length=8 * 8 * 4,
+                        output_vector=b"",
+                        result_artifact_id="",
+                        stats_element_count=8 * 8 * 4,
+                        stats_sum=12.5,
+                        stats_sum_squares=75.25,
+                        stats_samples=(0.5, 1.0, 1.5),
+                    ),
+                )
+            )
+        )
+        result_conv2d = worker_result.task_result.conv2d_payload
+        assert result_conv2d is not None
+        self.assertEqual(result_conv2d.stats_element_count, 8 * 8 * 4)
+        self.assertAlmostEqual(result_conv2d.stats_sum, 12.5)
+        self.assertAlmostEqual(result_conv2d.stats_sum_squares, 75.25)
+        self.assertEqual(result_conv2d.stats_samples, (0.5, 1.0, 1.5))
 
         stats_payload = Conv2dResponsePayload(
             output_length=64,

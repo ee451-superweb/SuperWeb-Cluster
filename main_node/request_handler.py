@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from adapters.audit_log import write_audit_event
 from app.constants import (
     CONV2D_CLIENT_RESPONSE_STATS_ONLY,
+    CONV2D_STATS_MAX_SAMPLES,
     MAIN_NODE_NAME,
     METHOD_FREE_CONTENT,
     METHOD_GEMV,
@@ -27,7 +28,6 @@ from app.constants import (
 from app.trace_utils import trace_function
 from compute_node.input_matrix.gemv import build_input_matrix_spec as build_gemv_input_matrix_spec
 from compute_node.compute_methods.conv2d.executor import load_named_workload_spec
-from .aggregator import summarize_conv2d_output_file
 from wire.internal_protocol.runtime_transport import (
     GemvResponsePayload,
     Conv2dResponsePayload,
@@ -325,47 +325,48 @@ class ClientRequestHandler:
                 output_vector = b""
                 result_artifact = None
                 conv_mode = 0
+                stats_max_samples = 0
                 payload = request.conv2d_payload
                 if payload is not None:
                     conv_mode = int(payload.client_response_mode)
+                    stats_max_samples = int(payload.stats_max_samples)
                 if self.artifact_manager is None:
                     raise RuntimeError("artifact manager is required for conv2d responses")
-                artifact_path = self.artifact_manager.root_dir / f"{request.request_id}.bin"
+                stats_only_request = conv_mode == CONV2D_CLIENT_RESPONSE_STATS_ONLY
+                artifact_path = (
+                    None
+                    if stats_only_request
+                    else self.artifact_manager.root_dir / f"{request.request_id}.bin"
+                )
                 task_window_started_at = time.monotonic()
                 with ThreadPoolExecutor(max_workers=len(assignments), thread_name_prefix="task-dispatch") as executor:
                     outcomes = list(executor.map(lambda item: self.run_worker_task_slice(request, item), assignments))
                 task_window_done_at = time.monotonic()
                 task_results = [outcome[0] for outcome in outcomes]
                 worker_timings = tuple(outcome[1] for outcome in outcomes)
-                write_audit_event(
-                    f"aggregating result task_id={task_id} method={request.method} size={request.size or 'large'} worker_slices={len(task_results)} "
-                    f"output_path={artifact_path}",
-                    stdout=True,
-                    logger=self.logger,
-                )
-                try:
-                    self.aggregator.collect_conv2d_result_to_file(
-                        out_h=spec.output_h,
-                        out_w=spec.output_w,
-                        total_cout=spec.c_out,
-                        results=task_results,
-                        output_path=artifact_path,
+                if stats_only_request:
+                    write_audit_event(
+                        f"aggregating result task_id={task_id} method={request.method} size={request.size or 'large'} worker_slices={len(task_results)} "
+                        f"mode=stats_only",
+                        stdout=True,
+                        logger=self.logger,
                     )
-                finally:
-                    self._cleanup_local_task_results(task_results)
-                if conv_mode == CONV2D_CLIENT_RESPONSE_STATS_ONLY:
-                    stats_count, stats_sum, stats_sum_squares, stats_samples = summarize_conv2d_output_file(
-                        artifact_path
-                    )
+                    try:
+                        effective_max_samples = stats_max_samples if stats_max_samples > 0 else CONV2D_STATS_MAX_SAMPLES
+                        stats_count, stats_sum, stats_sum_squares, stats_samples = self.aggregator.aggregate_conv2d_stats(
+                            results=task_results,
+                            total_cout=spec.c_out,
+                            out_h=spec.output_h,
+                            out_w=spec.output_w,
+                            max_samples=effective_max_samples,
+                        )
+                    finally:
+                        self._cleanup_local_task_results(task_results)
                     if stats_count != output_length:
                         raise ValueError(
-                            f"conv2d merged output size mismatch: stats_element_count={stats_count} "
+                            f"conv2d aggregated stats element count mismatch: stats_element_count={stats_count} "
                             f"expected output_length={output_length}"
                         )
-                    try:
-                        artifact_path.unlink()
-                    except OSError:
-                        pass
                     completion_conv2d_stats_only = True
                     response_payload = Conv2dResponsePayload(
                         output_length=output_length,
@@ -377,6 +378,22 @@ class ClientRequestHandler:
                         stats_samples=stats_samples,
                     )
                 else:
+                    write_audit_event(
+                        f"aggregating result task_id={task_id} method={request.method} size={request.size or 'large'} worker_slices={len(task_results)} "
+                        f"output_path={artifact_path}",
+                        stdout=True,
+                        logger=self.logger,
+                    )
+                    try:
+                        self.aggregator.collect_conv2d_result_to_file(
+                            out_h=spec.output_h,
+                            out_w=spec.output_w,
+                            total_cout=spec.c_out,
+                            results=task_results,
+                            output_path=artifact_path,
+                        )
+                    finally:
+                        self._cleanup_local_task_results(task_results)
                     result_artifact = self.artifact_manager.register_existing_file(
                         artifact_path,
                         producer_node_id=MAIN_NODE_NAME,

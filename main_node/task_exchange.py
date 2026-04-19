@@ -376,6 +376,13 @@ class WorkerTaskExchange:
         )
         if request.method == METHOD_CONV2D:
             conv2d_spec, variant = load_named_workload_spec(request.object_id, size=request.size)
+            conv2d_request_payload = request.conv2d_payload
+            client_response_mode = (
+                int(conv2d_request_payload.client_response_mode) if conv2d_request_payload is not None else 0
+            )
+            stats_max_samples = (
+                int(conv2d_request_payload.stats_max_samples) if conv2d_request_payload is not None else 0
+            )
             build_kwargs.update(
                 task_payload=Conv2dTaskPayload(
                     start_oc=assignment.start_oc,
@@ -393,6 +400,8 @@ class WorkerTaskExchange:
                         start_oc=assignment.start_oc,
                         end_oc=assignment.end_oc,
                     ),
+                    client_response_mode=client_response_mode,
+                    stats_max_samples=stats_max_samples,
                 ),
             )
         else:

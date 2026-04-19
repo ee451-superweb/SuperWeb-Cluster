@@ -205,6 +205,61 @@ class ResultAggregator:
             raise ValueError(f"task results cover only {next_oc} output channels out of {total_cout}")
         return merged.tobytes()
 
+    def aggregate_conv2d_stats(
+        self,
+        *,
+        results: list[TaskResult],
+        total_cout: int,
+        out_h: int,
+        out_w: int,
+        max_samples: int = CONV2D_STATS_MAX_SAMPLES,
+    ) -> tuple[int, float, float, tuple[float, ...]]:
+        """Combine worker-reported conv2d stats into one summary.
+
+        Use this when worker slices ran in STATS_ONLY mode: each result already
+        carries running count/sum/sum-of-squares plus its first-N float samples.
+        Sums are additive; samples are concatenated in start_oc order so the
+        leading-N invariant matches a full-tensor scan that visited channels in
+        the same order.
+        """
+        spatial_size = out_h * out_w
+        ordered_results = sorted(results, key=lambda item: item.start_oc)
+        total_count = 0
+        total_sum = 0.0
+        total_sum_squares = 0.0
+        merged_samples: list[float] = []
+        next_oc = 0
+        sample_cap = max(0, int(max_samples))
+        for result in ordered_results:
+            payload = result.conv2d_payload
+            if payload is None:
+                raise ValueError("conv2d stats aggregation requires Conv2dResultPayload entries")
+            if result.start_oc != next_oc:
+                raise ValueError(
+                    f"task results do not cover a contiguous output-channel range: expected {next_oc}, got {result.start_oc}"
+                )
+            if result.end_oc < result.start_oc:
+                raise ValueError("task result end_oc is smaller than start_oc")
+            if result.output_h != out_h or result.output_w != out_w:
+                raise ValueError("task result output dimensions do not match the requested conv2d workload")
+            expected_channels = result.end_oc - result.start_oc
+            expected_length = spatial_size * expected_channels
+            if int(payload.stats_element_count) != expected_length:
+                raise ValueError(
+                    f"task result stats_element_count mismatch for oc {result.start_oc}:{result.end_oc} "
+                    f"(declared {payload.stats_element_count}, expected {expected_length})"
+                )
+            total_count += int(payload.stats_element_count)
+            total_sum += float(payload.stats_sum)
+            total_sum_squares += float(payload.stats_sum_squares)
+            if len(merged_samples) < sample_cap:
+                remaining = sample_cap - len(merged_samples)
+                merged_samples.extend(float(value) for value in payload.stats_samples[:remaining])
+            next_oc = result.end_oc
+        if next_oc != total_cout:
+            raise ValueError(f"task results cover only {next_oc} output channels out of {total_cout}")
+        return total_count, total_sum, total_sum_squares, tuple(merged_samples)
+
     def collect_conv2d_result_to_file(
         self,
         *,

@@ -7,6 +7,7 @@ runner, and package the result back into a ``TaskResult``.
 
 from __future__ import annotations
 
+import array
 import json
 import os
 import subprocess
@@ -15,6 +16,8 @@ import tempfile
 from pathlib import Path
 
 from app.constants import (
+    CONV2D_CLIENT_RESPONSE_STATS_ONLY,
+    CONV2D_STATS_MAX_SAMPLES,
     DEFAULT_CONV2D_CUDA_COOLDOWN_MS,
     DX12_BACKEND_DISABLED_REASON,
     METHOD_CONV2D,
@@ -38,7 +41,35 @@ from compute_node.performance_metrics.conv2d.config import (
 from compute_node.input_matrix.conv2d import build_input_matrix_spec, normalize_size_variant
 from compute_node.performance_summary import RuntimeProcessorProfile, load_runtime_processor_inventory
 from setup import active_python_path
+from wire.internal_protocol.control_plane import Conv2dResultPayload
 from wire.internal_protocol.runtime_transport import TaskAssign, TaskResult, TransferMode
+
+
+def _summarize_conv2d_slice_file(path: Path, *, max_samples: int) -> tuple[int, float, float, tuple[float, ...]]:
+    """Stream a float32 conv2d slice file and return count, sum, sum-of-squares, and leading samples."""
+    size = path.stat().st_size
+    if size % 4 != 0:
+        raise ValueError(f"conv2d slice file size is not a multiple of 4: {size}")
+    element_count = size // 4
+    sum_v = 0.0
+    sum_sq = 0.0
+    samples: list[float] = []
+    remaining = max(0, int(max_samples))
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(256 * 1024)
+            if not chunk:
+                break
+            values = array.array("f")
+            values.frombytes(chunk)
+            for x in values:
+                xf = float(x)
+                sum_v += xf
+                sum_sq += xf * xf
+                if remaining > 0:
+                    samples.append(xf)
+                    remaining -= 1
+    return element_count, sum_v, sum_sq, tuple(samples)
 
 METHOD_DIR = CONV2D_METHOD_DIR
 DEFAULT_CONV_RESULT_PATH = TOP_LEVEL_RESULT_PATH
@@ -488,13 +519,66 @@ class Conv2dTaskExecutor:
                         f"conv2d runtime output has {output_size} bytes, expected {expected_output_bytes}"
                     )
 
-                output_bytes = b"" if disk_first_result else output_path.read_bytes()
-                local_result_path = str(output_path) if disk_first_result else ""
+                conv2d_task_payload = task.conv2d_payload
+                client_response_mode = (
+                    int(conv2d_task_payload.client_response_mode) if conv2d_task_payload is not None else 0
+                )
+                stats_max_samples = (
+                    int(conv2d_task_payload.stats_max_samples) if conv2d_task_payload is not None else 0
+                )
+                stats_only = client_response_mode == CONV2D_CLIENT_RESPONSE_STATS_ONLY
+                if stats_only:
+                    effective_max_samples = stats_max_samples if stats_max_samples > 0 else CONV2D_STATS_MAX_SAMPLES
+                    stats_count, stats_sum, stats_sum_squares, stats_samples = _summarize_conv2d_slice_file(
+                        output_path,
+                        max_samples=effective_max_samples,
+                    )
+                    expected_length = conv_spec.output_h * conv_spec.output_w * (task.end_oc - task.start_oc)
+                    if stats_count != expected_length:
+                        raise ValueError(
+                            f"conv2d slice element count {stats_count} does not match expected {expected_length}"
+                        )
+                    if disk_first_result:
+                        output_path.unlink(missing_ok=True)
+                    output_bytes = b""
+                    local_result_path = ""
+                else:
+                    output_bytes = b"" if disk_first_result else output_path.read_bytes()
+                    local_result_path = str(output_path) if disk_first_result else ""
+                    stats_count = 0
+                    stats_sum = 0.0
+                    stats_sum_squares = 0.0
+                    stats_samples: tuple[float, ...] = ()
             except Exception:
                 if disk_first_result:
                     output_path.unlink(missing_ok=True)
                 raise
 
+        output_length = conv_spec.output_h * conv_spec.output_w * (task.end_oc - task.start_oc)
+        if stats_only:
+            result_payload = Conv2dResultPayload(
+                start_oc=task.start_oc,
+                end_oc=task.end_oc,
+                output_h=conv_spec.output_h,
+                output_w=conv_spec.output_w,
+                output_length=output_length,
+                output_vector=b"",
+                result_artifact_id="",
+                stats_element_count=stats_count,
+                stats_sum=stats_sum,
+                stats_sum_squares=stats_sum_squares,
+                stats_samples=stats_samples,
+            )
+            return TaskResult(
+                request_id=task.request_id,
+                node_id=task.node_id,
+                task_id=task.task_id,
+                timestamp_ms=task.timestamp_ms,
+                status_code=STATUS_OK,
+                iteration_count=task.iteration_count,
+                result_payload=result_payload,
+                local_result_path="",
+            )
         return TaskResult(
             request_id=task.request_id,
             node_id=task.node_id,
@@ -504,7 +588,7 @@ class Conv2dTaskExecutor:
             local_result_path=local_result_path,
             row_start=0,
             row_end=0,
-            output_length=conv_spec.output_h * conv_spec.output_w * (task.end_oc - task.start_oc),
+            output_length=output_length,
             output_vector=output_bytes,
             iteration_count=task.iteration_count,
             start_oc=task.start_oc,
