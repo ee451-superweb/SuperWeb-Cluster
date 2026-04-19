@@ -230,7 +230,6 @@ __marimo__/
 # explicitly allow checked-in build scripts and runner executables only.
 !/compute_node/**/build/
 /compute_node/**/build/*
-!/compute_node/compute_methods/**/build/*.cmd
 !/compute_node/compute_methods/**/build/*_cpu_macos
 !/compute_node/compute_methods/**/build/*_cpu_windows.exe
 !/compute_node/compute_methods/**/build/*_runner
