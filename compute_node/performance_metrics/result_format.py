@@ -224,6 +224,8 @@ def _detect_cuda_gpu_inventory() -> list[dict[str, str]]:
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if completed.returncode != 0:
         return []
@@ -267,6 +269,8 @@ def _detect_nvcc_version() -> str:
         [nvcc, "--version"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if completed.returncode != 0:
         return "not detected"

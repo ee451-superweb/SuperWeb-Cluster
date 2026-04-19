@@ -8,6 +8,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+from adapters.process import enable_utf8_mode, python_utf8_command
+
+enable_utf8_mode()
+
 from adapters.firewall import ensure_rules
 from adapters.platform import detect_os, relaunch_as_admin
 from adapters.audit_log import write_audit_event
@@ -82,7 +86,7 @@ def _runtime_relaunch_argv(argv: list[str]) -> list[str]:
 def _input_matrix_command(*, force_regenerate: bool = False) -> list[str]:
     """Build the local dataset-generation command using the current Python executable."""
 
-    command = [str(active_python_path()), str(INPUT_MATRIX_SCRIPT_PATH), "--method", "all"]
+    command = python_utf8_command(active_python_path(), INPUT_MATRIX_SCRIPT_PATH, "--method", "all")
     if force_regenerate:
         command.append("--force")
     return command
@@ -91,7 +95,7 @@ def _input_matrix_command(*, force_regenerate: bool = False) -> list[str]:
 def _benchmark_command(*, force_rebuild: bool = False) -> list[str]:
     """Build the local benchmark command using the current Python executable."""
 
-    command = [str(active_python_path()), str(BENCHMARK_SCRIPT_PATH), "--method", "all"]
+    command = python_utf8_command(active_python_path(), BENCHMARK_SCRIPT_PATH, "--method", "all")
     if force_rebuild:
         command.append("--rebuild")
     return command
@@ -100,7 +104,7 @@ def _benchmark_command(*, force_rebuild: bool = False) -> list[str]:
 def _setup_command() -> list[str]:
     """Build the setup command used to prepare the project venv and dependencies."""
 
-    return [sys.executable, str(PROJECT_ROOT / "setup.py")]
+    return python_utf8_command(sys.executable, PROJECT_ROOT / "setup.py")
 
 
 def _run_streaming_command(
@@ -123,6 +127,8 @@ def _run_streaming_command(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         bufsize=1,
     ) as process:
         assert process.stdout is not None
@@ -233,6 +239,13 @@ def ensure_bootstrap_runtime_environment(logger, argv: list[str]) -> int | None:
     """
 
     status = inspect_project_environment()
+    logger.info(
+        "Bootstrap interpreter check: current=%s project=%s using_project_python=%s ready=%s",
+        sys.executable,
+        project_python_path(),
+        status.using_project_python,
+        status.ready,
+    )
     if not status.ready:
         setup_command = _setup_command()
         logger.info(
@@ -270,11 +283,11 @@ def ensure_bootstrap_runtime_environment(logger, argv: list[str]) -> int | None:
     if status.using_project_python:
         return None
 
-    relaunch_command = [
-        str(project_python_path()),
-        str(PROJECT_ROOT / "bootstrap.py"),
+    relaunch_command = python_utf8_command(
+        project_python_path(),
+        PROJECT_ROOT / "bootstrap.py",
         *_runtime_relaunch_argv(argv),
-    ]
+    )
     logger.info(
         "Relaunching bootstrap with the project virtual environment: %s",
         " ".join(relaunch_command),
@@ -602,4 +615,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-

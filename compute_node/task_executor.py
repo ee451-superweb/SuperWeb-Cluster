@@ -17,11 +17,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.constants import DX12_BACKEND_DISABLED_REASON
-from app.compute_resource_policy import resolve_capped_cpu_worker_count
+from app.compute_resource_policy import resolve_capped_cpu_worker_count, resolve_metal_headroom_policy
 from common.work_partition import partition_contiguous_range
 from compute_node.compute_methods.gemv import (
-    CPU_MACOS_EXECUTABLE_PATH,
-    CPU_WINDOWS_EXECUTABLE_PATH,
     CUDA_EXECUTABLE_PATH,
     GEMV_METHOD_DIR,
 )
@@ -92,6 +90,7 @@ class _Dx12ResidentRunner:
             stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
+            errors="replace",
             bufsize=1,
         )
         ready_line = self._read_response_line()
@@ -201,6 +200,7 @@ class GemvTaskExecutor:
         self.inventory = inventory or load_runtime_processor_inventory()
         self.dataset_root = INPUT_MATRIX_GENERATED_DIR if dataset_root is None else Path(dataset_root)
         self._dx12_runner = self._build_dx12_resident_runner()
+        self._resolved_executable_paths: dict[str, Path] = {}
 
     def close(self) -> None:
         """Release any long-lived helper processes owned by the executor."""
@@ -381,6 +381,8 @@ class GemvTaskExecutor:
                 check=True,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 cwd=GEMV_METHOD_DIR,
                 timeout=300.0,
             )
@@ -442,7 +444,7 @@ class GemvTaskExecutor:
             )
         processor = processor_slice.processor
         if processor.hardware_type == "cpu":
-            executable_path = CPU_WINDOWS_EXECUTABLE_PATH if sys.platform == "win32" else CPU_MACOS_EXECUTABLE_PATH
+            executable_path = self._resolve_runtime_executable_path("cpu")
             configured_workers = int(
                 processor.best_config.get("workers")
                 or processor.best_config.get("requested_workers")
@@ -479,8 +481,52 @@ class GemvTaskExecutor:
                 str(iteration_count),
             ]
 
+        if processor.hardware_type == "metal":
+            executable_path = self._resolve_runtime_executable_path("metal")
+            block_size = int(processor.best_config.get("block_size") or 256)
+            tile_size = int(processor.best_config.get("tile_size") or 1)
+            headroom_fraction = processor.best_config.get("headroom_fraction")
+            if headroom_fraction is None:
+                headroom_policy = resolve_metal_headroom_policy(
+                    processor_slice.row_end - processor_slice.row_start,
+                )
+            else:
+                headroom_policy = resolve_metal_headroom_policy(
+                    processor_slice.row_end - processor_slice.row_start,
+                    fraction=float(headroom_fraction),
+                )
+            return [
+                str(executable_path),
+                "--matrix",
+                str(dataset_layout.matrix_path),
+                "--vector",
+                str(vector_path),
+                "--output",
+                str(output_path),
+                "--rows",
+                str(spec.rows),
+                "--cols",
+                str(spec.cols),
+                "--row-start",
+                str(processor_slice.row_start),
+                "--row-end",
+                str(processor_slice.row_end),
+                "--block-sizes",
+                str(block_size),
+                "--tile-sizes",
+                str(tile_size),
+                "--headroom-fraction",
+                f"{headroom_policy.headroom_fraction:.6f}",
+                "--row-chunk-size",
+                str(headroom_policy.work_chunk_size),
+                "--autotune-repeats",
+                "1",
+                "--iteration-count",
+                str(iteration_count),
+            ]
+
         if processor.hardware_type == "cuda":
-            executable_path = CUDA_EXECUTABLE_PATH
+            executable_path = self._resolve_runtime_executable_path("cuda")
             transpose = 1 if bool(processor.best_config.get("transpose")) else 0
             block_size = int(processor.best_config.get("block_size") or 256)
             tile_size = int(processor.best_config.get("tile_size") or 1)
@@ -520,4 +566,25 @@ class GemvTaskExecutor:
 
         raise ValueError(f"unsupported local processor type: {processor.hardware_type}")
 
+    def _resolve_runtime_executable_path(self, hardware_type: str) -> Path:
+        """Resolve one runtime runner path, compiling on demand when needed."""
 
+        cached = self._resolved_executable_paths.get(hardware_type)
+        if cached is not None:
+            return cached
+
+        if hardware_type == "cpu":
+            from compute_node.performance_metrics.gemv.backends.cpu_backend import CpuBackend
+
+            executable_path, _note = CpuBackend()._resolve_executable_path(force_rebuild=False)
+        elif hardware_type == "metal":
+            from compute_node.performance_metrics.gemv.backends.metal_backend import MetalBackend
+
+            executable_path, _note = MetalBackend()._compile_if_needed(force_rebuild=False)
+        elif hardware_type == "cuda":
+            executable_path = CUDA_EXECUTABLE_PATH
+        else:
+            raise ValueError(f"unsupported local processor type: {hardware_type}")
+
+        self._resolved_executable_paths[hardware_type] = executable_path
+        return executable_path

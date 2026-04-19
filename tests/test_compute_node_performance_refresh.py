@@ -14,6 +14,8 @@ if str(ROOT_DIR) not in sys.path:
 
 from compute_node.performance_refresh import (
     _load_best_backend_config,
+    _refresh_conv2d_gflops,
+    _refresh_gemv_gflops,
     validate_idle_refresh_requirements,
 )
 from common.types import ComputeHardwarePerformance, ComputePerformanceSummary, MethodPerformanceSummary
@@ -160,8 +162,59 @@ class ComputeNodePerformanceRefreshTests(unittest.TestCase):
         self.assertEqual(len(progress_messages), 7)
         self.assertEqual(progress_messages[0][0:2], (1, 7))
         self.assertIn("Loading persisted benchmark result metadata.", progress_messages[0][2])
-        self.assertIn("gemv small input matrix", progress_messages[2][2])
+        self.assertIn("gemv refresh input matrix", progress_messages[2][2])
         self.assertIn("conv2d runner binary", progress_messages[-1][2])
+
+    def test_refresh_gemv_metal_accepts_best_config_without_legacy_launch_hints(self) -> None:
+        backend = mock.Mock()
+        backend._compile_if_needed.return_value = (Path("/tmp/gemv_metal_runner"), "")
+        backend._run_runner.return_value = {"measurement_effective_gflops": 42.5}
+        dataset = SimpleNamespace(
+            root_dir=Path("/tmp/gemv_small"),
+            matrix_path=Path("/tmp/gemv_small/A.bin"),
+            vector_path=Path("/tmp/gemv_small/x.bin"),
+        )
+
+        with (
+            mock.patch("compute_node.performance_refresh.build_gemv_backends", return_value=[backend]),
+            mock.patch("compute_node.performance_refresh.build_gemv_dataset_layout", return_value=dataset),
+            mock.patch("compute_node.performance_refresh.gemv_dataset_is_generated", return_value=True),
+        ):
+            measured = _refresh_gemv_gflops(
+                "metal",
+                {"implementation": "mps_matrix_vector_multiplication"},
+            )
+
+        self.assertEqual(measured, 42.5)
+        run_kwargs = backend._run_runner.call_args.kwargs
+        self.assertEqual(run_kwargs["block_sizes"], [256])
+        self.assertEqual(run_kwargs["tile_sizes"], [1])
+        self.assertEqual(run_kwargs["headroom_fraction"], 0.9)
+        self.assertEqual(run_kwargs["row_chunk_size"], 3686)
+
+    def test_refresh_conv2d_metal_accepts_best_config_without_legacy_launch_hints(self) -> None:
+        backend = mock.Mock()
+        backend._compile_if_needed.return_value = (Path("/tmp/conv2d_metal_runner"), "")
+        backend._run_runner.return_value = {"measurement_effective_gflops": 88.0}
+        dataset = SimpleNamespace(
+            root_dir=Path("/tmp/conv2d_small"),
+            input_path=Path("/tmp/conv2d_small/input.bin"),
+            weight_path=Path("/tmp/conv2d_small/weight.bin"),
+        )
+
+        with (
+            mock.patch("compute_node.performance_refresh.build_conv2d_backends", return_value=[backend]),
+            mock.patch("compute_node.performance_refresh.build_conv2d_dataset_layout", return_value=dataset),
+            mock.patch("compute_node.performance_refresh.conv2d_dataset_is_generated", return_value=True),
+        ):
+            measured = _refresh_conv2d_gflops("metal", {"implementation": "mpsgraph"})
+
+        self.assertEqual(measured, 88.0)
+        run_kwargs = backend._run_runner.call_args.kwargs
+        self.assertEqual(run_kwargs["block_sizes"], [256])
+        self.assertEqual(run_kwargs["tile_sizes"], [16])
+        self.assertEqual(run_kwargs["headroom_fraction"], 0.9)
+        self.assertEqual(run_kwargs["output_channel_batch"], 115)
 
 
 if __name__ == "__main__":

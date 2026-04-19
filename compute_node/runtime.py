@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import multiprocessing
+import signal
 import socket
 import time
 from collections.abc import Callable
@@ -36,6 +37,50 @@ from wire.internal_protocol.runtime_transport import (
     MessageKind,
     describe_message_kind,
 )
+
+
+def _configure_subprocess_worker_signals() -> None:
+    """Prevent task worker subprocesses from handling terminal Ctrl+C directly.
+
+    The supervisor owns SIGINT/SIGTERM in the parent process. When the terminal
+    sends Ctrl+C to the whole process group, spawned task workers should stay
+    quiet and let the parent coordinate shutdown instead of emitting their own
+    ``KeyboardInterrupt`` tracebacks while blocked on the work queue.
+    """
+
+    try:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    except (AttributeError, ValueError):
+        return
+
+
+def _shutdown_task_process_pool(task_process_pool, *, has_in_flight_tasks: bool) -> None:
+    """Shut down the task process pool without leaking idle worker state.
+
+    Args:
+        task_process_pool: Process-pool executor created for task execution.
+        has_in_flight_tasks: Whether runtime shutdown still has unfinished tasks.
+
+    Returns:
+        ``None`` after the executor has been asked to stop and, when required,
+        its worker processes have been terminated explicitly.
+    """
+
+    process_mapping = getattr(task_process_pool, "_processes", None)
+    processes = tuple(process_mapping.values()) if isinstance(process_mapping, dict) else ()
+    task_process_pool.shutdown(wait=not has_in_flight_tasks, cancel_futures=True)
+    if not has_in_flight_tasks:
+        return
+
+    for process in processes:
+        if getattr(process, "is_alive", lambda: False)():
+            terminate = getattr(process, "terminate", None)
+            if callable(terminate):
+                terminate()
+    for process in processes:
+        join = getattr(process, "join", None)
+        if callable(join):
+            join(timeout=1.0)
 
 
 def _execute_task_in_subprocess(task):
@@ -144,11 +189,13 @@ class ComputeNodeRuntime:
                     max_workers=1,
                     mp_context=spawn_context,
                     max_tasks_per_child=1,
+                    initializer=_configure_subprocess_worker_signals,
                 )
             except TypeError:
                 task_process_pool = ProcessPoolExecutor(
                     max_workers=1,
                     mp_context=spawn_context,
+                    initializer=_configure_subprocess_worker_signals,
                 )
         else:
             try:
@@ -321,11 +368,14 @@ class ComputeNodeRuntime:
             )
         finally:
             if task_process_pool is not None:
-                task_process_pool.shutdown(wait=False, cancel_futures=True)
+                _shutdown_task_process_pool(
+                    task_process_pool,
+                    has_in_flight_tasks=bool(pending_tasks),
+                )
             if task_thread_pool is not None:
                 task_thread_pool.shutdown(wait=True, cancel_futures=True)
             if refresh_thread_pool is not None:
-                refresh_thread_pool.shutdown(wait=False, cancel_futures=True)
+                refresh_thread_pool.shutdown(wait=refresh_future is None, cancel_futures=True)
             if task_executor is not None and hasattr(task_executor, "close"):
                 task_executor.close()
             if artifact_manager is not None:

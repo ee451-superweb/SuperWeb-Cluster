@@ -302,7 +302,19 @@ class MainNodeRuntimeTests(unittest.TestCase):
             output_vector=pack_float32_values([1.0] * runtime.gemv_spec.rows),
             iteration_count=4,
         )
-        runtime._run_worker_task_slice = mock.Mock(return_value=task_result)
+        from wire.internal_protocol.runtime_transport import WorkerTiming
+        runtime._run_worker_task_slice = mock.Mock(
+            return_value=(
+                task_result,
+                WorkerTiming(
+                    node_id="worker-1",
+                    task_id="req-1:worker",
+                    slice="rows=0:0",
+                    wall_ms=0,
+                    artifact_fetch_ms=0,
+                ),
+            )
+        )
         runtime.aggregator = mock.Mock()
         runtime.aggregator.collect_gemv_result.return_value = task_result.output_vector
 
@@ -489,10 +501,12 @@ class MainNodeRuntimeTests(unittest.TestCase):
             effective_gflops=125.0,
         )
 
-        result = runtime._run_worker_task_slice(request, assignment)
+        result, timing = runtime._run_worker_task_slice(request, assignment)
 
         self.assertEqual(result.task_id, "req-1")
         self.assertEqual(result.row_end, 10)
+        self.assertEqual(timing.task_id, "req-1")
+        self.assertEqual(timing.slice, "rows=0:10")
         sent_message = send_message_mock.call_args.args[1]
         self.assertEqual(sent_message.kind, MessageKind.TASK_ASSIGN)
         self.assertEqual(sent_message.task_assign.node_id, "worker-1")
@@ -605,7 +619,7 @@ class MainNodeRuntimeTests(unittest.TestCase):
                 end_oc=2,
             )
 
-            result = runtime._run_worker_task_slice(request, assignment)
+            result, timing = runtime._run_worker_task_slice(request, assignment)
 
         runtime.artifact_manager.fetch_to_file.assert_called_once()
         self.assertEqual(result.output_length, 128)
@@ -614,6 +628,7 @@ class MainNodeRuntimeTests(unittest.TestCase):
         self.assertTrue(Path(result.local_result_path).name.startswith("fetch-artifact-1-"))
         self.assertEqual(result.start_oc, 0)
         self.assertEqual(result.end_oc, 2)
+        self.assertEqual(timing.slice, "oc=0:2")
         self.assertEqual(send_message_mock.call_count, 2)
         assign_message = send_message_mock.call_args_list[0].args[1]
         release_message = send_message_mock.call_args_list[1].args[1]
@@ -700,7 +715,7 @@ class MainNodeRuntimeTests(unittest.TestCase):
             end_oc=2,
         )
 
-        result = runtime._run_worker_task_slice(request, assignment)
+        result, _timing = runtime._run_worker_task_slice(request, assignment)
 
         self.assertEqual(result.task_id, "req-spatial-runtime")
         mailbox_calls = worker_connection.mailbox.wait_for_task_message.call_args_list

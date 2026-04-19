@@ -111,6 +111,8 @@ def _detect_nvcc_supported_sms() -> set[str] | None:
         ["nvcc", "--list-gpu-code"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if completed.returncode != 0:
         return None
@@ -206,6 +208,8 @@ def _detect_compute_capability() -> str | None:
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if completed.returncode != 0:
         return None
@@ -232,9 +236,10 @@ class CudaBackend:
             return False, f"missing CUDA runner source at {_relative_project_path(CUDA_SOURCE_PATH)}"
 
         nvidia_adapter_name: str | None = None
+        nvidia_adapter_message = ""
         if os.name == "nt":
             nvidia_adapter_name, nvidia_adapter_message = detect_nvidia_windows_adapter()
-            if nvidia_adapter_name is None:
+            if nvidia_adapter_name is None and not CUDA_EXECUTABLE_PATH.exists():
                 return False, nvidia_adapter_message
 
         capability = _detect_compute_capability()
@@ -260,11 +265,28 @@ class CudaBackend:
             if not binary_is_stale:
                 if os.name == "nt":
                     if capability is None:
+                        if nvidia_adapter_name is None:
+                            return (
+                                True,
+                                f"CUDA backend available via self-contained Windows runner at "
+                                f"{_relative_project_path(CUDA_EXECUTABLE_PATH)}. It targets "
+                                f"{_format_windows_sm_targets()} and needs only the NVIDIA driver at runtime. "
+                                f"Windows display-adapter verification was unavailable ({nvidia_adapter_message}).",
+                            )
                         return (
                             True,
                             f"CUDA backend available via self-contained Windows runner at "
                             f"{_relative_project_path(CUDA_EXECUTABLE_PATH)}. It targets {_format_windows_sm_targets()} "
                             "and needs only the NVIDIA driver at runtime.",
+                        )
+                    if nvidia_adapter_name is None:
+                        return (
+                            True,
+                            f"CUDA backend available via self-contained Windows runner at "
+                            f"{_relative_project_path(CUDA_EXECUTABLE_PATH)}. Detected GPU is sm_{capability}; the "
+                            f"runner targets {_format_windows_sm_targets()} and needs only the NVIDIA driver at "
+                            f"runtime. Windows display-adapter verification was unavailable "
+                            f"({nvidia_adapter_message}).",
                         )
                     return (
                         True,
@@ -610,6 +632,8 @@ class CudaBackend:
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout_seconds,
             cwd=ROOT_DIR,
         )
@@ -761,6 +785,8 @@ class CudaBackend:
                 ],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
             )
         else:
             compile_targets = [capability] if capability is not None else []
@@ -775,7 +801,7 @@ class CudaBackend:
             ]
             if capability is not None:
                 command.append(f"-gencode=arch=compute_{capability},code=sm_{capability}")
-            completed = subprocess.run(command, capture_output=True, text=True, cwd=CUDA_BUILD_DIR)
+            completed = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=CUDA_BUILD_DIR)
 
         if completed.returncode != 0:
             raise subprocess.CalledProcessError(
@@ -820,6 +846,8 @@ class CudaBackend:
                 ],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
             )
             if completed.returncode == 0:
                 resolved = completed.stdout.strip().splitlines()

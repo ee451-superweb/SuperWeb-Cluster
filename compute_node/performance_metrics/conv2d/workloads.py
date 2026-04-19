@@ -15,6 +15,13 @@ from compute_node.input_matrix.conv2d.spec import (
     MEDIUM_PAD,
     MEDIUM_STRIDE,
     MEDIUM_W,
+    REFRESH_CIN,
+    REFRESH_COUT,
+    REFRESH_H,
+    REFRESH_K,
+    REFRESH_PAD,
+    REFRESH_STRIDE,
+    REFRESH_W,
     RUNTIME_CIN,
     RUNTIME_COUT,
     RUNTIME_H,
@@ -32,6 +39,7 @@ from compute_node.input_matrix.conv2d.spec import (
 )
 
 SMALL_IDEAL_SECONDS = 0.5
+REFRESH_IDEAL_SECONDS = 7.5
 MID_IDEAL_SECONDS = 15.0
 LARGE_IDEAL_SECONDS = 60.0
 
@@ -65,6 +73,22 @@ def get_mid_spec() -> BenchmarkSpec:
         ideal_seconds=MID_IDEAL_SECONDS,
         zero_score_seconds=MID_IDEAL_SECONDS * 10,
         stride=MEDIUM_STRIDE,
+    )
+
+
+def get_refresh_spec() -> BenchmarkSpec:
+    """Return the dedicated idle-refresh conv2d benchmark specification."""
+    return BenchmarkSpec(
+        name=f"refresh-conv2d-{REFRESH_H}x{REFRESH_W}",
+        h=REFRESH_H,
+        w=REFRESH_W,
+        c_in=REFRESH_CIN,
+        c_out=REFRESH_COUT,
+        k=REFRESH_K,
+        pad=REFRESH_PAD,
+        ideal_seconds=REFRESH_IDEAL_SECONDS,
+        zero_score_seconds=REFRESH_IDEAL_SECONDS * 10,
+        stride=REFRESH_STRIDE,
     )
 
 
@@ -140,13 +164,20 @@ def build_benchmark_spec(
         normalized_variant = "large"
 
     if all(v is None for v in [h, w, c_in, c_out, k, pad, stride]):
+        if normalized_variant == "refresh":
+            return get_refresh_spec()
         if normalized_variant == "mid":
             return get_mid_spec()
         if normalized_variant == "large":
             return get_large_spec()
         return get_small_spec()
 
-    if normalized_variant == "mid":
+    if normalized_variant == "refresh":
+        default_h, default_w = REFRESH_H, REFRESH_W
+        default_c_in, default_c_out = REFRESH_CIN, REFRESH_COUT
+        default_k, default_pad, default_stride = REFRESH_K, REFRESH_PAD, REFRESH_STRIDE
+        ideal_seconds = REFRESH_IDEAL_SECONDS
+    elif normalized_variant == "mid":
         default_h, default_w = MEDIUM_H, MEDIUM_W
         default_c_in, default_c_out = MEDIUM_CIN, MEDIUM_COUT
         default_k, default_pad, default_stride = MEDIUM_K, MEDIUM_PAD, MEDIUM_STRIDE
@@ -174,4 +205,3 @@ def build_benchmark_spec(
         zero_score_seconds=ideal_seconds * 10,
         stride=stride if stride is not None else default_stride,
     )
-

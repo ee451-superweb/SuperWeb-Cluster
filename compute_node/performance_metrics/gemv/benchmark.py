@@ -13,6 +13,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from adapters.process import enable_utf8_mode
+
+enable_utf8_mode()
+
 from app.constants import METHOD_GEMV
 from compute_node.performance_metrics.benchmark import main as run_top_level_benchmark
 from compute_node.performance_metrics.gemv.config import RESULT_PATH

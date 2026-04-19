@@ -19,6 +19,10 @@ PROJECT_ROOT = ROOT_DIR.parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from adapters.process import enable_utf8_mode, python_utf8_command
+
+enable_utf8_mode()
+
 from app.constants import (
     DEFAULT_CONV2D_CUDA_COOLDOWN_MS,
     DEFAULT_CONV2D_CUDA_OUTPUT_CHANNEL_BATCH_SCALE,
@@ -171,11 +175,11 @@ def _generate_if_needed(
         return
 
     script = METHOD_GENERATE_SCRIPT_PATH
-    cmd = [
-        str(active_python_path()),
-        str(script),
+    cmd = python_utf8_command(
+        active_python_path(),
+        script,
         "--output-dir",
-        str(dataset_dir),
+        dataset_dir,
         "--role",
         role,
         "--h",
@@ -192,9 +196,10 @@ def _generate_if_needed(
         str(spec.pad),
         "--stride",
         str(spec.stride),
-    ]
+    )
     if not generate_small_dataset:
         cmd.append("--skip-small")
+    cmd.append("--skip-refresh")
     if not generate_mid_dataset:
         cmd.append("--skip-mid")
     if generate_large_dataset:
@@ -319,6 +324,11 @@ def _backend_timeout_seconds(
         WORKLOAD_MODE_MEDIUM,
     }:
         return max(timeout_seconds, 360.0)
+    # Autotune on mid/large tensors runs one long native sweep; zero_score_seconds is too small as a wall-clock cap.
+    if autotune_dataset_variant in {WORKLOAD_MODE_MID, WORKLOAD_MODE_MEDIUM}:
+        return max(timeout_seconds, 3600.0)
+    if autotune_dataset_variant == WORKLOAD_MODE_LARGE:
+        return max(timeout_seconds, 7200.0)
     return timeout_seconds
 
 
@@ -671,7 +681,10 @@ def run_benchmark(args: argparse.Namespace) -> dict:
             print(f"    Available on {hardware_name}. Performance: {gflops:.2f} GFLOPS", flush=True)
         else:
             notes = res.get("notes", ["No details"])
-            print(f"    Not available on {hardware_name}: {notes[0] if notes else 'No details'}", flush=True)
+            # Probe success is stored in notes[0]; real failure reasons are appended after it.
+            detail_parts = notes[1:] if len(notes) > 1 else notes
+            detail = "\n      ".join(detail_parts) if detail_parts else "No details"
+            print(f"    Not available on {hardware_name}: {detail}", flush=True)
 
     # 3. 生成排名
     ranking = sorted(

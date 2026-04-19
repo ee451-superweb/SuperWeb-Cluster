@@ -16,6 +16,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from adapters.process import enable_utf8_mode
+
+enable_utf8_mode()
+
 from app.runtime_environment import relaunch_with_project_python_if_needed
 from app.constants import METHOD_GEMV, METHOD_CONV2D
 from compute_node.input_matrix.gemv.generate import main as generate_gemv_main
@@ -57,6 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Chunk size in MiB used while streaming data.",
     )
     parser.add_argument("--skip-small", action="store_true", help="Skip the small dataset.")
+    parser.add_argument("--skip-refresh", action="store_true", help="Skip the idle-refresh dataset.")
     parser.add_argument("--skip-mid", action="store_true", help="Skip the mid-sized dataset.")
     parser.add_argument("--skip-medium", action="store_true", help="Alias for --skip-mid.")
     parser.add_argument("--skip-large", action="store_true", help="Skip the large dataset.")
@@ -112,6 +117,8 @@ def _common_flags(args: argparse.Namespace) -> list[str]:
         argv.extend(["--chunk-mib", str(args.chunk_mib)])
     if args.skip_small or args.skip_test:
         argv.append("--skip-small")
+    if args.skip_refresh:
+        argv.append("--skip-refresh")
     if args.skip_mid or args.skip_medium:
         argv.append("--skip-mid")
     if args.skip_large or args.skip_runtime:

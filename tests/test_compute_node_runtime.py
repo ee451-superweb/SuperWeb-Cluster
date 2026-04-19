@@ -4,8 +4,9 @@ import threading
 import unittest
 from unittest import mock
 
+import compute_node.runtime as runtime_module
 from common.float32_codec import pack_float32_values
-from common.types import DiscoveryResult, HardwareProfile
+from common.types import ComputePerformanceSummary, DiscoveryResult, HardwareProfile
 from compute_node.performance_summary import RuntimeProcessorInventory, RuntimeProcessorProfile
 from compute_node.runtime import ComputeNodeRuntime
 from app.config import AppConfig
@@ -124,12 +125,14 @@ class ComputeNodeRuntimeTests(unittest.TestCase):
 
     @mock.patch("builtins.print")
     @mock.patch("compute_node.runtime.write_audit_event")
+    @mock.patch("compute_node.runtime.load_compute_performance_summary")
     @mock.patch("compute_node.runtime.load_runtime_processor_inventory")
     @mock.patch("compute_node.runtime.collect_hardware_profile")
     def test_run_registers_records_heartbeat_and_executes_task(
         self,
         collect_hardware_profile_mock: mock.Mock,
         load_runtime_processor_inventory_mock: mock.Mock,
+        load_compute_performance_summary_mock: mock.Mock,
         write_audit_event_mock: mock.Mock,
         print_mock: mock.Mock,
     ) -> None:
@@ -151,6 +154,7 @@ class ComputeNodeRuntimeTests(unittest.TestCase):
         )
         collect_hardware_profile_mock.return_value = hardware
         load_runtime_processor_inventory_mock.return_value = inventory
+        load_compute_performance_summary_mock.return_value = ComputePerformanceSummary()
         task_assign = RuntimeEnvelope(
             kind=MessageKind.TASK_ASSIGN,
             task_assign=TaskAssign(
@@ -232,12 +236,14 @@ class ComputeNodeRuntimeTests(unittest.TestCase):
         )
 
     @mock.patch("builtins.print")
+    @mock.patch("compute_node.runtime.load_compute_performance_summary")
     @mock.patch("compute_node.runtime.load_runtime_processor_inventory")
     @mock.patch("compute_node.runtime.collect_hardware_profile")
     def test_run_replies_to_heartbeat_while_task_is_still_running(
         self,
         collect_hardware_profile_mock: mock.Mock,
         load_runtime_processor_inventory_mock: mock.Mock,
+        load_compute_performance_summary_mock: mock.Mock,
         print_mock: mock.Mock,
     ) -> None:
         hardware = HardwareProfile(
@@ -263,6 +269,7 @@ class ComputeNodeRuntimeTests(unittest.TestCase):
         )
         collect_hardware_profile_mock.return_value = hardware
         load_runtime_processor_inventory_mock.return_value = inventory
+        load_compute_performance_summary_mock.return_value = ComputePerformanceSummary()
         task_assign = RuntimeEnvelope(
             kind=MessageKind.TASK_ASSIGN,
             task_assign=TaskAssign(
@@ -321,12 +328,14 @@ class ComputeNodeRuntimeTests(unittest.TestCase):
         self.assertEqual(len(blocking_executor.tasks), 1)
         self.assertTrue(print_mock.called)
 
+    @mock.patch("compute_node.runtime.load_compute_performance_summary")
     @mock.patch("compute_node.runtime.load_runtime_processor_inventory")
     @mock.patch("compute_node.runtime.collect_hardware_profile")
     def test_run_reports_registration_failure(
         self,
         collect_hardware_profile_mock: mock.Mock,
         load_runtime_processor_inventory_mock: mock.Mock,
+        load_compute_performance_summary_mock: mock.Mock,
     ) -> None:
         collect_hardware_profile_mock.return_value = HardwareProfile(
             hostname="worker-a",
@@ -342,6 +351,7 @@ class ComputeNodeRuntimeTests(unittest.TestCase):
         load_runtime_processor_inventory_mock.return_value = RuntimeProcessorInventory(
             processors=(RuntimeProcessorProfile(hardware_type="cpu", effective_gflops=24.0, rank=1, best_config={"workers": 8, "tile_size": 512}),)
         )
+        load_compute_performance_summary_mock.return_value = ComputePerformanceSummary()
 
         class _BrokenSession(_FakeSession):
             def connect(self) -> None:
@@ -360,8 +370,149 @@ class ComputeNodeRuntimeTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertIn("Unable to join main-node TCP runtime", result.message)
 
+    @mock.patch("compute_node.runtime.multiprocessing.get_context")
+    @mock.patch("compute_node.runtime.ProcessPoolExecutor")
+    def test_build_task_execution_backend_uses_sigint_ignoring_initializer(
+        self,
+        process_pool_executor_mock: mock.Mock,
+        get_context_mock: mock.Mock,
+    ) -> None:
+        get_context_mock.return_value = object()
+        runtime = ComputeNodeRuntime(
+            config=AppConfig(node_name=COMPUTE_NODE_NAME),
+            main_node_host="10.0.0.5",
+            main_node_port=52020,
+            logger=mock.Mock(),
+        )
+
+        runtime._build_task_execution_backend()
+
+        process_pool_executor_mock.assert_called_once()
+        self.assertEqual(
+            process_pool_executor_mock.call_args.kwargs["initializer"],
+            runtime_module._configure_subprocess_worker_signals,
+        )
+
+    @mock.patch("compute_node.runtime.load_compute_performance_summary")
+    @mock.patch("compute_node.runtime.load_runtime_processor_inventory")
+    @mock.patch("compute_node.runtime.collect_hardware_profile")
+    def test_run_waits_for_idle_process_pool_shutdown(
+        self,
+        collect_hardware_profile_mock: mock.Mock,
+        load_runtime_processor_inventory_mock: mock.Mock,
+        load_compute_performance_summary_mock: mock.Mock,
+    ) -> None:
+        collect_hardware_profile_mock.return_value = HardwareProfile(
+            hostname="worker-a",
+            local_ip="10.0.0.2",
+            mac_address="aa:bb:cc:dd:ee:ff",
+            system="Windows",
+            release="11",
+            machine="AMD64",
+            processor="x86_64",
+            logical_cpu_count=12,
+            memory_bytes=17179869184,
+        )
+        load_runtime_processor_inventory_mock.return_value = RuntimeProcessorInventory(
+            processors=(RuntimeProcessorProfile(hardware_type="cpu", effective_gflops=24.0, rank=1, best_config={}),)
+        )
+        load_compute_performance_summary_mock.return_value = ComputePerformanceSummary()
+        fake_session = _FakeSession(
+            messages=[None],
+            register_ok=RegisterOk(
+                main_node_name=MAIN_NODE_NAME,
+                main_node_ip="10.0.0.5",
+                main_node_port=52020,
+                node_id="worker-1",
+            ),
+        )
+        fake_pool = mock.Mock()
+        runtime = ComputeNodeRuntime(
+            config=AppConfig(node_name=COMPUTE_NODE_NAME),
+            main_node_host="10.0.0.5",
+            main_node_port=52020,
+            logger=mock.Mock(),
+            session_factory=lambda *args, **kwargs: fake_session,
+        )
+        runtime._build_task_execution_backend = mock.Mock(return_value=(fake_pool, None, None))
+
+        runtime.run()
+
+        fake_pool.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
+
+    @mock.patch("compute_node.runtime.load_compute_performance_summary")
+    @mock.patch("compute_node.runtime.load_runtime_processor_inventory")
+    @mock.patch("compute_node.runtime.collect_hardware_profile")
+    def test_run_terminates_inflight_process_pool_workers_on_shutdown(
+        self,
+        collect_hardware_profile_mock: mock.Mock,
+        load_runtime_processor_inventory_mock: mock.Mock,
+        load_compute_performance_summary_mock: mock.Mock,
+    ) -> None:
+        collect_hardware_profile_mock.return_value = HardwareProfile(
+            hostname="worker-a",
+            local_ip="10.0.0.2",
+            mac_address="aa:bb:cc:dd:ee:ff",
+            system="Windows",
+            release="11",
+            machine="AMD64",
+            processor="x86_64",
+            logical_cpu_count=12,
+            memory_bytes=17179869184,
+        )
+        load_runtime_processor_inventory_mock.return_value = RuntimeProcessorInventory(
+            processors=(RuntimeProcessorProfile(hardware_type="cpu", effective_gflops=24.0, rank=1, best_config={}),)
+        )
+        load_compute_performance_summary_mock.return_value = ComputePerformanceSummary()
+        task_assign = RuntimeEnvelope(
+            kind=MessageKind.TASK_ASSIGN,
+            task_assign=TaskAssign(
+                request_id="req-1",
+                node_id=COMPUTE_NODE_NAME,
+                task_id="task-1",
+                method=METHOD_GEMV,
+                size="small",
+                object_id="input_matrix/default",
+                stream_id="stream-1",
+                timestamp_ms=123456,
+                row_start=0,
+                row_end=2,
+                vector_length=4,
+                vector_data=pack_float32_values([1.0, 2.0, 3.0, 4.0]),
+                iteration_count=5,
+            ),
+        )
+        fake_session = _FakeSession(
+            messages=[task_assign, None],
+            register_ok=RegisterOk(
+                main_node_name=MAIN_NODE_NAME,
+                main_node_ip="10.0.0.5",
+                main_node_port=52020,
+                node_id="worker-1",
+            ),
+        )
+        running_future = mock.Mock()
+        running_future.done.return_value = False
+        worker_process = mock.Mock()
+        worker_process.is_alive.return_value = True
+        fake_pool = mock.Mock()
+        fake_pool.submit.return_value = running_future
+        fake_pool._processes = {1234: worker_process}
+        runtime = ComputeNodeRuntime(
+            config=AppConfig(node_name=COMPUTE_NODE_NAME),
+            main_node_host="10.0.0.5",
+            main_node_port=52020,
+            logger=mock.Mock(),
+            session_factory=lambda *args, **kwargs: fake_session,
+        )
+        runtime._build_task_execution_backend = mock.Mock(return_value=(fake_pool, None, None))
+
+        runtime.run()
+
+        fake_pool.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
+        worker_process.terminate.assert_called_once()
+        worker_process.join.assert_called_once_with(timeout=1.0)
+
 
 if __name__ == "__main__":
     unittest.main()
-
-

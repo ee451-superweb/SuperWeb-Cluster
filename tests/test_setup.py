@@ -18,6 +18,21 @@ import setup
 class SetupTests(unittest.TestCase):
     """Validate local venv setup and dependency install separation."""
 
+    def test_current_python_uses_project_venv_checks_sys_prefix_not_executable_target(self) -> None:
+        with (
+            mock.patch.object(setup, "VENV_DIR", Path("/repo/.venv")),
+            mock.patch.object(setup.sys, "prefix", "/Library/Frameworks/Python.framework/Versions/3.12"),
+            mock.patch.object(setup.sys, "executable", "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3"),
+        ):
+            self.assertFalse(setup.current_python_uses_project_venv())
+
+        with (
+            mock.patch.object(setup, "VENV_DIR", Path("/repo/.venv")),
+            mock.patch.object(setup.sys, "prefix", "/repo/.venv"),
+            mock.patch.object(setup.sys, "executable", "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3"),
+        ):
+            self.assertTrue(setup.current_python_uses_project_venv())
+
     def test_ensure_project_python_environment_creates_venv_and_installs_requirements(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
@@ -96,4 +111,3 @@ class SetupTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -445,6 +445,8 @@ class Dx12Backend:
                 check=True,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout_seconds,
                 cwd=ROOT_DIR,
             )
@@ -598,6 +600,8 @@ class Dx12Backend:
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         if completed.returncode != 0:
             raise subprocess.CalledProcessError(
@@ -633,6 +637,8 @@ class Dx12Backend:
                 ],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
             )
             if completed.returncode == 0:
                 resolved = completed.stdout.strip().splitlines()

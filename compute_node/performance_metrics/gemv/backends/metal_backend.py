@@ -1,13 +1,8 @@
 """Metal backend for the fixed matrix-vector benchmark on macOS.
 
-This backend mirrors the CUDA design:
-
-- Python handles orchestration, compilation, and result parsing
-- the Metal executable handles loading the dataset once and sweeping multiple
-  kernel configurations in memory
-
-That split keeps the expensive dataset I/O out of the tuning loop and makes the
-top-level benchmark code stay hardware-agnostic.
+Python owns probing, compilation, and result parsing while the Objective-C++
+runner loads the dataset once and executes Apple's official
+MetalPerformanceShaders GEMV path.
 """
 
 from __future__ import annotations
@@ -17,14 +12,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+from app.compute_resource_policy import resolve_metal_headroom_policy
 from compute_node.compute_methods.gemv import (
-    METAL_AIR_PATH,
     METAL_BUILD_DIR,
-    METAL_DIR,
     METAL_EXECUTABLE_PATH,
     METAL_HOST_SOURCE_PATH,
-    METAL_KERNEL_SOURCE_PATH,
-    METAL_LIBRARY_PATH,
 )
 from compute_node.performance_metrics.gemv.models import (
     DEFAULT_AUTOTUNE_REPEATS,
@@ -59,13 +51,13 @@ def _relative_cli_path(path: Path) -> str:
 
 
 def _candidate_block_sizes() -> list[int]:
-    """Return the Metal threadgroup sizes to sweep."""
+    """Return legacy compatibility hints accepted by the runner CLI."""
 
     return [32, 64, 128, 256, 512, 1024]
 
 
 def _candidate_tile_sizes() -> list[int]:
-    """Return the unroll factors supported by the Metal kernel."""
+    """Return legacy compatibility hints accepted by the runner CLI."""
 
     return [1, 2, 4, 8, 16]
 
@@ -89,22 +81,13 @@ def _find_xcrun_tool(tool_name: str) -> str | None:
         ["xcrun", "--find", tool_name],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if completed.returncode != 0:
         return None
     resolved = completed.stdout.strip()
     return resolved or None
-
-
-def _sources_are_stale(outputs: list[Path], sources: list[Path]) -> bool:
-    """Return whether any output is missing or older than any source."""
-
-    if any(not output.exists() for output in outputs):
-        return True
-
-    newest_source = max(source.stat().st_mtime for source in sources)
-    oldest_output = min(output.stat().st_mtime for output in outputs)
-    return oldest_output < newest_source
 
 
 def _binary_is_stale(binary_path: Path, inputs: list[Path]) -> bool:
@@ -125,6 +108,19 @@ class MetalBackend:
 
     name = "metal"
 
+    def diagnostic_context(self, _spec: BenchmarkSpec | None = None) -> dict[str, object]:
+        """Return structured tuning context for status logging."""
+
+        return {
+            "implementation": "mps_matrix_vector_multiplication",
+            "block_size_candidates": _candidate_block_sizes(),
+            "tile_size_candidates": _candidate_tile_sizes(),
+            "headroom_fraction": resolve_metal_headroom_policy(2).headroom_fraction,
+            "autotune_repeats": DEFAULT_AUTOTUNE_REPEATS,
+            "measurement_repeats": DEFAULT_MEASUREMENT_REPEATS,
+            "runner_path": str(METAL_EXECUTABLE_PATH),
+        }
+
     def probe(self) -> tuple[bool, str]:
         """Check whether the current machine looks Metal-capable."""
 
@@ -132,10 +128,8 @@ class MetalBackend:
             return False, "Metal backend is only available on macOS."
         if not METAL_HOST_SOURCE_PATH.exists():
             return False, f"missing Metal host runner source at {_relative_project_path(METAL_HOST_SOURCE_PATH)}"
-        if not METAL_KERNEL_SOURCE_PATH.exists():
-            return False, f"missing Metal kernel source at {_relative_project_path(METAL_KERNEL_SOURCE_PATH)}"
 
-        build_inputs = [METAL_HOST_SOURCE_PATH, METAL_KERNEL_SOURCE_PATH, Path(__file__)]
+        build_inputs = [METAL_HOST_SOURCE_PATH, Path(__file__)]
         toolchain_available, toolchain_message = self._toolchain_status()
 
         if METAL_EXECUTABLE_PATH.exists():
@@ -158,15 +152,16 @@ class MetalBackend:
                 True,
                 f"Metal backend available. Existing self-contained runner at "
                 f"{_relative_project_path(METAL_EXECUTABLE_PATH)} is older than the source or build recipe, so "
-                f"{_relative_project_path(METAL_HOST_SOURCE_PATH)} will be rebuilt with an embedded metallib.",
+                f"{_relative_project_path(METAL_HOST_SOURCE_PATH)} will be rebuilt against "
+                "MetalPerformanceShaders.",
             )
 
         if not toolchain_available:
             return False, toolchain_message
         return (
             True,
-            "Metal toolchain detected via xcrun; binary is missing, so a self-contained Metal runner with an "
-            "embedded metallib will be compiled.",
+            "Metal toolchain detected via xcrun; binary is missing, so a self-contained Metal runner backed by "
+            "MetalPerformanceShaders will be compiled.",
         )
 
     def run(
@@ -236,11 +231,19 @@ class MetalBackend:
             1 if (measurement_spec != spec or measurement_dataset != dataset)
             else _measurement_repeats(spec)
         )
+        autotune_headroom_policy = resolve_metal_headroom_policy(spec.rows)
+        measurement_headroom_policy = resolve_metal_headroom_policy(measurement_spec.rows)
 
-        notes.append(f"block size search order: {block_sizes}")
-        notes.append(f"tile size search order: {tile_sizes}")
-        notes.append(f"autotune_repeats_per_config: {autotune_repeats}")
-        notes.append(f"measurement_repeats_for_best_config: {final_measurement_repeats}")
+        notes.append("implementation: official Apple MPSMatrixVectorMultiplication")
+        notes.append(
+            "launch-shape autotune hints are accepted for interface compatibility but ignored by "
+            "MPSMatrixVectorMultiplication"
+        )
+        notes.append(f"shared_headroom_fraction: {measurement_headroom_policy.headroom_fraction:.3f}")
+        notes.append(f"translated_autotune_row_chunk_size: {autotune_headroom_policy.work_chunk_size}")
+        notes.append(f"translated_measurement_row_chunk_size: {measurement_headroom_policy.work_chunk_size}")
+        notes.append(f"autotune_repeats_per_run: {autotune_repeats}")
+        notes.append(f"measurement_repeats_for_best_run: {final_measurement_repeats}")
 
         try:
             autotune_metrics = self._run_runner(
@@ -249,16 +252,16 @@ class MetalBackend:
                 dataset,
                 block_sizes=block_sizes,
                 tile_sizes=tile_sizes,
+                headroom_fraction=autotune_headroom_policy.headroom_fraction,
+                row_chunk_size=autotune_headroom_policy.work_chunk_size,
                 autotune_repeats=autotune_repeats,
                 measurement_repeats=1,
                 timeout_seconds=max(time_budget_seconds, 30.0),
             )
-            selected_config = {
-                "block_size": int(autotune_metrics["block_size"]),
-                "tile_size": int(autotune_metrics["tile_size"]),
-                "autotune_repeats": int(autotune_metrics["autotune_repeats"]),
-                "measurement_repeats": final_measurement_repeats,
-            }
+            selected_config = self._selected_config(
+                autotune_metrics,
+                measurement_repeats=final_measurement_repeats,
+            )
             if callable(phase_callback):
                 phase_callback("final_measurement", selected_config)
         except subprocess.TimeoutExpired:
@@ -291,8 +294,10 @@ class MetalBackend:
                 executable_path,
                 measurement_spec,
                 measurement_dataset,
-                block_sizes=[int(autotune_metrics["block_size"])],
-                tile_sizes=[int(autotune_metrics["tile_size"])],
+                block_sizes=block_sizes,
+                tile_sizes=tile_sizes,
+                headroom_fraction=measurement_headroom_policy.headroom_fraction,
+                row_chunk_size=measurement_headroom_policy.work_chunk_size,
                 autotune_repeats=1,
                 measurement_repeats=final_measurement_repeats,
                 timeout_seconds=max(time_budget_seconds, 30.0),
@@ -335,23 +340,23 @@ class MetalBackend:
             zero_score_seconds=measurement_spec.zero_score_seconds,
         )
 
-        autotune_config = {
-            "block_size": int(autotune_metrics["block_size"]),
-            "tile_size": int(autotune_metrics["tile_size"]),
-            "autotune_repeats": int(autotune_metrics["autotune_repeats"]),
-            "measurement_repeats": int(autotune_metrics["measurement_repeats"]),
-            "trials_run": int(autotune_metrics["trials_run"]),
-        }
-        config = {
-            "block_size": int(metrics["block_size"]),
-            "tile_size": int(metrics["tile_size"]),
-            "autotune_repeats": int(autotune_metrics["autotune_repeats"]),
-            "measurement_repeats": int(metrics["measurement_repeats"]),
-            "trials_run": int(autotune_metrics["trials_run"]),
-        }
+        autotune_config = self._selected_config(
+            autotune_metrics,
+            measurement_repeats=int(autotune_metrics["measurement_repeats"]),
+            autotune_repeats=int(autotune_metrics["autotune_repeats"]),
+            trials_run=int(autotune_metrics["trials_run"]),
+        )
+        config = self._selected_config(
+            metrics,
+            measurement_repeats=int(metrics["measurement_repeats"]),
+            autotune_repeats=int(autotune_metrics["autotune_repeats"]),
+            trials_run=int(autotune_metrics["trials_run"]),
+        )
         trial_notes: list[str] = []
         if "device_name" in metrics:
             trial_notes.append(f"device={metrics['device_name']}")
+        if "implementation" in metrics:
+            trial_notes.append(f"implementation={metrics['implementation']}")
         if "thread_execution_width" in metrics:
             trial_notes.append(f"thread_execution_width={metrics['thread_execution_width']}")
         if "max_total_threads_per_threadgroup" in metrics:
@@ -393,6 +398,8 @@ class MetalBackend:
         *,
         block_sizes: list[int],
         tile_sizes: list[int],
+        headroom_fraction: float,
+        row_chunk_size: int,
         autotune_repeats: int,
         measurement_repeats: int,
         timeout_seconds: float,
@@ -426,6 +433,10 @@ class MetalBackend:
             ",".join(str(value) for value in block_sizes),
             "--tile-sizes",
             ",".join(str(value) for value in tile_sizes),
+            "--headroom-fraction",
+            f"{headroom_fraction:.6f}",
+            "--row-chunk-size",
+            str(row_chunk_size),
             "--autotune-repeats",
             str(autotune_repeats),
             "--measurement-repeats",
@@ -436,6 +447,8 @@ class MetalBackend:
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout_seconds,
             cwd=ROOT_DIR,
         )
@@ -445,7 +458,7 @@ class MetalBackend:
         """Build the self-contained Metal runner when sources changed."""
 
         METAL_BUILD_DIR.mkdir(parents=True, exist_ok=True)
-        build_inputs = [METAL_HOST_SOURCE_PATH, METAL_KERNEL_SOURCE_PATH, Path(__file__)]
+        build_inputs = [METAL_HOST_SOURCE_PATH, Path(__file__)]
         if not force_rebuild and METAL_EXECUTABLE_PATH.exists() and not _binary_is_stale(METAL_EXECUTABLE_PATH, build_inputs):
             return (
                 METAL_EXECUTABLE_PATH,
@@ -468,37 +481,6 @@ class MetalBackend:
                 "xcrun",
                 "--sdk",
                 "macosx",
-                "metal",
-                "-c",
-                "../gemv_metal_kernels.metal",
-                "-o",
-                "gemv_metal_kernels.air",
-            ],
-            cwd=METAL_BUILD_DIR,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        subprocess.run(
-            [
-                "xcrun",
-                "--sdk",
-                "macosx",
-                "metallib",
-                "gemv_metal_kernels.air",
-                "-o",
-                "gemv_metal_kernels.metallib",
-            ],
-            cwd=METAL_BUILD_DIR,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        subprocess.run(
-            [
-                "xcrun",
-                "--sdk",
-                "macosx",
                 "clang++",
                 "../gemv_metal_runner.mm",
                 "-std=c++20",
@@ -508,7 +490,8 @@ class MetalBackend:
                 "Foundation",
                 "-framework",
                 "Metal",
-                "-Wl,-sectcreate,__DATA,__metallib,gemv_metal_kernels.metallib",
+                "-framework",
+                "MetalPerformanceShaders",
                 "-o",
                 "gemv_metal_runner",
             ],
@@ -516,11 +499,13 @@ class MetalBackend:
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         return (
             METAL_EXECUTABLE_PATH,
-            f"compiled self-contained Metal runner from {_relative_project_path(METAL_HOST_SOURCE_PATH)} and "
-            f"{_relative_project_path(METAL_KERNEL_SOURCE_PATH)} with an embedded metallib"
+            f"compiled self-contained Metal runner from {_relative_project_path(METAL_HOST_SOURCE_PATH)} "
+            "against MetalPerformanceShaders"
             + (" because rebuild was explicitly requested" if force_rebuild else ""),
         )
 
@@ -528,7 +513,7 @@ class MetalBackend:
         """Report whether the local Metal compiler toolchain is available."""
 
         missing_tools: list[str] = []
-        for tool_name in ("metal", "metallib", "clang++"):
+        for tool_name in ("clang++",):
             if _find_xcrun_tool(tool_name) is None:
                 missing_tools.append(tool_name)
         if missing_tools:
@@ -542,12 +527,11 @@ class MetalBackend:
             ["otool", "-L", str(executable_path)],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         if completed.returncode != 0:
-            return (
-                "self-contained Metal runner embeds its metallib and no longer needs a sidecar kernel file at "
-                "runtime."
-            )
+            return "self-contained Metal runner relies only on Apple system frameworks at runtime."
 
         dynamic_libraries: list[str] = []
         for line in completed.stdout.splitlines()[1:]:
@@ -558,9 +542,36 @@ class MetalBackend:
             dynamic_libraries.append(Path(library_path).name or library_path)
 
         if not dynamic_libraries:
-            return "self-contained Metal runner embeds its metallib and reported no explicit framework dependencies."
+            return "self-contained Metal runner reported no explicit framework dependencies."
 
         return (
-            "self-contained Metal runner embeds its metallib and depends only on macOS system frameworks: "
+            "self-contained Metal runner depends only on macOS system frameworks: "
             + ", ".join(dynamic_libraries)
         )
+
+    def _selected_config(
+        self,
+        metrics: dict[str, object],
+        *,
+        measurement_repeats: int,
+        autotune_repeats: int | None = None,
+        trials_run: int | None = None,
+    ) -> dict[str, object]:
+        """Normalize one selected-config record for reporting and reuse."""
+
+        config: dict[str, object] = {}
+        for key in ("implementation", "block_size", "tile_size", "headroom_fraction", "row_chunk_size"):
+            if key in metrics:
+                config[key] = metrics[key]
+        config["autotune_repeats"] = (
+            int(autotune_repeats)
+            if autotune_repeats is not None
+            else int(metrics.get("autotune_repeats", 1))
+        )
+        config["measurement_repeats"] = int(measurement_repeats)
+        config["trials_run"] = (
+            int(trials_run)
+            if trials_run is not None
+            else int(metrics.get("trials_run", 1))
+        )
+        return config

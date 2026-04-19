@@ -10,7 +10,40 @@ from __future__ import annotations
 import array
 from pathlib import Path
 
+from app.constants import CONV2D_STATS_MAX_SAMPLES
 from wire.internal_protocol.runtime_transport import TaskResult
+
+
+def summarize_conv2d_output_file(
+    path: Path,
+    *,
+    max_samples: int = CONV2D_STATS_MAX_SAMPLES,
+) -> tuple[int, float, float, tuple[float, ...]]:
+    """Scan a merged float32 conv2d output file and return count, sum, sum of squares, and leading samples.
+
+    File layout matches ``collect_conv2d_result_to_file`` (little-endian float32, row-major flattened).
+    """
+    size = path.stat().st_size
+    if size % 4 != 0:
+        raise ValueError(f"conv2d output file size is not a multiple of 4: {size}")
+    element_count = size // 4
+    sum_v = 0.0
+    sum_sq = 0.0
+    samples: list[float] = []
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(256 * 1024)
+            if not chunk:
+                break
+            values = array.array("f")
+            values.frombytes(chunk)
+            for x in values:
+                xf = float(x)
+                sum_v += xf
+                sum_sq += xf * xf
+                if len(samples) < max_samples:
+                    samples.append(xf)
+    return element_count, sum_v, sum_sq, tuple(samples)
 
 
 class ResultAggregator:

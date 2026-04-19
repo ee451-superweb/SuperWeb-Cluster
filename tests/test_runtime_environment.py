@@ -68,8 +68,9 @@ class RuntimeEnvironmentTests(unittest.TestCase):
         run_mock.assert_called_once()
         command = run_mock.call_args.args[0]
         self.assertEqual(Path(command[0]), Path("C:/repo/.venv/Scripts/python.exe"))
-        self.assertEqual(Path(command[1]), Path("C:/repo/compute_node/input_matrix/generate.py"))
-        self.assertEqual(command[2:], ["--method", "all"])
+        self.assertEqual(command[1:3], ["-X", "utf8"])
+        self.assertEqual(Path(command[3]), Path("C:/repo/compute_node/input_matrix/generate.py"))
+        self.assertEqual(command[4:], ["--method", "all"])
         self.assertEqual(run_mock.call_args.kwargs, {"check": False, "cwd": Path("C:/repo")})
 
 

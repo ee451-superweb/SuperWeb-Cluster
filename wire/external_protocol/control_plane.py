@@ -60,6 +60,8 @@ class Conv2dRequestPayload:
     kernel_size: int = 0
     padding: int = 0
     stride: int = 1
+    # Conv2dClientResponseMode: 0 = full output artifact, 1 = stats-only (see proto).
+    client_response_mode: int = 0
 
 
 @dataclass(slots=True)
@@ -77,6 +79,10 @@ class Conv2dResponsePayload:
     output_length: int = 0
     output_vector: bytes = b""
     result_artifact_id: str = ""
+    stats_element_count: int = 0
+    stats_sum: float = 0.0
+    stats_sum_squares: float = 0.0
+    stats_samples: tuple[float, ...] = ()
 
 
 @dataclass(slots=True)
@@ -101,6 +107,7 @@ class ClientRequest:
     kernel_size: InitVar[int] = 0
     padding: InitVar[int] = 0
     stride: InitVar[int] = 1
+    conv2d_client_response_mode: InitVar[int] = 0
 
     def __post_init__(
         self,
@@ -113,6 +120,7 @@ class ClientRequest:
         kernel_size: int,
         padding: int,
         stride: int,
+        conv2d_client_response_mode: int,
     ) -> None:
         """Normalize legacy initvars into the typed client request payload."""
         vector_length = initvar_or_default(vector_length, 0)
@@ -124,6 +132,7 @@ class ClientRequest:
         kernel_size = initvar_or_default(kernel_size, 0)
         padding = initvar_or_default(padding, 0)
         stride = initvar_or_default(stride, 1)
+        conv2d_client_response_mode = initvar_or_default(conv2d_client_response_mode, 0)
         if self.request_payload is None:
             if self.method == METHOD_CONV2D or any(
                 value for value in (tensor_h, tensor_w, channels_in, channels_out, kernel_size, padding)
@@ -136,6 +145,7 @@ class ClientRequest:
                     kernel_size=kernel_size,
                     padding=padding,
                     stride=stride,
+                    client_response_mode=conv2d_client_response_mode,
                 )
             else:
                 self.request_payload = GemvRequestPayload(
@@ -235,6 +245,27 @@ class ClientRequestOk:
 
 
 @dataclass(slots=True)
+class WorkerTiming:
+    """Per-worker timing breakdown observed by the main node."""
+
+    node_id: str
+    task_id: str
+    slice: str
+    wall_ms: int
+    artifact_fetch_ms: int = 0
+
+
+@dataclass(slots=True)
+class ResponseTiming:
+    """Stage-by-stage timing breakdown for one client response."""
+
+    dispatch_ms: int = 0
+    task_window_ms: int = 0
+    aggregate_ms: int = 0
+    workers: tuple[WorkerTiming, ...] = ()
+
+
+@dataclass(slots=True)
 class ClientResponse:
     """Main-node response sent back to a client with a typed method payload."""
 
@@ -254,6 +285,7 @@ class ClientResponse:
     elapsed_ms: int = 0
     response_payload: GemvResponsePayload | Conv2dResponsePayload | None = None
     result_artifact: ArtifactDescriptor | None = None
+    timing: ResponseTiming | None = None
     output_length: InitVar[int] = 0
     output_vector: InitVar[bytes] = b""
     result_artifact_id: InitVar[str] = ""

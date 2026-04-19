@@ -219,26 +219,22 @@ __marimo__/
 /compute_node/performance_metrics/result_status.json
 /compute_node/performance_metrics/result_trace.jsonl
 /compute_node/performance_metrics/*/result.json
+/compute_node/performance_metrics/fixed_matrix_vector_multiplication/
+/compute_node/artifacts/
 /compute_node/input_matrix/*/generated/
 /compute_node/compute_methods/**/dataset/generated/
 /compute_node/compute_methods/**/performance_metrics/result.json
 /compute_node/compute_methods/**/artifacts/
 
-# Local build artifacts from compute methods
-!/compute_node/compute_methods/**/build/
-/compute_node/compute_methods/**/build/*
+# Local build artifacts under compute_node: ignore everything by default, then
+# explicitly allow checked-in build scripts and runner executables only.
+!/compute_node/**/build/
+/compute_node/**/build/*
 !/compute_node/compute_methods/**/build/*.cmd
-# Git cannot enforce file size limits here, so we explicitly whitelist only the
-# runner binaries that are currently verified to stay below 4 MB.
-!/compute_node/compute_methods/gemv/cpu/macos/build/gemv_cpu_macos
-!/compute_node/compute_methods/gemv/cpu/windows/build/gemv_cpu_windows.exe
-!/compute_node/compute_methods/gemv/cuda/build/gemv_cuda_runner.exe
-!/compute_node/compute_methods/gemv/metal/build/gemv_metal_runner
-!/compute_node/compute_methods/conv2d/cpu/macos/build/conv2d_cpu_macos
-!/compute_node/compute_methods/conv2d/cpu/windows/build/conv2d_cpu_windows.exe
-!/compute_node/compute_methods/conv2d/cuda/build/conv2d_cuda_runner.exe
-!/compute_node/compute_methods/conv2d/dx12/build/conv2d_dx12_runner.exe
-!/compute_node/compute_methods/conv2d/metal/build/conv2d_metal_runner
+!/compute_node/compute_methods/**/build/*_cpu_macos
+!/compute_node/compute_methods/**/build/*_cpu_windows.exe
+!/compute_node/compute_methods/**/build/*_runner
+!/compute_node/compute_methods/**/build/*_runner.exe
 /compute_node/compute_methods/**/*.obj
 /compute_node/compute_methods/**/*.o
 /compute_node/compute_methods/**/*.a

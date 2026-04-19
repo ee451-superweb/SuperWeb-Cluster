@@ -225,6 +225,7 @@ def _to_pb_conv2d_request_payload(payload) -> runtime_pb2.Conv2dRequestPayload:
         kernel_size=payload.kernel_size,
         padding=payload.padding,
         stride=payload.stride,
+        client_response_mode=payload.client_response_mode,
     )
 
 
@@ -243,6 +244,7 @@ def _from_pb_conv2d_request_payload(payload: runtime_pb2.Conv2dRequestPayload):
         kernel_size=payload.kernel_size,
         padding=payload.padding,
         stride=payload.stride,
+        client_response_mode=payload.client_response_mode,
     )
 
 
@@ -281,6 +283,10 @@ def _to_pb_conv2d_response_payload(payload) -> runtime_pb2.Conv2dResponsePayload
         output_length=payload.output_length,
         output_vector=payload.output_vector,
         result_artifact_id=payload.result_artifact_id,
+        stats_element_count=payload.stats_element_count,
+        stats_sum=payload.stats_sum,
+        stats_sum_squares=payload.stats_sum_squares,
+        stats_samples=list(payload.stats_samples),
     )
 
 
@@ -295,6 +301,55 @@ def _from_pb_conv2d_response_payload(payload: runtime_pb2.Conv2dResponsePayload)
         output_length=payload.output_length,
         output_vector=payload.output_vector,
         result_artifact_id=payload.result_artifact_id,
+        stats_element_count=payload.stats_element_count,
+        stats_sum=payload.stats_sum,
+        stats_sum_squares=payload.stats_sum_squares,
+        stats_samples=tuple(payload.stats_samples),
+    )
+
+
+def _to_pb_worker_timing(payload) -> runtime_pb2.WorkerTiming:
+    """Encode one per-worker timing entry into protobuf form."""
+    return runtime_pb2.WorkerTiming(
+        node_id=payload.node_id,
+        task_id=payload.task_id,
+        slice=payload.slice,
+        wall_ms=payload.wall_ms,
+        artifact_fetch_ms=payload.artifact_fetch_ms,
+    )
+
+
+def _from_pb_worker_timing(payload: runtime_pb2.WorkerTiming):
+    """Decode one per-worker timing entry from protobuf form."""
+    runtime = _runtime()
+    return runtime.WorkerTiming(
+        node_id=payload.node_id,
+        task_id=payload.task_id,
+        slice=payload.slice,
+        wall_ms=payload.wall_ms,
+        artifact_fetch_ms=payload.artifact_fetch_ms,
+    )
+
+
+def _to_pb_response_timing(payload) -> runtime_pb2.ResponseTiming:
+    """Encode the response-level timing breakdown into protobuf form."""
+    encoded = runtime_pb2.ResponseTiming(
+        dispatch_ms=payload.dispatch_ms,
+        task_window_ms=payload.task_window_ms,
+        aggregate_ms=payload.aggregate_ms,
+    )
+    encoded.workers.extend(_to_pb_worker_timing(worker) for worker in payload.workers)
+    return encoded
+
+
+def _from_pb_response_timing(payload: runtime_pb2.ResponseTiming):
+    """Decode the response-level timing breakdown from protobuf form."""
+    runtime = _runtime()
+    return runtime.ResponseTiming(
+        dispatch_ms=payload.dispatch_ms,
+        task_window_ms=payload.task_window_ms,
+        aggregate_ms=payload.aggregate_ms,
+        workers=tuple(_from_pb_worker_timing(worker) for worker in payload.workers),
     )
 
 
@@ -550,6 +605,10 @@ def encode_envelope(message) -> bytes:
             envelope.client_response.result_artifact.CopyFrom(
                 _to_pb_artifact_descriptor(message.client_response.result_artifact)
             )
+        if message.client_response.timing is not None:
+            envelope.client_response.timing.CopyFrom(
+                _to_pb_response_timing(message.client_response.timing)
+            )
     elif message.kind == runtime.MessageKind.TASK_ASSIGN:
         if message.task_assign is None:
             raise ValueError("TASK_ASSIGN envelope missing payload")
@@ -767,6 +826,11 @@ def parse_envelope(payload: bytes):
             result_artifact=(
                 _from_pb_artifact_descriptor(envelope_pb.client_response.result_artifact)
                 if envelope_pb.client_response.HasField("result_artifact")
+                else None
+            ),
+            timing=(
+                _from_pb_response_timing(envelope_pb.client_response.timing)
+                if envelope_pb.client_response.HasField("timing")
                 else None
             ),
         )

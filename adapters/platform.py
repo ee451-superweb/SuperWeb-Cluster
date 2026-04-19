@@ -91,7 +91,7 @@ def relaunch_as_admin(argv: list[str] | None = None) -> bool:
     # ShellExecuteW with the "runas" verb is the standard Windows elevation
     # hook for reopening the same Python entry point as administrator.
     argv = list(sys.argv if argv is None else argv)
-    params = subprocess.list2cmdline(argv[1:])
+    params = subprocess.list2cmdline(["-X", "utf8", *argv[1:]])
 
     try:
         result = ctypes.windll.shell32.ShellExecuteW(
