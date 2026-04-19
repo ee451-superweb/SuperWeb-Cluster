@@ -452,6 +452,8 @@ class CpuBackend:
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout_seconds,
             cwd=ROOT_DIR,
         )
@@ -554,7 +556,7 @@ class CpuBackend:
         compile_script_path.write_text(
             "\n".join(["@echo off", *_windows_vsdevcmd_setup_lines(), "pushd \"%~dp0\"", f"cl /nologo /std:c++20 /O2 /fp:fast /MT /EHsc /Fe:{artifacts.executable_path.name} ..\\{artifacts.source_path.name}", "set \"BUILD_EXIT=%ERRORLEVEL%\"", "popd", "exit /b %BUILD_EXIT%"]) + "\n", encoding="ascii"
         )
-        subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", f"& '{compile_script_path}'"], capture_output=True, text=True, check=True)
+        subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", f"& '{compile_script_path}'"], capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
 
     def _compile_macos_runner(self, artifacts: CpuArtifacts) -> None:
         """Build the macOS CPU runner with the detected C++ compiler.
@@ -586,6 +588,8 @@ class CpuBackend:
             cwd=artifacts.build_dir,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=True,
         )
 
@@ -621,6 +625,8 @@ class CpuBackend:
             ["otool", "-L", str(executable_path)],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         if completed.returncode != 0:
             return "macOS CPU linkage inspection failed; full static linkage is not expected on Apple toolchains."
@@ -676,6 +682,8 @@ class CpuBackend:
                 ],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
             )
             if completed.returncode == 0:
                 resolved = completed.stdout.strip().splitlines()

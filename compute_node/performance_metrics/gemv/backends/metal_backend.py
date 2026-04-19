@@ -81,6 +81,8 @@ def _find_xcrun_tool(tool_name: str) -> str | None:
         ["xcrun", "--find", tool_name],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if completed.returncode != 0:
         return None
@@ -445,6 +447,8 @@ class MetalBackend:
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout_seconds,
             cwd=ROOT_DIR,
         )
@@ -495,6 +499,8 @@ class MetalBackend:
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         return (
             METAL_EXECUTABLE_PATH,
@@ -521,6 +527,8 @@ class MetalBackend:
             ["otool", "-L", str(executable_path)],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         if completed.returncode != 0:
             return "self-contained Metal runner relies only on Apple system frameworks at runtime."

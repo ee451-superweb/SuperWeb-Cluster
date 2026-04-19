@@ -90,6 +90,8 @@ class BootstrapTests(unittest.TestCase):
             run_mock.call_args_list[1].args[0],
             [
                 str(Path("C:/venv/python.exe")),
+                "-X",
+                "utf8",
                 str(bootstrap.PROJECT_ROOT / "bootstrap.py"),
                 "--elevate-if-needed",
             ],
@@ -145,6 +147,8 @@ class BootstrapTests(unittest.TestCase):
             run_mock.call_args.args[0],
             [
                 str(Path("C:/venv/python.exe")),
+                "-X",
+                "utf8",
                 str(bootstrap.PROJECT_ROOT / "bootstrap.py"),
                 "--role",
                 "discover",
@@ -227,9 +231,9 @@ class BootstrapTests(unittest.TestCase):
         self.assertTrue(ready)
         dataset_run_mock.assert_called_once()
         benchmark_run_mock.assert_called_once()
-        self.assertEqual(dataset_run_mock.call_args.args[0][1], str(dataset_script_path))
+        self.assertEqual(dataset_run_mock.call_args.args[0][3], str(dataset_script_path))
         self.assertEqual(dataset_run_mock.call_args.args[0][-1], "--force")
-        self.assertEqual(benchmark_run_mock.call_args.args[0][1], str(benchmark_script_path))
+        self.assertEqual(benchmark_run_mock.call_args.args[0][3], str(benchmark_script_path))
         self.assertNotIn("--rebuild", benchmark_run_mock.call_args.args[0])
         validate_mock.assert_called_once_with(logger, result_path)
 
@@ -265,7 +269,7 @@ class BootstrapTests(unittest.TestCase):
         self.assertTrue(ready)
         dataset_run_mock.assert_not_called()
         run_mock.assert_called_once()
-        self.assertEqual(run_mock.call_args.args[0][1], str(benchmark_script_path))
+        self.assertEqual(run_mock.call_args.args[0][3], str(benchmark_script_path))
         self.assertIn("--rebuild", run_mock.call_args.args[0])
         validate_mock.assert_called_once_with(logger, result_path)
 

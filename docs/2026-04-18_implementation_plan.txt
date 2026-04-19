@@ -1,0 +1,98 @@
+SuperWeb-Cluster 诊断 timing 字段实施计划
+时间戳: 2026-04-18
+关联工作: ClientResponse 增加分段 timing 诊断
+背景文档: 无前置 doc；起源于一次对话，user 想在 client response 里塞入分阶段耗时
+
+================================================================
+Phase 1（本次实现，文件级 PR 单独提交）
+================================================================
+
+目标:
+  让 client 收到的 ClientResponse 不只有一个总 elapsed_ms，而是分段的：
+  dispatch / task_window / aggregate 三段 + per-worker wall_ms / artifact_fetch_ms。
+  全部由 main-node 侧测量，无需 worker 上报，无需修改 TASK_RESULT 协议。
+
+新增 proto 消息（superweb_cluster_runtime.proto）:
+  - WorkerTiming { node_id, task_id, slice, wall_ms, artifact_fetch_ms }
+  - ResponseTiming { dispatch_ms, task_window_ms, aggregate_ms, repeated WorkerTiming workers }
+  - ClientResponse 增加字段 ResponseTiming timing = 18
+
+测点（main_node/request_handler.py:build_client_response_for_request）:
+  T0 = started_at
+  T1 = assignments 算完 → dispatch_ms = T1 - T0
+  T2 = ThreadPoolExecutor.map() 进入前
+  T3 = ThreadPoolExecutor.map() 返回后 → task_window_ms = T3 - T2
+  T4 = aggregator + artifact publish 完成 → aggregate_ms = T4 - T3
+
+测点（main_node/task_exchange.py:run_worker_task_slice）:
+  worker_t0 = 进入函数
+  worker_t_result = TASK_RESULT 收到那一刻
+  worker_t_artifact_done = artifact fetch 完成（如果走 artifact）
+  wall_ms = worker_t_result - worker_t0
+  artifact_fetch_ms = worker_t_artifact_done - worker_t_result（无 artifact 时为 0）
+
+返回值变化:
+  run_worker_task_slice 返回 (TaskResult, WorkerTiming) 元组。
+  request_handler 解构后照旧把 task_results 喂给 aggregator，
+  WorkerTiming 列表用于组装 ResponseTiming。
+
+兼容性:
+  - proto 字段是 additive，旧 client 解码后忽略 timing 字段不影响。
+  - 现有所有 build_client_response 调用点不传 timing 时默认 None，向后兼容。
+  - 测试更新：mock run_worker_task_slice 的地方需要返回 tuple。
+
+不在 Phase 1 范围:
+  - worker 自报 compute_duration_ms（见 Phase 2）
+  - 区分 network RTT vs 排队等待
+  - per-iteration timing breakdown
+
+================================================================
+Phase 2（推荐与 control plane / data plane 分层 refactor 一起做）
+================================================================
+
+目标:
+  让 wall_ms 能被进一步拆成 compute_ms + transport_ms。
+  TA / 调试者能直接看出 straggler 是算力慢还是网络慢。
+
+protobuf 改动（superweb_cluster_runtime.proto）:
+  - TaskResult 增加字段 uint64 compute_duration_ms = N
+    含义：worker 端从 TASK_ACCEPT 发出到 TASK_RESULT 构造前的纯计算窗口
+  - WorkerTiming 增加字段 uint64 compute_ms（从 TaskResult.compute_duration_ms 透传）
+  - 新增 derived 字段 transport_ms = wall_ms - compute_ms - artifact_fetch_ms
+    （由 main_node 计算，不通过 wire 传，保持 transport_ms 是衍生量而不是独立字段）
+
+worker 侧改动:
+  - compute_node/task_executor.py: 在调用 compute method 前后包 time.monotonic()，
+    把毫秒数填到新建的 TASK_RESULT 字段里。
+  - 注意 iteration_count > 1 时 compute_duration_ms 表示总和，不是单次平均。
+    需要在字段注释里写清楚。
+  - GEMV / Conv2D 两个 executor 都要改，但只在外层包计时，kernel 代码不动。
+
+main_node 改动:
+  - run_worker_task_slice 把 task_result.compute_duration_ms 透传给 WorkerTiming.compute_ms。
+  - 不需要改 aggregator。
+
+测试:
+  - tests/test_runtime_protocol.py 增 round-trip 测试 compute_duration_ms。
+  - tests/test_main_node_runtime.py 验证 WorkerTiming.compute_ms 被正确填入。
+  - tests/test_compute_node_runtime.py 验证 worker 在 TASK_RESULT 里写入 compute_duration_ms 非零。
+
+风险点:
+  - protobuf 字段编号必须避开已有；查 superweb_cluster_runtime.proto 当前最大字段号后 +1。
+  - worker 老 binary 不会写新字段；main_node 必须把 default 0 当作 "未上报" 处理，
+    不要在 ResponseTiming 里报 transport_ms = wall - 0 = wall（会把 wall 全部归类为 transport，误导）。
+    解决方案：给 WorkerTiming 加 bool compute_reported；compute_ms == 0 也可能是合法极小值。
+
+时机:
+  - 在 control plane / data plane 分层 refactor 时一起做。
+    分层 refactor 已经会触碰 wire/internal_protocol/ 下所有 proto 与 codec，
+    复用同一轮 schema bump 比独立 PR 经济。
+
+================================================================
+后续可选（Phase 3，仅作记录，不承诺实现）
+================================================================
+
+- 把 ResponseTiming 写入 audit_log 一行 JSON，便于离线分析批量请求的 P50/P99。
+- 给 client CLI 加 --show-timing 开关，把 ResponseTiming 渲染成人读的表格。
+- 引入 OpenTelemetry span 替代手写 time.monotonic() 测点；当 worker / main 节点数 > 10 时
+  人工 timing 已经不够用。

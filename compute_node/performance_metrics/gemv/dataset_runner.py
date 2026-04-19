@@ -9,6 +9,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from adapters.process import python_utf8_command
 from setup import active_python_path
 from compute_node.performance_metrics.benchmark_status import emit_status
 from compute_node.input_matrix.gemv import (
@@ -88,8 +89,8 @@ def generate_dataset_if_missing(
     if has_small and has_mid and has_large:
         return False
 
-    command = [
-        str(active_python_path()),
+    command = python_utf8_command(
+        active_python_path(),
         to_relative_cli_path(generate_script_path, start=root_dir),
         "--output-dir",
         to_relative_cli_path(dataset_dir, start=root_dir),
@@ -97,7 +98,7 @@ def generate_dataset_if_missing(
         str(small_rows),
         "--cols",
         str(small_cols),
-    ]
+    )
     if not generate_small_dataset:
         command.append("--skip-small")
     command.append("--skip-refresh")

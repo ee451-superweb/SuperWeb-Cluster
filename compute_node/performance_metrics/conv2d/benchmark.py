@@ -19,6 +19,10 @@ PROJECT_ROOT = ROOT_DIR.parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from adapters.process import enable_utf8_mode, python_utf8_command
+
+enable_utf8_mode()
+
 from app.constants import (
     DEFAULT_CONV2D_CUDA_COOLDOWN_MS,
     DEFAULT_CONV2D_CUDA_OUTPUT_CHANNEL_BATCH_SCALE,
@@ -171,11 +175,11 @@ def _generate_if_needed(
         return
 
     script = METHOD_GENERATE_SCRIPT_PATH
-    cmd = [
-        str(active_python_path()),
-        str(script),
+    cmd = python_utf8_command(
+        active_python_path(),
+        script,
         "--output-dir",
-        str(dataset_dir),
+        dataset_dir,
         "--role",
         role,
         "--h",
@@ -192,7 +196,7 @@ def _generate_if_needed(
         str(spec.pad),
         "--stride",
         str(spec.stride),
-    ]
+    )
     if not generate_small_dataset:
         cmd.append("--skip-small")
     cmd.append("--skip-refresh")

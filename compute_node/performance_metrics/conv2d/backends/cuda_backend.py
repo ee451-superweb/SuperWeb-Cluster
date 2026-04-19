@@ -149,6 +149,8 @@ def _detect_cuda_device_name() -> str | None:
         [nvidia_smi, "--query-gpu=name", "--format=csv,noheader"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if completed.returncode != 0:
         return None
@@ -170,6 +172,8 @@ def _detect_compute_capability() -> str | None:
         [nvidia_smi, "--query-gpu=compute_cap", "--format=csv,noheader"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if completed.returncode != 0:
         return None
@@ -189,7 +193,7 @@ def _detect_nvcc_supported_sms() -> set[str] | None:
     if shutil.which("nvcc") is None:
         return None
 
-    completed = subprocess.run(["nvcc", "--list-gpu-code"], capture_output=True, text=True)
+    completed = subprocess.run(["nvcc", "--list-gpu-code"], capture_output=True, text=True, encoding="utf-8", errors="replace")
     if completed.returncode != 0:
         return None
 
@@ -209,7 +213,7 @@ def _detect_nvcc_supported_compute_arches() -> set[str] | None:
     if shutil.which("nvcc") is None:
         return None
 
-    completed = subprocess.run(["nvcc", "--list-gpu-arch"], capture_output=True, text=True)
+    completed = subprocess.run(["nvcc", "--list-gpu-arch"], capture_output=True, text=True, encoding="utf-8", errors="replace")
     if completed.returncode != 0:
         return None
 
@@ -808,6 +812,8 @@ class CudaBackend:
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             cwd=CUDA_BUILD_DIR,
         )
         if completed.returncode != 0:
@@ -869,6 +875,8 @@ class CudaBackend:
             ["cmd", "/c", str(compile_script_path)],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             cwd=CUDA_BUILD_DIR,
         )
         if completed.returncode != 0:
@@ -907,6 +915,8 @@ class CudaBackend:
                 ],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
             )
             if completed.returncode == 0:
                 resolved = completed.stdout.strip().splitlines()

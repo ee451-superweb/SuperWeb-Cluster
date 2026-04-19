@@ -13,10 +13,12 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from contextlib import nullcontext
 from pathlib import Path
 
 from adapters.audit_log import write_audit_event
+from adapters.process import python_utf8_command
 from app.constants import (
     MAIN_NODE_NAME,
     RUNTIME_MSG_ARTIFACT_RELEASE,
@@ -36,6 +38,7 @@ from wire.internal_protocol.runtime_transport import (
     MessageKind,
     Conv2dTaskPayload,
     TransferMode,
+    WorkerTiming,
     build_artifact_release,
     build_task_assign,
     describe_message_kind,
@@ -102,15 +105,15 @@ class WorkerTaskExchange:
             return
 
         subprocess.run(
-            [
+            python_utf8_command(
                 sys.executable,
-                str(CONV2D_DATASET_GENERATE_SCRIPT_PATH),
+                CONV2D_DATASET_GENERATE_SCRIPT_PATH,
                 "--output-dir",
-                str(self.conv2d_dataset_dir),
+                self.conv2d_dataset_dir,
                 "--role",
                 "main",
                 "--include-large-weight",
-            ],
+            ),
             check=True,
             timeout=1800.0,
         )
@@ -345,8 +348,11 @@ class WorkerTaskExchange:
             assignment: One worker slice chosen by the dispatcher.
 
         Returns:
-            The normalized ``TaskResult`` reported by that worker slice.
+            A ``(TaskResult, WorkerTiming)`` tuple where the timing entry
+            captures the main-node observed wall time and any artifact fetch
+            duration.
         """
+        slice_started_at = time.monotonic()
         sock = assignment.connection.sock
         task_lock = self._resolve_connection_lock(
             getattr(assignment.connection, "task_lock", None),
@@ -465,6 +471,7 @@ class WorkerTaskExchange:
                         f"expected {RUNTIME_MSG_TASK_RESULT}, got {describe_message_kind(result_message.kind)}"
                     )
                 task_result = result_message.task_result
+                result_received_at = time.monotonic()
                 if (
                     task_result.request_id != request.request_id
                     or task_result.task_id != assignment.task_id
@@ -478,6 +485,7 @@ class WorkerTaskExchange:
                     stdout=True,
                     logger=self.logger,
                 )
+                artifact_fetch_started_at = result_received_at
                 if task_result.result_artifact is not None:
                     if self.artifact_manager is None:
                         raise RuntimeError("artifact manager is required to fetch large task results")
@@ -556,7 +564,24 @@ class WorkerTaskExchange:
                         f"output_length={task_result.output_length} inline_bytes={len(task_result.output_vector)}",
                         logger=self.logger,
                     )
-                return task_result
+                slice_finished_at = time.monotonic()
+                wall_ms = max(0, int((slice_finished_at - slice_started_at) * 1000))
+                artifact_fetch_ms = max(
+                    0, int((slice_finished_at - artifact_fetch_started_at) * 1000)
+                ) if task_result.result_artifact is not None else 0
+                slice_label = (
+                    f"oc={assignment.start_oc}:{assignment.end_oc}"
+                    if request.method == METHOD_CONV2D
+                    else f"rows={assignment.row_start}:{assignment.row_end}"
+                )
+                timing = WorkerTiming(
+                    node_id=assignment.connection.runtime_id,
+                    task_id=assignment.task_id,
+                    slice=slice_label,
+                    wall_ms=wall_ms,
+                    artifact_fetch_ms=artifact_fetch_ms,
+                )
+                return task_result, timing
         except (OSError, ValueError, ConnectionError, RuntimeError) as exc:
             self._remove_worker_connection(assignment.connection, str(exc))
             raise

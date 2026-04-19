@@ -245,6 +245,27 @@ class ClientRequestOk:
 
 
 @dataclass(slots=True)
+class WorkerTiming:
+    """Per-worker timing breakdown observed by the main node."""
+
+    node_id: str
+    task_id: str
+    slice: str
+    wall_ms: int
+    artifact_fetch_ms: int = 0
+
+
+@dataclass(slots=True)
+class ResponseTiming:
+    """Stage-by-stage timing breakdown for one client response."""
+
+    dispatch_ms: int = 0
+    task_window_ms: int = 0
+    aggregate_ms: int = 0
+    workers: tuple[WorkerTiming, ...] = ()
+
+
+@dataclass(slots=True)
 class ClientResponse:
     """Main-node response sent back to a client with a typed method payload."""
 
@@ -264,6 +285,7 @@ class ClientResponse:
     elapsed_ms: int = 0
     response_payload: GemvResponsePayload | Conv2dResponsePayload | None = None
     result_artifact: ArtifactDescriptor | None = None
+    timing: ResponseTiming | None = None
     output_length: InitVar[int] = 0
     output_vector: InitVar[bytes] = b""
     result_artifact_id: InitVar[str] = ""

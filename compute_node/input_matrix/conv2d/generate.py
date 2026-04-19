@@ -17,6 +17,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from adapters.process import enable_utf8_mode
+
+enable_utf8_mode()
+
 from app.runtime_environment import relaunch_with_project_python_if_needed
 from compute_node.performance_metrics.conv2d.config import DATASET_DIR
 from compute_node.input_matrix.conv2d import (

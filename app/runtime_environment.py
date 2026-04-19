@@ -7,6 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from adapters.process import python_utf8_command
 from app.constants import LOGGER_NAME
 from setup import current_python_uses_project_venv, project_python_path
 
@@ -26,7 +27,7 @@ def relaunch_with_project_python_if_needed(
     effective_argv = list(sys.argv[1:] if argv is None else argv)
     target_script = Path(sys.argv[0]).resolve() if script_path is None else Path(script_path)
     launch_cwd = Path.cwd() if cwd is None else Path(cwd)
-    command = [str(venv_python), str(target_script), *effective_argv]
+    command = python_utf8_command(venv_python, target_script, *effective_argv)
     logger = logging.getLogger(LOGGER_NAME)
 
     logger.info("Relaunching with project virtual environment: %s", venv_python)

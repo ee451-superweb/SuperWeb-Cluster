@@ -111,6 +111,8 @@ def _detect_nvcc_supported_sms() -> set[str] | None:
         ["nvcc", "--list-gpu-code"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if completed.returncode != 0:
         return None
@@ -206,6 +208,8 @@ def _detect_compute_capability() -> str | None:
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if completed.returncode != 0:
         return None
@@ -628,6 +632,8 @@ class CudaBackend:
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout_seconds,
             cwd=ROOT_DIR,
         )
@@ -779,6 +785,8 @@ class CudaBackend:
                 ],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
             )
         else:
             compile_targets = [capability] if capability is not None else []
@@ -793,7 +801,7 @@ class CudaBackend:
             ]
             if capability is not None:
                 command.append(f"-gencode=arch=compute_{capability},code=sm_{capability}")
-            completed = subprocess.run(command, capture_output=True, text=True, cwd=CUDA_BUILD_DIR)
+            completed = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=CUDA_BUILD_DIR)
 
         if completed.returncode != 0:
             raise subprocess.CalledProcessError(
@@ -838,6 +846,8 @@ class CudaBackend:
                 ],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
             )
             if completed.returncode == 0:
                 resolved = completed.stdout.strip().splitlines()

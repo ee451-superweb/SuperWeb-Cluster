@@ -31,6 +31,7 @@ from .aggregator import summarize_conv2d_output_file
 from wire.internal_protocol.runtime_transport import (
     GemvResponsePayload,
     Conv2dResponsePayload,
+    ResponseTiming,
     build_client_response,
 )
 
@@ -287,9 +288,14 @@ class ClientRequestHandler:
 
         try:
             completion_conv2d_stats_only = False
+            dispatch_done_at = time.monotonic()
             if request.method == METHOD_GEMV:
+                task_window_started_at = time.monotonic()
                 with ThreadPoolExecutor(max_workers=len(assignments), thread_name_prefix="task-dispatch") as executor:
-                    task_results = list(executor.map(lambda item: self.run_worker_task_slice(request, item), assignments))
+                    outcomes = list(executor.map(lambda item: self.run_worker_task_slice(request, item), assignments))
+                task_window_done_at = time.monotonic()
+                task_results = [outcome[0] for outcome in outcomes]
+                worker_timings = tuple(outcome[1] for outcome in outcomes)
                 write_audit_event(
                     f"aggregating result task_id={task_id} method={request.method} size={request.size or 'large'} worker_slices={len(task_results)}",
                     stdout=True,
@@ -325,8 +331,12 @@ class ClientRequestHandler:
                 if self.artifact_manager is None:
                     raise RuntimeError("artifact manager is required for conv2d responses")
                 artifact_path = self.artifact_manager.root_dir / f"{request.request_id}.bin"
+                task_window_started_at = time.monotonic()
                 with ThreadPoolExecutor(max_workers=len(assignments), thread_name_prefix="task-dispatch") as executor:
-                    task_results = list(executor.map(lambda item: self.run_worker_task_slice(request, item), assignments))
+                    outcomes = list(executor.map(lambda item: self.run_worker_task_slice(request, item), assignments))
+                task_window_done_at = time.monotonic()
+                task_results = [outcome[0] for outcome in outcomes]
+                worker_timings = tuple(outcome[1] for outcome in outcomes)
                 write_audit_event(
                     f"aggregating result task_id={task_id} method={request.method} size={request.size or 'large'} worker_slices={len(task_results)} "
                     f"output_path={artifact_path}",
@@ -378,11 +388,21 @@ class ClientRequestHandler:
                         output_vector=output_vector,
                         result_artifact_id=result_artifact.artifact_id if result_artifact is not None else "",
                     )
+            aggregate_done_at = time.monotonic()
+            timing = ResponseTiming(
+                dispatch_ms=max(0, int((dispatch_done_at - started_at) * 1000)),
+                task_window_ms=max(0, int((task_window_done_at - task_window_started_at) * 1000)),
+                aggregate_ms=max(0, int((aggregate_done_at - task_window_done_at) * 1000)),
+                workers=worker_timings,
+            )
             completion_parts = [
                 f"task complete task_id={task_id}",
                 f"method={request.method}",
                 f"size={request.size or 'large'}",
                 f"elapsed_ms={max(0, int((time.monotonic() - started_at) * 1000))}",
+                f"dispatch_ms={timing.dispatch_ms}",
+                f"task_window_ms={timing.task_window_ms}",
+                f"aggregate_ms={timing.aggregate_ms}",
                 f"output_length={output_length}",
             ]
             if result_artifact is not None:
@@ -412,6 +432,7 @@ class ClientRequestHandler:
                 iteration_count=request.iteration_count,
                 response_payload=response_payload,
                 result_artifact=result_artifact,
+                timing=timing,
             )
         except (OSError, ValueError, ConnectionError, RuntimeError) as exc:
             worker_count, client_count = self._cluster_counts()

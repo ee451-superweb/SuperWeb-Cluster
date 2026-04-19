@@ -308,6 +308,51 @@ def _from_pb_conv2d_response_payload(payload: runtime_pb2.Conv2dResponsePayload)
     )
 
 
+def _to_pb_worker_timing(payload) -> runtime_pb2.WorkerTiming:
+    """Encode one per-worker timing entry into protobuf form."""
+    return runtime_pb2.WorkerTiming(
+        node_id=payload.node_id,
+        task_id=payload.task_id,
+        slice=payload.slice,
+        wall_ms=payload.wall_ms,
+        artifact_fetch_ms=payload.artifact_fetch_ms,
+    )
+
+
+def _from_pb_worker_timing(payload: runtime_pb2.WorkerTiming):
+    """Decode one per-worker timing entry from protobuf form."""
+    runtime = _runtime()
+    return runtime.WorkerTiming(
+        node_id=payload.node_id,
+        task_id=payload.task_id,
+        slice=payload.slice,
+        wall_ms=payload.wall_ms,
+        artifact_fetch_ms=payload.artifact_fetch_ms,
+    )
+
+
+def _to_pb_response_timing(payload) -> runtime_pb2.ResponseTiming:
+    """Encode the response-level timing breakdown into protobuf form."""
+    encoded = runtime_pb2.ResponseTiming(
+        dispatch_ms=payload.dispatch_ms,
+        task_window_ms=payload.task_window_ms,
+        aggregate_ms=payload.aggregate_ms,
+    )
+    encoded.workers.extend(_to_pb_worker_timing(worker) for worker in payload.workers)
+    return encoded
+
+
+def _from_pb_response_timing(payload: runtime_pb2.ResponseTiming):
+    """Decode the response-level timing breakdown from protobuf form."""
+    runtime = _runtime()
+    return runtime.ResponseTiming(
+        dispatch_ms=payload.dispatch_ms,
+        task_window_ms=payload.task_window_ms,
+        aggregate_ms=payload.aggregate_ms,
+        workers=tuple(_from_pb_worker_timing(worker) for worker in payload.workers),
+    )
+
+
 def _to_pb_gemv_task_payload(payload) -> runtime_pb2.GemvTaskPayload:
     """Use this during protobuf encoding to convert an GEMV task payload.
 
@@ -560,6 +605,10 @@ def encode_envelope(message) -> bytes:
             envelope.client_response.result_artifact.CopyFrom(
                 _to_pb_artifact_descriptor(message.client_response.result_artifact)
             )
+        if message.client_response.timing is not None:
+            envelope.client_response.timing.CopyFrom(
+                _to_pb_response_timing(message.client_response.timing)
+            )
     elif message.kind == runtime.MessageKind.TASK_ASSIGN:
         if message.task_assign is None:
             raise ValueError("TASK_ASSIGN envelope missing payload")
@@ -777,6 +826,11 @@ def parse_envelope(payload: bytes):
             result_artifact=(
                 _from_pb_artifact_descriptor(envelope_pb.client_response.result_artifact)
                 if envelope_pb.client_response.HasField("result_artifact")
+                else None
+            ),
+            timing=(
+                _from_pb_response_timing(envelope_pb.client_response.timing)
+                if envelope_pb.client_response.HasField("timing")
                 else None
             ),
         )

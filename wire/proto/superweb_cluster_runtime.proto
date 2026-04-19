@@ -158,6 +158,21 @@ message ClientRequestOk {
   uint64 accepted_timestamp_ms = 5;
 }
 
+message WorkerTiming {
+  string node_id = 1;
+  string task_id = 2;
+  string slice = 3;
+  uint64 wall_ms = 4;
+  uint64 artifact_fetch_ms = 5;
+}
+
+message ResponseTiming {
+  uint64 dispatch_ms = 1;
+  uint64 task_window_ms = 2;
+  uint64 aggregate_ms = 3;
+  repeated WorkerTiming workers = 4;
+}
+
 message ClientResponse {
   string request_id = 1;
   string method = 2;
@@ -180,6 +195,7 @@ message ClientResponse {
   ArtifactDescriptor result_artifact = 14;
   string task_id = 15;
   uint64 elapsed_ms = 16;
+  ResponseTiming timing = 18;
 }
 
 message TaskAssign {

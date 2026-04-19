@@ -52,6 +52,8 @@ def list_windows_display_adapters() -> tuple[list[dict[str, str]], str]:
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
     except OSError as exc:
         return [], f"unable to inspect Windows video adapters: {exc}"

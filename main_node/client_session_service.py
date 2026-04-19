@@ -114,6 +114,16 @@ class ClientSessionService:
         parts = [f"task_id={payload.task_id or '<unassigned>'}"]
         if payload.elapsed_ms > 0:
             parts.append(f"elapsed_ms={payload.elapsed_ms}")
+        if payload.timing is not None:
+            parts.append(f"dispatch_ms={payload.timing.dispatch_ms}")
+            parts.append(f"task_window_ms={payload.timing.task_window_ms}")
+            parts.append(f"aggregate_ms={payload.timing.aggregate_ms}")
+            for worker in payload.timing.workers:
+                parts.append(
+                    f"worker[{worker.node_id}|{worker.slice}]"
+                    f"=wall:{worker.wall_ms}ms"
+                    + (f"+fetch:{worker.artifact_fetch_ms}ms" if worker.artifact_fetch_ms else "")
+                )
         if payload.result_artifact is not None:
             parts.append(f"artifact_id={payload.result_artifact.artifact_id}")
             parts.append(f"artifact_bytes={payload.result_artifact.size_bytes}")

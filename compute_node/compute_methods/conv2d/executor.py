@@ -20,6 +20,7 @@ from app.constants import (
     METHOD_CONV2D,
     STATUS_OK,
 )
+from adapters.process import python_utf8_command
 from app.compute_resource_policy import resolve_capped_cpu_worker_count, resolve_metal_headroom_policy
 from compute_node.compute_methods.conv2d.paths import (
     CPU_MACOS_EXECUTABLE_PATH,
@@ -299,14 +300,14 @@ def _ensure_dataset_ready(dataset_dir: Path, variant: str) -> None:
     if _resolve_input_path(dataset_dir, variant).exists():
         return
     subprocess.run(
-        [
-            str(active_python_path()),
-            str(DATASET_GENERATE_SCRIPT_PATH),
+        python_utf8_command(
+            active_python_path(),
+            DATASET_GENERATE_SCRIPT_PATH,
             "--output-dir",
-            str(dataset_dir),
+            dataset_dir,
             "--role",
             "compute",
-        ],
+        ),
         check=True,
         cwd=METHOD_DIR,
         timeout=600.0,

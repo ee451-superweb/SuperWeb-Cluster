@@ -1287,8 +1287,8 @@ class PerformanceMatricsTests(unittest.TestCase):
                 "--measurement-repeats",
                 str(DEFAULT_MEASUREMENT_REPEATS),
             ]
-            subprocess.run(cpu_command, check=True, capture_output=True, text=True, cwd=PERF_DIR)
-            subprocess.run(metal_command, check=True, capture_output=True, text=True, cwd=PERF_DIR)
+            subprocess.run(cpu_command, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=PERF_DIR)
+            subprocess.run(metal_command, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=PERF_DIR)
 
             cpu_values = load_float32_file(cpu_output)
             metal_values = load_float32_file(metal_output)
@@ -1363,8 +1363,8 @@ class PerformanceMatricsTests(unittest.TestCase):
                 "--measurement-repeats",
                 str(DEFAULT_MEASUREMENT_REPEATS),
             ]
-            subprocess.run(cpu_command, check=True, capture_output=True, text=True, cwd=PERF_DIR)
-            subprocess.run(cuda_command, check=True, capture_output=True, text=True, cwd=PERF_DIR)
+            subprocess.run(cpu_command, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=PERF_DIR)
+            subprocess.run(cuda_command, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=PERF_DIR)
 
             cpu_values = load_float32_file(cpu_output)
             cuda_values = load_float32_file(cuda_output)

@@ -45,6 +45,8 @@ from wire.external_protocol.control_plane import (
     GemvResponsePayload,
     Conv2dRequestPayload,
     Conv2dResponsePayload,
+    ResponseTiming,
+    WorkerTiming,
 )
 from wire.external_protocol.data_plane import ArtifactDescriptor
 from wire.internal_protocol.common import MessageKind, NodeStatus, RuntimeEnvelope, TransferMode
@@ -364,6 +366,7 @@ def build_client_response(
     result_artifact_id: str = "",
     result_artifact: ArtifactDescriptor | None = None,
     response_payload: GemvResponsePayload | Conv2dResponsePayload | None = None,
+    timing: ResponseTiming | None = None,
 ) -> RuntimeEnvelope:
     """Use this when the main node replies to CLIENT_JOIN or CLIENT_REQUEST."""
     if timestamp_ms is None:
@@ -395,6 +398,7 @@ def build_client_response(
             result_artifact_id=result_artifact_id,
             output_length=output_length,
             output_vector=output_vector,
+            timing=timing,
         ),
     )
 
@@ -673,6 +677,7 @@ __all__ = [
     "NodeStatus",
     "RegisterOk",
     "RegisterWorker",
+    "ResponseTiming",
     "RuntimeEnvelope",
     "Conv2dRequestPayload",
     "Conv2dResponsePayload",
@@ -683,6 +688,7 @@ __all__ = [
     "TaskFail",
     "TaskResult",
     "TransferMode",
+    "WorkerTiming",
     "WorkerUpdate",
     "build_artifact_release",
     "build_client_info_reply",
