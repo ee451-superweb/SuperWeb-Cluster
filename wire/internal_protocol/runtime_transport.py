@@ -279,6 +279,7 @@ def build_client_request(
     kernel_size: int = 0,
     padding: int = 0,
     stride: int = 1,
+    conv2d_client_response_mode: int = 0,
     request_payload: GemvRequestPayload | Conv2dRequestPayload | None = None,
 ) -> RuntimeEnvelope:
     """Use this when a client submits one structured compute request."""
@@ -310,6 +311,7 @@ def build_client_request(
             kernel_size=kernel_size,
             padding=padding,
             stride=stride,
+            conv2d_client_response_mode=conv2d_client_response_mode,
         ),
     )
 

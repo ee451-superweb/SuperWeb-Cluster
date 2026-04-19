@@ -85,6 +85,12 @@ enum TransferMode {
   ARTIFACT_REQUIRED = 3;
 }
 
+// How the main node should return conv2d output to the client (default: full tensor artifact).
+enum Conv2dClientResponseMode {
+  CONV2D_CLIENT_RESPONSE_FULL = 0;
+  CONV2D_CLIENT_RESPONSE_STATS_ONLY = 1;
+}
+
 message HeartbeatOk {
   string node_name = 1;
   uint64 heartbeat_unix_time_ms = 2;
@@ -255,6 +261,7 @@ message Conv2dRequestPayload {
   uint32 kernel_size = 5;
   uint32 padding = 6;
   uint32 stride = 7;
+  Conv2dClientResponseMode client_response_mode = 8;
 }
 
 message GemvResponsePayload {
@@ -266,6 +273,11 @@ message Conv2dResponsePayload {
   uint32 output_length = 1;
   bytes output_vector = 2;
   string result_artifact_id = 3;
+  // Populated when client_response_mode was STATS_ONLY: summary of merged float32 output.
+  uint64 stats_element_count = 4;
+  double stats_sum = 5;
+  double stats_sum_squares = 6;
+  repeated float stats_samples = 7;
 }
 
 message GemvTaskPayload {

@@ -68,6 +68,12 @@ METHOD_GEMV = "gemv"
 METHOD_CONV2D = "conv2d"
 METHOD_FREE_CONTENT = "free_content"
 
+# Conv2dClientResponseMode (wire/proto/superweb_cluster_runtime.proto); default is FULL.
+CONV2D_CLIENT_RESPONSE_FULL = 0
+CONV2D_CLIENT_RESPONSE_STATS_ONLY = 1
+# First N float32 values (file order) included in STATS_ONLY responses.
+CONV2D_STATS_MAX_SAMPLES = 32
+
 DX12_BACKEND_DISABLED_REASON = (
     "DX12 backend is disabled due to a fatal instability bug that can trigger "
     "system-level crashes or power-protection events during benchmark execution. "

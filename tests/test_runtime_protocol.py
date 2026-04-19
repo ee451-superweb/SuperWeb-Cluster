@@ -8,6 +8,7 @@ from common.float32_codec import pack_float32_values, unpack_float32_bytes
 from common.types import ComputeHardwarePerformance, ComputePerformanceSummary, HardwareProfile
 from app.constants import (
     COMPUTE_NODE_NAME,
+    CONV2D_CLIENT_RESPONSE_STATS_ONLY,
     MAIN_NODE_NAME,
     METHOD_GEMV,
     METHOD_CONV2D,
@@ -19,6 +20,7 @@ from wire.internal_protocol.control_plane_codec import encode_envelope, parse_en
 from wire.internal_protocol.runtime_transport import (
     MessageKind,
     Conv2dRequestPayload,
+    Conv2dResponsePayload,
     Conv2dResultPayload,
     Conv2dTaskPayload,
     TransferMode,
@@ -295,6 +297,70 @@ class RuntimeProtocolTests(unittest.TestCase):
         self.assertEqual(result.task_result.output_w, 8)
         self.assertEqual(result.task_result.output_length, 8 * 8 * 2)
         self.assertEqual(result.task_result.start_oc, 2)
+
+    def test_conv2d_stats_only_request_and_response_round_trip(self) -> None:
+        request = parse_envelope(
+            encode_envelope(
+                build_client_request(
+                    SUPERWEB_CLIENT_NAME,
+                    "req-stats",
+                    METHOD_CONV2D,
+                    b"",
+                    size="small",
+                    object_id="conv2d/small",
+                    stream_id="stream-stats",
+                    tensor_h=8,
+                    tensor_w=8,
+                    channels_in=4,
+                    channels_out=8,
+                    kernel_size=3,
+                    padding=1,
+                    stride=1,
+                    conv2d_client_response_mode=CONV2D_CLIENT_RESPONSE_STATS_ONLY,
+                )
+            )
+        )
+        self.assertIsInstance(request.client_request.request_payload, Conv2dRequestPayload)
+        assert request.client_request.conv2d_payload is not None
+        self.assertEqual(
+            request.client_request.conv2d_payload.client_response_mode,
+            CONV2D_CLIENT_RESPONSE_STATS_ONLY,
+        )
+
+        stats_payload = Conv2dResponsePayload(
+            output_length=64,
+            output_vector=b"",
+            result_artifact_id="",
+            stats_element_count=64,
+            stats_sum=10.0,
+            stats_sum_squares=100.0,
+            stats_samples=(1.0, 2.0, 3.0),
+        )
+        response = parse_envelope(
+            encode_envelope(
+                build_client_response(
+                    request_id="req-stats",
+                    status_code=STATUS_OK,
+                    method=METHOD_CONV2D,
+                    object_id="conv2d/small",
+                    stream_id="stream-stats",
+                    worker_count=1,
+                    client_count=1,
+                    client_id="client-1",
+                    iteration_count=1,
+                    response_payload=stats_payload,
+                )
+            )
+        )
+        self.assertEqual(response.kind, MessageKind.CLIENT_RESPONSE)
+        cp = response.client_response.conv2d_payload
+        assert cp is not None
+        self.assertEqual(cp.output_length, 64)
+        self.assertEqual(cp.stats_element_count, 64)
+        self.assertAlmostEqual(cp.stats_sum, 10.0)
+        self.assertAlmostEqual(cp.stats_sum_squares, 100.0)
+        self.assertEqual(cp.stats_samples, (1.0, 2.0, 3.0))
+        self.assertEqual(response.client_response.result_artifact_id, "")
 
     def test_framed_send_receive_round_trip(self) -> None:
         left, right = socket.socketpair()

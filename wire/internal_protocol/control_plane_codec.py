@@ -225,6 +225,7 @@ def _to_pb_conv2d_request_payload(payload) -> runtime_pb2.Conv2dRequestPayload:
         kernel_size=payload.kernel_size,
         padding=payload.padding,
         stride=payload.stride,
+        client_response_mode=payload.client_response_mode,
     )
 
 
@@ -243,6 +244,7 @@ def _from_pb_conv2d_request_payload(payload: runtime_pb2.Conv2dRequestPayload):
         kernel_size=payload.kernel_size,
         padding=payload.padding,
         stride=payload.stride,
+        client_response_mode=payload.client_response_mode,
     )
 
 
@@ -281,6 +283,10 @@ def _to_pb_conv2d_response_payload(payload) -> runtime_pb2.Conv2dResponsePayload
         output_length=payload.output_length,
         output_vector=payload.output_vector,
         result_artifact_id=payload.result_artifact_id,
+        stats_element_count=payload.stats_element_count,
+        stats_sum=payload.stats_sum,
+        stats_sum_squares=payload.stats_sum_squares,
+        stats_samples=list(payload.stats_samples),
     )
 
 
@@ -295,6 +301,10 @@ def _from_pb_conv2d_response_payload(payload: runtime_pb2.Conv2dResponsePayload)
         output_length=payload.output_length,
         output_vector=payload.output_vector,
         result_artifact_id=payload.result_artifact_id,
+        stats_element_count=payload.stats_element_count,
+        stats_sum=payload.stats_sum,
+        stats_sum_squares=payload.stats_sum_squares,
+        stats_samples=tuple(payload.stats_samples),
     )
 
 

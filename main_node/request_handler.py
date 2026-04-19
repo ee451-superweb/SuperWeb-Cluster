@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from adapters.audit_log import write_audit_event
 from app.constants import (
+    CONV2D_CLIENT_RESPONSE_STATS_ONLY,
     MAIN_NODE_NAME,
     METHOD_FREE_CONTENT,
     METHOD_GEMV,
@@ -26,6 +27,7 @@ from app.constants import (
 from app.trace_utils import trace_function
 from compute_node.input_matrix.gemv import build_input_matrix_spec as build_gemv_input_matrix_spec
 from compute_node.compute_methods.conv2d.executor import load_named_workload_spec
+from .aggregator import summarize_conv2d_output_file
 from wire.internal_protocol.runtime_transport import (
     GemvResponsePayload,
     Conv2dResponsePayload,
@@ -315,6 +317,10 @@ class ClientRequestHandler:
                 output_length = spec.output_h * spec.output_w * spec.c_out
                 output_vector = b""
                 result_artifact = None
+                conv_mode = 0
+                payload = request.conv2d_payload
+                if payload is not None:
+                    conv_mode = int(payload.client_response_mode)
                 if self.artifact_manager is None:
                     raise RuntimeError("artifact manager is required for conv2d responses")
                 artifact_path = self.artifact_manager.root_dir / f"{request.request_id}.bin"
@@ -336,17 +342,35 @@ class ClientRequestHandler:
                     )
                 finally:
                     self._cleanup_local_task_results(task_results)
-                result_artifact = self.artifact_manager.register_existing_file(
-                    artifact_path,
-                    producer_node_id=MAIN_NODE_NAME,
-                    content_type="application/octet-stream",
-                    artifact_id=request.request_id,
-                )
-                response_payload = Conv2dResponsePayload(
-                    output_length=output_length,
-                    output_vector=output_vector,
-                    result_artifact_id=result_artifact.artifact_id if result_artifact is not None else "",
-                )
+                if conv_mode == CONV2D_CLIENT_RESPONSE_STATS_ONLY:
+                    stats_count, stats_sum, stats_sum_squares, stats_samples = summarize_conv2d_output_file(
+                        artifact_path
+                    )
+                    try:
+                        artifact_path.unlink()
+                    except OSError:
+                        pass
+                    response_payload = Conv2dResponsePayload(
+                        output_length=output_length,
+                        output_vector=b"",
+                        result_artifact_id="",
+                        stats_element_count=stats_count,
+                        stats_sum=stats_sum,
+                        stats_sum_squares=stats_sum_squares,
+                        stats_samples=stats_samples,
+                    )
+                else:
+                    result_artifact = self.artifact_manager.register_existing_file(
+                        artifact_path,
+                        producer_node_id=MAIN_NODE_NAME,
+                        content_type="application/octet-stream",
+                        artifact_id=request.request_id,
+                    )
+                    response_payload = Conv2dResponsePayload(
+                        output_length=output_length,
+                        output_vector=output_vector,
+                        result_artifact_id=result_artifact.artifact_id if result_artifact is not None else "",
+                    )
             completion_parts = [
                 f"task complete task_id={task_id}",
                 f"method={request.method}",
