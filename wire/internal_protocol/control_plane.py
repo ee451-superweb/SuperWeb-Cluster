@@ -82,6 +82,9 @@ class Conv2dTaskPayload:
     padding: int = 0
     stride: int = 1
     weight_data: bytes = b""
+    client_response_mode: int = 0
+    stats_max_samples: int = 0
+    weight_artifact: ArtifactDescriptor | None = None
 
 
 @dataclass(slots=True)
@@ -105,6 +108,10 @@ class Conv2dResultPayload:
     output_length: int = 0
     output_vector: bytes = b""
     result_artifact_id: str = ""
+    stats_element_count: int = 0
+    stats_sum: float = 0.0
+    stats_sum_squares: float = 0.0
+    stats_samples: tuple[float, ...] = ()
 
 
 @dataclass(slots=True)
@@ -371,6 +378,8 @@ class TaskResult:
     result_payload: GemvResultPayload | Conv2dResultPayload | None = None
     result_artifact: ArtifactDescriptor | None = None
     local_result_path: str = ""
+    computation_ms: int = 0
+    peripheral_ms: int = 0
     row_start: InitVar[int] = 0
     row_end: InitVar[int] = 0
     output_length: InitVar[int] = 0

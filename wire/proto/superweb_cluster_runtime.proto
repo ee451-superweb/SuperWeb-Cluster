@@ -85,6 +85,12 @@ enum TransferMode {
   ARTIFACT_REQUIRED = 3;
 }
 
+// How the main node should return conv2d output to the client (default: full tensor artifact).
+enum Conv2dClientResponseMode {
+  CONV2D_CLIENT_RESPONSE_FULL = 0;
+  CONV2D_CLIENT_RESPONSE_STATS_ONLY = 1;
+}
+
 message HeartbeatOk {
   string node_name = 1;
   uint64 heartbeat_unix_time_ms = 2;
@@ -150,6 +156,37 @@ message ClientRequestOk {
   string size = 6;
   string object_id = 4;
   uint64 accepted_timestamp_ms = 5;
+  // Data-plane handshake assigned by the main node. Non-empty upload_id means
+  // the client must open a TCP connection to data_endpoint and push its bytes
+  // via a DELIVER frame before main can start compute. Non-empty download_id
+  // means the client should pull the result artifact by REQUEST(download_id).
+  string upload_id = 7;
+  string download_id = 8;
+  string data_endpoint_host = 9;
+  uint32 data_endpoint_port = 10;
+}
+
+message WorkerTiming {
+  string node_id = 1;
+  string task_id = 2;
+  string slice = 3;
+  uint64 wall_ms = 4;
+  uint64 artifact_fetch_ms = 5;
+  // Self-reported by the worker: time spent inside native compute
+  // runners (sum across subprocess invocations for this slice).
+  uint64 computation_ms = 6;
+  // Self-reported by the worker: everything else on the compute node
+  // outside native computation (setup, weight I/O, output read,
+  // stats aggregation, payload build). Excludes artifact_fetch_ms
+  // which is measured on the main node.
+  uint64 peripheral_ms = 7;
+}
+
+message ResponseTiming {
+  uint64 dispatch_ms = 1;
+  uint64 task_window_ms = 2;
+  uint64 aggregate_ms = 3;
+  repeated WorkerTiming workers = 4;
 }
 
 message ClientResponse {
@@ -174,6 +211,7 @@ message ClientResponse {
   ArtifactDescriptor result_artifact = 14;
   string task_id = 15;
   uint64 elapsed_ms = 16;
+  ResponseTiming timing = 18;
 }
 
 message TaskAssign {
@@ -227,6 +265,12 @@ message TaskResult {
     Conv2dResultPayload conv2d = 8;
   }
   ArtifactDescriptor result_artifact = 9;
+  // Worker-observed native compute time for this task (sum of
+  // subprocess invocations of the backend runner). 0 when unreported.
+  uint64 computation_ms = 10;
+  // Worker-observed non-compute overhead: validation, weight write,
+  // output read, stats summarization, payload build. 0 when unreported.
+  uint64 peripheral_ms = 11;
 }
 
 message ArtifactRelease {
@@ -255,6 +299,19 @@ message Conv2dRequestPayload {
   uint32 kernel_size = 5;
   uint32 padding = 6;
   uint32 stride = 7;
+  Conv2dClientResponseMode client_response_mode = 8;
+  // Cap on stats_samples returned in STATS_ONLY mode. 0 means cluster default.
+  // Current implementation reads the first N float32 values per worker slice;
+  // future revisions may swap in a real downsampling strategy without protocol churn.
+  uint32 stats_max_samples = 9;
+  // Size in bytes of the weight payload the client will push over the data
+  // plane after receiving ClientRequestOk.upload_id. Zero means no client-
+  // supplied weights (main uses its own dataset).
+  uint64 upload_size_bytes = 10;
+  // SHA-256 of the declared upload. Cross-checked against the DELIVER frame
+  // and re-validated after all CHUNK bytes are received. Empty disables the
+  // cross-check.
+  string upload_checksum = 11;
 }
 
 message GemvResponsePayload {
@@ -266,6 +323,11 @@ message Conv2dResponsePayload {
   uint32 output_length = 1;
   bytes output_vector = 2;
   string result_artifact_id = 3;
+  // Populated when client_response_mode was STATS_ONLY: summary of merged float32 output.
+  uint64 stats_element_count = 4;
+  double stats_sum = 5;
+  double stats_sum_squares = 6;
+  repeated float stats_samples = 7;
 }
 
 message GemvTaskPayload {
@@ -286,6 +348,13 @@ message Conv2dTaskPayload {
   uint32 padding = 8;
   uint32 stride = 9;
   bytes weight_data = 10;
+  Conv2dClientResponseMode client_response_mode = 11;
+  uint32 stats_max_samples = 12;
+  // Per-worker weight slice published by the main node on the data plane.
+  // When set, the worker fetches weight bytes over TCP instead of reading
+  // inline weight_data. This replaces the inline-transport path and lets the
+  // main node fan out slices that exceed max_message_size.
+  ArtifactDescriptor weight_artifact = 13;
 }
 
 message GemvResultPayload {
@@ -303,6 +372,12 @@ message Conv2dResultPayload {
   uint32 output_length = 5;
   bytes output_vector = 6;
   string result_artifact_id = 7;
+  // Populated when the task ran in STATS_ONLY mode: per-slice running stats so
+  // the main node never has to materialize the merged tensor.
+  uint64 stats_element_count = 8;
+  double stats_sum = 9;
+  double stats_sum_squares = 10;
+  repeated float stats_samples = 11;
 }
 
 message RuntimeEnvelope {

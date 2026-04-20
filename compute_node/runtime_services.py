@@ -275,7 +275,17 @@ class WorkerTaskRuntimeService:
             result_artifact = task_result.result_artifact
             output_vector = task_result.output_vector
             local_result_path = task_result.local_result_path
-            if artifact_manager is not None and result_artifact is None:
+            conv2d_payload_in = (
+                task_result.conv2d_payload if task.method == METHOD_CONV2D else None
+            )
+            stats_only_result = (
+                conv2d_payload_in is not None and int(conv2d_payload_in.stats_element_count) > 0
+            )
+            if (
+                artifact_manager is not None
+                and result_artifact is None
+                and not stats_only_result
+            ):
                 if local_result_path:
                     result_artifact = artifact_manager.register_existing_file(
                         Path(local_result_path),
@@ -297,6 +307,37 @@ class WorkerTaskRuntimeService:
                     )
                     output_vector = b""
 
+            if task.method == METHOD_CONV2D:
+                outgoing_result_payload = Conv2dResultPayload(
+                    start_oc=task_result.start_oc,
+                    end_oc=task_result.end_oc,
+                    output_h=task_result.output_h,
+                    output_w=task_result.output_w,
+                    output_length=task_result.output_length,
+                    output_vector=output_vector,
+                    result_artifact_id=task_result.result_artifact_id or (
+                        result_artifact.artifact_id if result_artifact is not None else ""
+                    ),
+                    stats_element_count=(
+                        int(conv2d_payload_in.stats_element_count) if conv2d_payload_in is not None else 0
+                    ),
+                    stats_sum=(
+                        float(conv2d_payload_in.stats_sum) if conv2d_payload_in is not None else 0.0
+                    ),
+                    stats_sum_squares=(
+                        float(conv2d_payload_in.stats_sum_squares) if conv2d_payload_in is not None else 0.0
+                    ),
+                    stats_samples=(
+                        tuple(conv2d_payload_in.stats_samples) if conv2d_payload_in is not None else ()
+                    ),
+                )
+            else:
+                outgoing_result_payload = GemvResultPayload(
+                    row_start=task_result.row_start,
+                    row_end=task_result.row_end,
+                    output_length=task_result.output_length,
+                    output_vector=output_vector,
+                )
             session.send(
                 build_task_result(
                     request_id=task_result.request_id,
@@ -304,27 +345,10 @@ class WorkerTaskRuntimeService:
                     task_id=task_result.task_id,
                     status_code=task_result.status_code,
                     iteration_count=task_result.iteration_count,
-                    result_payload=(
-                        Conv2dResultPayload(
-                            start_oc=task_result.start_oc,
-                            end_oc=task_result.end_oc,
-                            output_h=task_result.output_h,
-                            output_w=task_result.output_w,
-                            output_length=task_result.output_length,
-                            output_vector=output_vector,
-                            result_artifact_id=task_result.result_artifact_id or (
-                                result_artifact.artifact_id if result_artifact is not None else ""
-                            ),
-                        )
-                        if task.method == METHOD_CONV2D
-                        else GemvResultPayload(
-                            row_start=task_result.row_start,
-                            row_end=task_result.row_end,
-                            output_length=task_result.output_length,
-                            output_vector=output_vector,
-                        )
-                    ),
+                    result_payload=outgoing_result_payload,
                     result_artifact=result_artifact,
+                    computation_ms=int(getattr(task_result, "computation_ms", 0) or 0),
+                    peripheral_ms=int(getattr(task_result, "peripheral_ms", 0) or 0),
                 )
             )
             result_scope = (
@@ -444,6 +468,47 @@ class WorkerTaskRuntimeService:
             stdout=True,
             logger=self.logger,
         )
+        if task.method == METHOD_CONV2D:
+            conv2d_payload = task.conv2d_payload
+            if conv2d_payload is not None and conv2d_payload.weight_artifact is not None:
+                try:
+                    if artifact_manager is None:
+                        raise RuntimeError(
+                            "artifact manager is required to fetch conv2d weight artifact"
+                        )
+                    weight_bytes = artifact_manager.fetch_bytes(
+                        conv2d_payload.weight_artifact,
+                        timeout=max(
+                            self.config.artifact_transfer_timeout,
+                            self.config.runtime_socket_timeout,
+                        ),
+                    )
+                except (OSError, RuntimeError, ValueError) as exc:
+                    session.send(
+                        build_task_fail(
+                            request_id=task.request_id,
+                            node_id=assigned_node_id,
+                            task_id=task.task_id,
+                            status_code=STATUS_INTERNAL_ERROR,
+                            error_message=f"conv2d weight artifact fetch failed: {exc}",
+                        )
+                    )
+                    write_audit_event(
+                        f"{RUNTIME_MSG_TASK_FAIL} from {self.node_name} "
+                        f"id={assigned_node_id} task_id={task.task_id} "
+                        f"error=weight_artifact_fetch:{exc}",
+                        logger=self.logger,
+                        level=logging.WARNING,
+                    )
+                    return
+                conv2d_payload.weight_data = weight_bytes
+                write_audit_event(
+                    f"{RUNTIME_MSG_TASK_ASSIGN} fetched weight artifact for "
+                    f"task_id={task.task_id} "
+                    f"artifact_id={conv2d_payload.weight_artifact.artifact_id} "
+                    f"weight_bytes={len(weight_bytes)}",
+                    logger=self.logger,
+                )
         pending_tasks[task.task_id] = (
             task,
             self.submit_task(

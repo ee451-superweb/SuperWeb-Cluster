@@ -132,13 +132,34 @@ void run_multithreaded(const float* input, const float* weight_t, float* output,
     for (auto& th : threads) th.join();
 }
 
-// ─── Timing Helper ────────────────────────────────────────────────────────────
+// ─── Timing Helpers ───────────────────────────────────────────────────────────
+
+struct TrialRecord {
+    string phase;               // "autotune" or "measurement"
+    int candidate_index;        // which worker-count candidate this trial belongs to
+    int candidate_total;        // total candidate count for this phase
+    int trial_index_within_candidate;  // 0..repeats-1
+    int repeats_for_candidate;  // repeats assigned to this candidate
+    int workers;
+    int tile_size;
+    double host_prep_seconds;
+    double host_compute_seconds;
+    double device_to_host_seconds;
+    double host_postproc_seconds;
+    double total_wall_seconds;
+};
 
 double time_run(function<void()> fn, int repeats) {
     auto t1 = chrono::high_resolution_clock::now();
     for (int i = 0; i < repeats; ++i) fn();
     auto t2 = chrono::high_resolution_clock::now();
     return chrono::duration<double>(t2 - t1).count() / repeats;
+}
+
+static inline double seconds_between(
+    const chrono::high_resolution_clock::time_point& a,
+    const chrono::high_resolution_clock::time_point& b) {
+    return chrono::duration<double>(b - a).count();
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -150,6 +171,7 @@ int main(int argc, char** argv) {
     vector<int> workers, tile_sizes;
     string output_path;
     int autotune_repeats = 1, measurement_repeats = 1;
+    bool verbose = false;
 
     for (int i = 1; i < argc; ++i) {
         string arg = argv[i];
@@ -169,6 +191,7 @@ int main(int argc, char** argv) {
         else if (arg == "--autotune-repeats" && i + 1 < argc) autotune_repeats = stoi(argv[++i]);
         else if (arg == "--measurement-repeats" && i + 1 < argc) measurement_repeats = stoi(argv[++i]);
         else if (arg == "--output" && i + 1 < argc) output_path = argv[++i];
+        else if (arg == "--verbose") verbose = true;
     }
 
     if (end_oc == 0) end_oc = total_c_out;
@@ -197,31 +220,133 @@ int main(int argc, char** argv) {
 
     double flops_per_run = 2.0 * out_h * out_w * slice_c_out * c_in * k * k;
 
+    // Compulsory per-run DRAM traffic: each byte of input, weight, output must be
+    // touched at least once. Real traffic can be higher if the kernel reloads
+    // data, lower if cache absorbs repeat accesses within one run.
+    size_t bytes_input  = input_size  * sizeof(float);
+    size_t bytes_weight = weight_size * sizeof(float);
+    size_t bytes_output = output_size * sizeof(float);
+    size_t bytes_kernel_compulsory = bytes_input + bytes_weight + bytes_output;
+
     if (workers.empty()) {
         workers.push_back((int)thread::hardware_concurrency());
     }
 
-    // ─── Autotune: sweep all worker counts, pick fastest ──────────────────
-    int best_worker = workers[0];
-    double best_autotune_time = 1e30;
+    int default_tile = tile_sizes.empty() ? 1 : tile_sizes[0];
+    vector<TrialRecord> trials;
+    trials.reserve(workers.size() * autotune_repeats + measurement_repeats);
 
-    for (int w_count : workers) {
-        double elapsed = time_run([&]() {
+    auto emit_verbose_trial = [&](const TrialRecord& tr, int global_index, int global_total) {
+        if (!verbose) return;
+        double compute_gflops = tr.host_compute_seconds > 0.0
+            ? (flops_per_run / tr.host_compute_seconds / 1e9) : 0.0;
+        double effective_gflops = tr.total_wall_seconds > 0.0
+            ? (flops_per_run / tr.total_wall_seconds / 1e9) : 0.0;
+        fprintf(stderr,
+                "[conv2d cpu %s %d/%d] candidate=%d/%d (trial %d/%d) "
+                "workers=%d tile_size=%d "
+                "compute=%.6fs total=%.6fs "
+                "compute_gflops=%.3f effective_gflops=%.3f\n",
+                tr.phase.c_str(), global_index, global_total,
+                tr.candidate_index + 1, tr.candidate_total,
+                tr.trial_index_within_candidate + 1, tr.repeats_for_candidate,
+                tr.workers, tr.tile_size,
+                tr.host_compute_seconds, tr.total_wall_seconds,
+                compute_gflops, effective_gflops);
+        fflush(stderr);
+    };
+
+    int autotune_total = (int)workers.size() * autotune_repeats;
+    int emitted_autotune = 0;
+    if (verbose) {
+        fprintf(stderr,
+                "[conv2d cpu plan] phase=autotune worker_candidates=%zu "
+                "autotune_repeats=%d total_trials=%d\n",
+                workers.size(), autotune_repeats, autotune_total);
+        fflush(stderr);
+    }
+
+    // ─── Autotune: sweep all worker counts, record per-trial details ──────
+    int best_worker = workers[0];
+    double best_autotune_mean_seconds = 1e30;
+
+    for (size_t ci = 0; ci < workers.size(); ++ci) {
+        int w_count = workers[ci];
+        double candidate_sum_seconds = 0.0;
+        for (int r = 0; r < autotune_repeats; ++r) {
+            auto t_trial_start = chrono::high_resolution_clock::now();
+            // Host prep for CPU: no H2D transfer, no device alloc. Kept as an
+            // explicit zero so the schema stays symmetric with GPU backends.
+            auto t_compute_start = chrono::high_resolution_clock::now();
             run_multithreaded(input_data.data(), weight_t.data(), output_data.data(),
                               h, w, c_in, slice_c_out, k, pad, stride, out_h, out_w, w_count);
-        }, autotune_repeats);
+            auto t_compute_end = chrono::high_resolution_clock::now();
+            // CPU has no D2H and no per-trial postproc work.
+            auto t_trial_end = chrono::high_resolution_clock::now();
 
-        if (elapsed < best_autotune_time) {
-            best_autotune_time = elapsed;
+            TrialRecord tr;
+            tr.phase = "autotune";
+            tr.candidate_index = (int)ci;
+            tr.candidate_total = (int)workers.size();
+            tr.trial_index_within_candidate = r;
+            tr.repeats_for_candidate = autotune_repeats;
+            tr.workers = w_count;
+            tr.tile_size = default_tile;
+            tr.host_prep_seconds        = seconds_between(t_trial_start, t_compute_start);
+            tr.host_compute_seconds     = seconds_between(t_compute_start, t_compute_end);
+            tr.device_to_host_seconds   = 0.0;
+            tr.host_postproc_seconds    = 0.0;
+            tr.total_wall_seconds       = seconds_between(t_trial_start, t_trial_end);
+
+            candidate_sum_seconds += tr.host_compute_seconds;
+            ++emitted_autotune;
+            emit_verbose_trial(tr, emitted_autotune, autotune_total);
+            trials.push_back(std::move(tr));
+        }
+        double candidate_mean_seconds = candidate_sum_seconds / max(1, autotune_repeats);
+        if (candidate_mean_seconds < best_autotune_mean_seconds) {
+            best_autotune_mean_seconds = candidate_mean_seconds;
             best_worker = w_count;
         }
     }
 
     // ─── Measurement: run with best config ────────────────────────────────
-    double measure_time = time_run([&]() {
+    if (verbose) {
+        fprintf(stderr,
+                "[conv2d cpu plan] phase=measurement selected_workers=%d "
+                "measurement_repeats=%d\n",
+                best_worker, measurement_repeats);
+        fflush(stderr);
+    }
+
+    double measure_sum_seconds = 0.0;
+    for (int r = 0; r < measurement_repeats; ++r) {
+        auto t_trial_start = chrono::high_resolution_clock::now();
+        auto t_compute_start = chrono::high_resolution_clock::now();
         run_multithreaded(input_data.data(), weight_t.data(), output_data.data(),
                           h, w, c_in, slice_c_out, k, pad, stride, out_h, out_w, best_worker);
-    }, measurement_repeats);
+        auto t_compute_end = chrono::high_resolution_clock::now();
+        auto t_trial_end = chrono::high_resolution_clock::now();
+
+        TrialRecord tr;
+        tr.phase = "measurement";
+        tr.candidate_index = 0;
+        tr.candidate_total = 1;
+        tr.trial_index_within_candidate = r;
+        tr.repeats_for_candidate = measurement_repeats;
+        tr.workers = best_worker;
+        tr.tile_size = default_tile;
+        tr.host_prep_seconds        = seconds_between(t_trial_start, t_compute_start);
+        tr.host_compute_seconds     = seconds_between(t_compute_start, t_compute_end);
+        tr.device_to_host_seconds   = 0.0;
+        tr.host_postproc_seconds    = 0.0;
+        tr.total_wall_seconds       = seconds_between(t_trial_start, t_trial_end);
+
+        measure_sum_seconds += tr.host_compute_seconds;
+        emit_verbose_trial(tr, r + 1, measurement_repeats);
+        trials.push_back(std::move(tr));
+    }
+    double measure_time = measure_sum_seconds / max(1, measurement_repeats);
 
     // ─── Write output file if requested ────────────────────────────────
     if (!output_path.empty()) {
@@ -234,7 +359,7 @@ int main(int argc, char** argv) {
     for (size_t i = 0; i < output_data.size(); ++i) sum_val += std::abs(output_data[i]);
     string checksum = "chk_" + to_string((long long)sum_val);
 
-    int best_tile = tile_sizes.empty() ? 1 : tile_sizes[0];
+    int best_tile = default_tile;
 
     cout << "{\n"
          << "  \"actual_workers\": " << best_worker << ",\n"
@@ -243,12 +368,52 @@ int main(int argc, char** argv) {
          << "  \"autotune_repeats\": " << autotune_repeats << ",\n"
          << "  \"measurement_repeats\": " << measurement_repeats << ",\n"
          << "  \"trials_run\": " << workers.size() << ",\n"
-         << "  \"autotune_wall_clock_latency_seconds\": " << fixed << setprecision(9) << best_autotune_time << ",\n"
-         << "  \"autotune_effective_gflops\": " << (flops_per_run / best_autotune_time / 1e9) << ",\n"
+         << "  \"autotune_wall_clock_latency_seconds\": " << fixed << setprecision(9) << best_autotune_mean_seconds << ",\n"
+         << "  \"autotune_effective_gflops\": " << (flops_per_run / best_autotune_mean_seconds / 1e9) << ",\n"
          << "  \"autotune_checksum\": \"" << checksum << "\",\n"
          << "  \"measurement_wall_clock_latency_seconds\": " << fixed << setprecision(9) << measure_time << ",\n"
          << "  \"measurement_effective_gflops\": " << (flops_per_run / measure_time / 1e9) << ",\n"
-         << "  \"measurement_checksum\": \"" << checksum << "\"\n"
+         << "  \"measurement_checksum\": \"" << checksum << "\",\n"
+         << "  \"flops_per_run\": " << fixed << setprecision(1) << flops_per_run << ",\n"
+         << "  \"bytes_input\": " << bytes_input << ",\n"
+         << "  \"bytes_weight\": " << bytes_weight << ",\n"
+         << "  \"bytes_output\": " << bytes_output << ",\n"
+         << "  \"bytes_kernel_compulsory_memory_traffic\": " << bytes_kernel_compulsory << ",\n"
+         << "  \"notes_schema\": \"CPU backend: host_prep/device_to_host/host_postproc are zero by definition; compute includes thread spawn+join overhead; memory_bandwidth model assumes perfect DRAM reuse (real traffic >= compulsory).\",\n"
+         << "  \"trials\": [\n";
+    for (size_t i = 0; i < trials.size(); ++i) {
+        const auto& tr = trials[i];
+        double compute_gflops = tr.host_compute_seconds > 0.0
+            ? (flops_per_run / tr.host_compute_seconds / 1e9) : 0.0;
+        double effective_gflops = tr.total_wall_seconds > 0.0
+            ? (flops_per_run / tr.total_wall_seconds / 1e9) : 0.0;
+        double kernel_bandwidth_gibps = tr.host_compute_seconds > 0.0
+            ? ((double)bytes_kernel_compulsory / tr.host_compute_seconds / (1024.0 * 1024.0 * 1024.0)) : 0.0;
+        cout << "    {"
+             << "\"phase\": \"" << tr.phase << "\", "
+             << "\"candidate_index\": " << tr.candidate_index << ", "
+             << "\"candidate_total\": " << tr.candidate_total << ", "
+             << "\"trial_index_within_candidate\": " << tr.trial_index_within_candidate << ", "
+             << "\"repeats_for_candidate\": " << tr.repeats_for_candidate << ", "
+             << "\"workers\": " << tr.workers << ", "
+             << "\"tile_size\": " << tr.tile_size << ", "
+             << fixed << setprecision(9)
+             << "\"host_prep_seconds\": " << tr.host_prep_seconds << ", "
+             << "\"host_compute_seconds\": " << tr.host_compute_seconds << ", "
+             << "\"device_to_host_seconds\": " << tr.device_to_host_seconds << ", "
+             << "\"host_postproc_seconds\": " << tr.host_postproc_seconds << ", "
+             << "\"total_wall_seconds\": " << tr.total_wall_seconds << ", "
+             << setprecision(6)
+             << "\"compute_gflops\": " << compute_gflops << ", "
+             << "\"effective_gflops\": " << effective_gflops << ", "
+             << "\"pcie_h2d_bandwidth_gibps\": 0.0, "
+             << "\"pcie_d2h_bandwidth_gibps\": 0.0, "
+             << "\"kernel_memory_bandwidth_gibps_compulsory_lower_bound_model\": " << kernel_bandwidth_gibps
+             << "}";
+        if (i + 1 < trials.size()) cout << ",";
+        cout << "\n";
+    }
+    cout << "  ]\n"
          << "}\n";
 
     return 0;

@@ -60,6 +60,17 @@ class Conv2dRequestPayload:
     kernel_size: int = 0
     padding: int = 0
     stride: int = 1
+    # Conv2dClientResponseMode: 0 = full output artifact, 1 = stats-only (see proto).
+    client_response_mode: int = 0
+    # Cap on stats_samples returned when client_response_mode == STATS_ONLY. 0 means cluster default.
+    stats_max_samples: int = 0
+    # Byte count of the weight payload that the client will push over the data plane.
+    # Zero means the request carries no client-supplied weights and main should use
+    # its own weight dataset.
+    upload_size_bytes: int = 0
+    # SHA-256 of the declared upload, validated when the bytes arrive on the DELIVER
+    # channel. Empty means no pre-validation.
+    upload_checksum: str = ""
 
 
 @dataclass(slots=True)
@@ -77,6 +88,10 @@ class Conv2dResponsePayload:
     output_length: int = 0
     output_vector: bytes = b""
     result_artifact_id: str = ""
+    stats_element_count: int = 0
+    stats_sum: float = 0.0
+    stats_sum_squares: float = 0.0
+    stats_samples: tuple[float, ...] = ()
 
 
 @dataclass(slots=True)
@@ -101,6 +116,8 @@ class ClientRequest:
     kernel_size: InitVar[int] = 0
     padding: InitVar[int] = 0
     stride: InitVar[int] = 1
+    conv2d_client_response_mode: InitVar[int] = 0
+    conv2d_stats_max_samples: InitVar[int] = 0
 
     def __post_init__(
         self,
@@ -113,6 +130,8 @@ class ClientRequest:
         kernel_size: int,
         padding: int,
         stride: int,
+        conv2d_client_response_mode: int,
+        conv2d_stats_max_samples: int,
     ) -> None:
         """Normalize legacy initvars into the typed client request payload."""
         vector_length = initvar_or_default(vector_length, 0)
@@ -124,6 +143,8 @@ class ClientRequest:
         kernel_size = initvar_or_default(kernel_size, 0)
         padding = initvar_or_default(padding, 0)
         stride = initvar_or_default(stride, 1)
+        conv2d_client_response_mode = initvar_or_default(conv2d_client_response_mode, 0)
+        conv2d_stats_max_samples = initvar_or_default(conv2d_stats_max_samples, 0)
         if self.request_payload is None:
             if self.method == METHOD_CONV2D or any(
                 value for value in (tensor_h, tensor_w, channels_in, channels_out, kernel_size, padding)
@@ -136,6 +157,8 @@ class ClientRequest:
                     kernel_size=kernel_size,
                     padding=padding,
                     stride=stride,
+                    client_response_mode=conv2d_client_response_mode,
+                    stats_max_samples=conv2d_stats_max_samples,
                 )
             else:
                 self.request_payload = GemvRequestPayload(
@@ -232,6 +255,37 @@ class ClientRequestOk:
     size: str
     object_id: str
     accepted_timestamp_ms: int
+    # Data-plane handshake fields. Non-empty upload_id means the client must open a
+    # data-plane socket and push its bytes via DELIVER before main can start compute.
+    # Non-empty download_id means the client should issue REQUEST(download_id) on the
+    # same socket (or a fresh one) to pull the result artifact.
+    upload_id: str = ""
+    download_id: str = ""
+    data_endpoint_host: str = ""
+    data_endpoint_port: int = 0
+
+
+@dataclass(slots=True)
+class WorkerTiming:
+    """Per-worker timing breakdown observed by the main node."""
+
+    node_id: str
+    task_id: str
+    slice: str
+    wall_ms: int
+    artifact_fetch_ms: int = 0
+    computation_ms: int = 0
+    peripheral_ms: int = 0
+
+
+@dataclass(slots=True)
+class ResponseTiming:
+    """Stage-by-stage timing breakdown for one client response."""
+
+    dispatch_ms: int = 0
+    task_window_ms: int = 0
+    aggregate_ms: int = 0
+    workers: tuple[WorkerTiming, ...] = ()
 
 
 @dataclass(slots=True)
@@ -254,6 +308,7 @@ class ClientResponse:
     elapsed_ms: int = 0
     response_payload: GemvResponsePayload | Conv2dResponsePayload | None = None
     result_artifact: ArtifactDescriptor | None = None
+    timing: ResponseTiming | None = None
     output_length: InitVar[int] = 0
     output_vector: InitVar[bytes] = b""
     result_artifact_id: InitVar[str] = ""

@@ -12,7 +12,6 @@ top-level benchmark code stay hardware-agnostic.
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import subprocess
@@ -23,6 +22,9 @@ from compute_node.compute_methods.gemv import (
     CUDA_DIR,
     CUDA_EXECUTABLE_PATH,
     CUDA_SOURCE_PATH,
+)
+from compute_node.performance_metrics.gemv.backends._native_runner_launcher import (
+    run_native_runner_with_streaming,
 )
 from compute_node.performance_metrics.gemv.models import (
     DEFAULT_AUTOTUNE_REPEATS,
@@ -111,6 +113,8 @@ def _detect_nvcc_supported_sms() -> set[str] | None:
         ["nvcc", "--list-gpu-code"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if completed.returncode != 0:
         return None
@@ -192,6 +196,24 @@ def _measurement_repeats(_spec: BenchmarkSpec | None = None) -> int:
     return DEFAULT_MEASUREMENT_REPEATS
 
 
+_RAW_REPORT_KEYS = (
+    "flops_per_run",
+    "bytes_input",
+    "bytes_weight",
+    "bytes_output",
+    "bytes_kernel_compulsory_memory_traffic",
+    "one_time_host_to_device_seconds",
+    "notes_schema",
+    "trials",
+)
+
+
+def _extract_raw_report(metrics: dict[str, object]) -> dict[str, object]:
+    """Copy analysis-only fields out of the runner JSON for the benchmark report."""
+
+    return {key: metrics[key] for key in _RAW_REPORT_KEYS if key in metrics}
+
+
 def _detect_compute_capability() -> str | None:
     """Ask `nvidia-smi` for the first GPU's compute capability."""
 
@@ -206,6 +228,8 @@ def _detect_compute_capability() -> str | None:
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if completed.returncode != 0:
         return None
@@ -232,9 +256,10 @@ class CudaBackend:
             return False, f"missing CUDA runner source at {_relative_project_path(CUDA_SOURCE_PATH)}"
 
         nvidia_adapter_name: str | None = None
+        nvidia_adapter_message = ""
         if os.name == "nt":
             nvidia_adapter_name, nvidia_adapter_message = detect_nvidia_windows_adapter()
-            if nvidia_adapter_name is None:
+            if nvidia_adapter_name is None and not CUDA_EXECUTABLE_PATH.exists():
                 return False, nvidia_adapter_message
 
         capability = _detect_compute_capability()
@@ -260,11 +285,28 @@ class CudaBackend:
             if not binary_is_stale:
                 if os.name == "nt":
                     if capability is None:
+                        if nvidia_adapter_name is None:
+                            return (
+                                True,
+                                f"CUDA backend available via self-contained Windows runner at "
+                                f"{_relative_project_path(CUDA_EXECUTABLE_PATH)}. It targets "
+                                f"{_format_windows_sm_targets()} and needs only the NVIDIA driver at runtime. "
+                                f"Windows display-adapter verification was unavailable ({nvidia_adapter_message}).",
+                            )
                         return (
                             True,
                             f"CUDA backend available via self-contained Windows runner at "
                             f"{_relative_project_path(CUDA_EXECUTABLE_PATH)}. It targets {_format_windows_sm_targets()} "
                             "and needs only the NVIDIA driver at runtime.",
+                        )
+                    if nvidia_adapter_name is None:
+                        return (
+                            True,
+                            f"CUDA backend available via self-contained Windows runner at "
+                            f"{_relative_project_path(CUDA_EXECUTABLE_PATH)}. Detected GPU is sm_{capability}; the "
+                            f"runner targets {_format_windows_sm_targets()} and needs only the NVIDIA driver at "
+                            f"runtime. Windows display-adapter verification was unavailable "
+                            f"({nvidia_adapter_message}).",
                         )
                     return (
                         True,
@@ -345,6 +387,7 @@ class CudaBackend:
         time_budget_seconds: float,
         force_rebuild: bool = False,
         phase_callback=None,
+        verbose: bool = False,
     ) -> BackendResult:
         """Run the CUDA executable once and return the best configuration it found."""
 
@@ -409,6 +452,7 @@ class CudaBackend:
                 autotune_repeats=autotune_repeats,
                 measurement_repeats=1,
                 timeout_seconds=max(time_budget_seconds, 30.0),
+                verbose=verbose,
             )
         except subprocess.TimeoutExpired:
             notes.append("CUDA benchmark timed out")
@@ -462,6 +506,7 @@ class CudaBackend:
                 autotune_repeats=1,
                 measurement_repeats=final_measurement_repeats,
                 timeout_seconds=max(time_budget_seconds, 30.0),
+                verbose=verbose,
             )
         except subprocess.TimeoutExpired:
             notes.append("CUDA benchmark timed out")
@@ -543,6 +588,10 @@ class CudaBackend:
             score=measurement_score,
             notes=trial_notes,
         )
+        raw_report = {
+            "autotune": _extract_raw_report(autotune_metrics),
+            "measurement": _extract_raw_report(metrics),
+        }
         return BackendResult(
             backend=self.name,
             available=True,
@@ -551,6 +600,7 @@ class CudaBackend:
             best_trial=trial,
             trials=[autotune_trial, trial],
             notes=notes,
+            raw_report=raw_report,
         )
 
     def _run_runner(
@@ -565,6 +615,7 @@ class CudaBackend:
         autotune_repeats: int,
         measurement_repeats: int,
         timeout_seconds: float,
+        verbose: bool = False,
     ) -> dict[str, object]:
         """Invoke the native CUDA runner and parse its JSON metrics.
 
@@ -605,15 +656,13 @@ class CudaBackend:
             "--measurement-repeats",
             str(measurement_repeats),
         ]
-        completed = subprocess.run(
+        if verbose:
+            command.append("--verbose")
+        return run_native_runner_with_streaming(
             command,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
+            timeout_seconds=timeout_seconds,
             cwd=ROOT_DIR,
         )
-        return json.loads(completed.stdout)
 
     def _compile_if_needed(self, *, force_rebuild: bool = False) -> Path:
         """Return the CUDA runner path, compiling only when needed."""
@@ -761,6 +810,8 @@ class CudaBackend:
                 ],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
             )
         else:
             compile_targets = [capability] if capability is not None else []
@@ -775,7 +826,7 @@ class CudaBackend:
             ]
             if capability is not None:
                 command.append(f"-gencode=arch=compute_{capability},code=sm_{capability}")
-            completed = subprocess.run(command, capture_output=True, text=True, cwd=CUDA_BUILD_DIR)
+            completed = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=CUDA_BUILD_DIR)
 
         if completed.returncode != 0:
             raise subprocess.CalledProcessError(
@@ -820,6 +871,8 @@ class CudaBackend:
                 ],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
             )
             if completed.returncode == 0:
                 resolved = completed.stdout.strip().splitlines()

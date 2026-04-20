@@ -11,10 +11,11 @@ import struct
 
 from wire.internal_protocol.data_plane import (
     ArtifactChunkFrame,
+    ArtifactDeliverFrame,
+    ArtifactDownloadRequestFrame,
     ArtifactEndFrame,
     ArtifactErrorFrame,
     ArtifactInitFrame,
-    ArtifactRequestFrame,
     DataPlaneMessageType,
 )
 
@@ -22,18 +23,20 @@ MAGIC = b"SWAD"
 PROTOCOL_VERSION = 1
 
 # Keep this framing identical to the standalone client implementation.
-REQUEST_HEADER = struct.Struct("!4sBBI")
+DOWNLOAD_REQUEST_HEADER = struct.Struct("!4sBBI")
 INIT_HEADER = struct.Struct("!4sBBQIII")
 CHUNK_HEADER = struct.Struct("!4sBBQI")
 END_HEADER = struct.Struct("!4sBBQ")
 ERROR_HEADER = struct.Struct("!4sBBI")
+DELIVER_HEADER = struct.Struct("!4sBBQIII")
 
-# Backward-compatible numeric aliases for existing transport code.
-MSG_REQUEST = int(DataPlaneMessageType.REQUEST)
+# Numeric aliases for transport code reading the single-byte message type.
+MSG_DOWNLOAD_REQUEST = int(DataPlaneMessageType.DOWNLOAD_REQUEST)
 MSG_INIT = int(DataPlaneMessageType.INIT)
 MSG_CHUNK = int(DataPlaneMessageType.CHUNK)
 MSG_END = int(DataPlaneMessageType.END)
 MSG_ERROR = int(DataPlaneMessageType.ERROR)
+MSG_DELIVER = int(DataPlaneMessageType.DELIVER)
 
 
 def _validate_header(magic: bytes, version: int, expected_type: DataPlaneMessageType) -> None:
@@ -46,22 +49,22 @@ def _validate_header(magic: bytes, version: int, expected_type: DataPlaneMessage
         raise ValueError(f"invalid expected message type: {expected_type}")
 
 
-def encode_request(artifact_id: str) -> bytes:
-    """Serialize one artifact request frame."""
-    frame = ArtifactRequestFrame(artifact_id=artifact_id)
+def encode_download_request(artifact_id: str) -> bytes:
+    """Serialize one download-request frame."""
+    frame = ArtifactDownloadRequestFrame(artifact_id=artifact_id)
     raw = frame.artifact_id.encode("utf-8")
-    return REQUEST_HEADER.pack(MAGIC, PROTOCOL_VERSION, int(DataPlaneMessageType.REQUEST), len(raw)) + raw
+    return DOWNLOAD_REQUEST_HEADER.pack(MAGIC, PROTOCOL_VERSION, int(DataPlaneMessageType.DOWNLOAD_REQUEST), len(raw)) + raw
 
 
-def decode_request(header: bytes, payload: bytes) -> str:
-    """Decode one artifact request frame."""
-    magic, version, message_type, name_len = REQUEST_HEADER.unpack(header)
-    _validate_header(magic, version, DataPlaneMessageType.REQUEST)
-    if message_type != int(DataPlaneMessageType.REQUEST):
-        raise ValueError("expected REQUEST message")
+def decode_download_request(header: bytes, payload: bytes) -> str:
+    """Decode one download-request frame."""
+    magic, version, message_type, name_len = DOWNLOAD_REQUEST_HEADER.unpack(header)
+    _validate_header(magic, version, DataPlaneMessageType.DOWNLOAD_REQUEST)
+    if message_type != int(DataPlaneMessageType.DOWNLOAD_REQUEST):
+        raise ValueError("expected DOWNLOAD_REQUEST message")
     if len(payload) != name_len:
-        raise ValueError("artifact request payload length mismatch")
-    return ArtifactRequestFrame(artifact_id=payload.decode("utf-8")).artifact_id
+        raise ValueError("artifact download-request payload length mismatch")
+    return ArtifactDownloadRequestFrame(artifact_id=payload.decode("utf-8")).artifact_id
 
 
 def encode_init(*, size_bytes: int, chunk_size: int, checksum: str, content_type: str) -> bytes:
@@ -163,3 +166,49 @@ def decode_error(header: bytes, payload: bytes) -> str:
     if len(payload) != length:
         raise ValueError("artifact error payload length mismatch")
     return ArtifactErrorFrame(message=payload.decode("utf-8")).message
+
+
+def encode_deliver(*, upload_id: str, size_bytes: int, checksum: str, content_type: str) -> bytes:
+    """Serialize one deliver frame that opens a client-initiated upload stream."""
+    frame = ArtifactDeliverFrame(
+        upload_id=upload_id,
+        size_bytes=size_bytes,
+        checksum=checksum,
+        content_type=content_type,
+    )
+    upload_raw = frame.upload_id.encode("utf-8")
+    checksum_raw = frame.checksum.encode("utf-8")
+    content_type_raw = frame.content_type.encode("utf-8")
+    return (
+        DELIVER_HEADER.pack(
+            MAGIC,
+            PROTOCOL_VERSION,
+            int(DataPlaneMessageType.DELIVER),
+            frame.size_bytes,
+            len(upload_raw),
+            len(checksum_raw),
+            len(content_type_raw),
+        )
+        + upload_raw
+        + checksum_raw
+        + content_type_raw
+    )
+
+
+def decode_deliver(header: bytes, payload: bytes) -> ArtifactDeliverFrame:
+    """Decode one deliver frame announcing a client-initiated upload."""
+    magic, version, message_type, size_bytes, upload_len, checksum_len, content_type_len = DELIVER_HEADER.unpack(header)
+    _validate_header(magic, version, DataPlaneMessageType.DELIVER)
+    if message_type != int(DataPlaneMessageType.DELIVER):
+        raise ValueError("expected DELIVER message")
+    if len(payload) != upload_len + checksum_len + content_type_len:
+        raise ValueError("artifact deliver payload length mismatch")
+    upload_raw = payload[:upload_len]
+    checksum_raw = payload[upload_len:upload_len + checksum_len]
+    content_type_raw = payload[upload_len + checksum_len:]
+    return ArtifactDeliverFrame(
+        upload_id=upload_raw.decode("utf-8"),
+        size_bytes=size_bytes,
+        checksum=checksum_raw.decode("utf-8"),
+        content_type=content_type_raw.decode("utf-8"),
+    )

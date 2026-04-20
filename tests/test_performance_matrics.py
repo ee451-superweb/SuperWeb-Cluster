@@ -27,6 +27,7 @@ from compute_node.performance_metrics import benchmark
 from compute_node.performance_metrics import result_format
 from compute_node.performance_metrics.conv2d import benchmark as spatial_benchmark
 from compute_node.performance_metrics.conv2d import backends as conv2d_backend_registry
+from compute_node.performance_metrics.gemv import dataset_runner as gemv_dataset_runner
 from compute_node.performance_metrics.gemv import backends as backend_registry
 from compute_node.performance_metrics.gemv.backends.cpu_backend import (
     CpuArtifacts,
@@ -44,6 +45,13 @@ from compute_node.performance_metrics.gemv.backends.cuda_backend import (
 )
 from compute_node.performance_metrics.conv2d.backends.cuda_backend import (
     CudaBackend as SpatialCudaBackend,
+)
+from compute_node.performance_metrics.conv2d.backends.cpu_backend import (
+    CpuArtifacts as SpatialCpuArtifacts,
+    CpuBackend as SpatialCpuBackend,
+)
+from compute_node.performance_metrics.conv2d.backends.metal_backend import (
+    MetalBackend as SpatialMetalBackend,
 )
 from compute_node.performance_metrics.gemv.backends.metal_backend import (
     MetalBackend,
@@ -85,10 +93,44 @@ from compute_node.performance_metrics.gemv.workloads import build_benchmark_spec
 import subprocess
 
 from app.constants import DX12_BACKEND_DISABLED_REASON, METHOD_GEMV, METHOD_CONV2D
+from app.compute_resource_policy import resolve_metal_headroom_policy
 from tests.support import require_integration
 
 
+class _FakeNativeRunnerProcess:
+    """Minimal duck-type of ``subprocess.Popen`` for backend unit tests.
+
+    The conv2d Python backends spawn the native runner via ``subprocess.Popen``
+    and drain ``.stdout`` / ``.stderr`` on dedicated pump threads before
+    calling ``.wait(timeout=...)``. This stub yields a single empty-JSON line
+    on stdout so ``json.loads`` succeeds, no stderr, and returns 0 from wait.
+    """
+
+    def __init__(self, stdout_text: str = "{}\n", stderr_text: str = "", return_code: int = 0) -> None:
+        self.stdout = iter([stdout_text]) if stdout_text else iter([])
+        self.stderr = iter([stderr_text]) if stderr_text else iter([])
+        self._return_code = return_code
+
+    def wait(self, timeout: float | None = None) -> int:  # noqa: ARG002
+        return self._return_code
+
+    def kill(self) -> None:
+        pass
+
+
 class PerformanceMatricsTests(unittest.TestCase):
+    def test_metal_headroom_policy_translates_fraction_into_chunk_and_cooldown(self) -> None:
+        policy = resolve_metal_headroom_policy(8, fraction=0.9)
+
+        self.assertEqual(policy.work_chunk_size, 7)
+        self.assertAlmostEqual(policy.cooldown_ratio, (1.0 / 0.9) - 1.0)
+
+    def test_metal_headroom_policy_keeps_full_work_when_fraction_is_one(self) -> None:
+        policy = resolve_metal_headroom_policy(8, fraction=1.0)
+
+        self.assertEqual(policy.work_chunk_size, 8)
+        self.assertEqual(policy.cooldown_ratio, 0.0)
+
     def test_linear_score_midpoint_is_half(self) -> None:
         score = linear_time_score(0.6, ideal_seconds=0.2, zero_score_seconds=1.0, max_score=100.0)
         self.assertAlmostEqual(score, 50.0)
@@ -551,8 +593,9 @@ class PerformanceMatricsTests(unittest.TestCase):
                 time_budget_seconds,
                 force_rebuild=False,
                 phase_callback=None,
+                verbose=False,
             ):
-                del spec, dataset, measurement_spec, measurement_dataset, time_budget_seconds, force_rebuild
+                del spec, dataset, measurement_spec, measurement_dataset, time_budget_seconds, force_rebuild, verbose
                 if callable(phase_callback):
                     phase_callback("final_measurement", {"block_size": 256, "tile_size": 16})
                 return {
@@ -639,6 +682,70 @@ class PerformanceMatricsTests(unittest.TestCase):
         compile_mock.assert_called_once_with(artifacts)
         self.assertIn("rebuild was explicitly requested", note)
 
+    def test_spatial_cpu_backend_compiles_missing_macos_binary(self) -> None:
+        backend = SpatialCpuBackend()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            artifacts = SpatialCpuArtifacts(
+                platform_key="macos",
+                platform_label="macOS",
+                source_path=temp_root / "conv2d_cpu_macos.cpp",
+                build_dir=temp_root / "build",
+                executable_path=temp_root / "build" / "conv2d_cpu_macos",
+            )
+            artifacts.build_dir.mkdir(parents=True, exist_ok=True)
+            artifacts.source_path.write_text("// source placeholder\n", encoding="utf-8")
+
+            def fake_compile(_artifacts) -> None:
+                artifacts.executable_path.write_text("binary placeholder\n", encoding="utf-8")
+
+            with mock.patch.object(backend, "_compile_macos_runner", side_effect=fake_compile) as compile_mock:
+                executable_path, note = backend._resolve_executable_path(artifacts)
+
+        self.assertEqual(executable_path, artifacts.executable_path)
+        compile_mock.assert_called_once_with(artifacts)
+        self.assertIn("binary is missing", note)
+
+    def test_spatial_metal_backend_prefers_existing_binary_before_compiling(self) -> None:
+        backend = SpatialMetalBackend()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            binary_path = temp_root / "conv2d_metal_runner"
+            host_source = temp_root / "conv2d_metal_runner.mm"
+            kernel_source = temp_root / "conv2d_metal_kernels.metal"
+            host_source.write_text("// host placeholder\n", encoding="utf-8")
+            kernel_source.write_text("// kernel placeholder\n", encoding="utf-8")
+            binary_path.write_text("binary placeholder\n", encoding="utf-8")
+            os.utime(binary_path, None)
+
+            with (
+                mock.patch(
+                    "compute_node.performance_metrics.conv2d.backends.metal_backend.METAL_EXECUTABLE_PATH",
+                    binary_path,
+                ),
+                mock.patch(
+                    "compute_node.performance_metrics.conv2d.backends.metal_backend.METAL_HOST_SOURCE_PATH",
+                    host_source,
+                ),
+                mock.patch(
+                    "compute_node.performance_metrics.conv2d.backends.metal_backend.METAL_KERNEL_SOURCE_PATH",
+                    kernel_source,
+                ),
+                mock.patch(
+                    "compute_node.performance_metrics.conv2d.backends.metal_backend._binary_is_stale",
+                    return_value=False,
+                ),
+                mock.patch.object(
+                    backend,
+                    "_toolchain_status",
+                    side_effect=AssertionError("should not probe toolchain"),
+                ),
+            ):
+                executable_path, note = backend._compile_if_needed()
+
+        self.assertEqual(executable_path, binary_path)
+        self.assertIn("using prebuilt", note)
+
     def test_default_spec_matches_requested_2gib_shape(self) -> None:
         spec = build_benchmark_spec()
         self.assertEqual(spec.rows, 16_384)
@@ -653,6 +760,68 @@ class PerformanceMatricsTests(unittest.TestCase):
         self.assertEqual((gemv_spec.rows, gemv_spec.cols), (2_048, 4_096))
         self.assertEqual((conv_spec.h, conv_spec.w), (256, 256))
         self.assertEqual((conv_spec.c_in, conv_spec.c_out), (32, 64))
+
+    def test_refresh_default_workloads_are_half_mid(self) -> None:
+        gemv_mid_spec = build_input_matrix_spec(default_variant="mid")
+        gemv_refresh_spec = build_input_matrix_spec(default_variant="refresh")
+        conv_mid_spec = build_conv_input_matrix_spec(default_variant="mid")
+        conv_refresh_spec = build_conv_input_matrix_spec(default_variant="refresh")
+
+        self.assertEqual(gemv_refresh_spec.rows, gemv_mid_spec.rows // 2)
+        self.assertEqual(gemv_refresh_spec.cols, gemv_mid_spec.cols // 2)
+        self.assertEqual(conv_refresh_spec.h, conv_mid_spec.h // 2)
+        self.assertEqual(conv_refresh_spec.w, conv_mid_spec.w // 2)
+        self.assertEqual(conv_refresh_spec.c_in, conv_mid_spec.c_in // 2)
+        self.assertEqual(conv_refresh_spec.c_out, conv_mid_spec.c_out // 2)
+
+    def test_gemv_benchmark_dataset_generation_skips_refresh_variant(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dataset_dir = Path(temp_dir) / "gemv"
+            with (
+                mock.patch.object(
+                    gemv_dataset_runner,
+                    "dataset_is_generated",
+                    side_effect=[False, False, True, True],
+                ),
+                mock.patch.object(gemv_dataset_runner, "emit_status"),
+                mock.patch.object(gemv_dataset_runner, "active_python_path", return_value=Path("/tmp/project-python")),
+                mock.patch.object(gemv_dataset_runner.subprocess, "run") as run_mock,
+            ):
+                gemv_dataset_runner.generate_dataset_if_missing(
+                    dataset_dir,
+                    8,
+                    16,
+                    generate_small_dataset=True,
+                    generate_mid_dataset=True,
+                    generate_large_dataset=False,
+                    root_dir=PROJECT_ROOT,
+                    generate_script_path=PROJECT_ROOT / "compute_node" / "input_matrix" / "gemv" / "generate.py",
+                )
+
+        command = run_mock.call_args.args[0]
+        self.assertIn("--skip-refresh", command)
+
+    def test_conv2d_benchmark_dataset_generation_skips_refresh_variant(self) -> None:
+        spec = spatial_benchmark.get_small_spec()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dataset_dir = Path(temp_dir) / "conv2d"
+            with (
+                mock.patch.object(spatial_benchmark, "dataset_is_generated", return_value=False),
+                mock.patch.object(spatial_benchmark, "emit_status"),
+                mock.patch.object(spatial_benchmark, "active_python_path", return_value=Path("/tmp/project-python")),
+                mock.patch.object(spatial_benchmark.subprocess, "run") as run_mock,
+            ):
+                spatial_benchmark._generate_if_needed(
+                    dataset_dir,
+                    spec,
+                    "compute",
+                    generate_small_dataset=True,
+                    generate_mid_dataset=False,
+                    generate_large_dataset=False,
+                )
+
+        command = run_mock.call_args.args[0]
+        self.assertIn("--skip-refresh", command)
 
     def test_generate_dataset_with_small_override(self) -> None:
         spec = build_input_matrix_spec(rows=8, cols=16)
@@ -955,9 +1124,9 @@ class PerformanceMatricsTests(unittest.TestCase):
         layout = build_conv_dataset_layout(Path("C:/tmp/generated"), prefix="test_")
         captured: dict[str, list[str]] = {}
 
-        def fake_run(command, **kwargs):
+        def fake_popen(command, **kwargs):
             captured["command"] = list(command)
-            return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+            return _FakeNativeRunnerProcess()
 
         with (
             mock.patch(
@@ -969,8 +1138,8 @@ class PerformanceMatricsTests(unittest.TestCase):
                 2.5,
             ),
             mock.patch(
-                "compute_node.performance_metrics.conv2d.backends.cuda_backend.subprocess.run",
-                side_effect=fake_run,
+                "compute_node.performance_metrics.conv2d.backends.cuda_backend.subprocess.Popen",
+                side_effect=fake_popen,
             ),
         ):
             backend._run_runner(
@@ -991,6 +1160,48 @@ class PerformanceMatricsTests(unittest.TestCase):
         self.assertEqual(command[command.index("--output-channel-batches") + 1], "8")
         self.assertIn("--cooldown-ms", command)
         self.assertEqual(command[command.index("--cooldown-ms") + 1], "2.5")
+
+    def test_spatial_metal_runner_command_includes_preparation_timing_flag(self) -> None:
+        backend = SpatialMetalBackend()
+        spec = SpatialBenchmarkSpec(
+            name="unit-test",
+            h=8,
+            w=8,
+            c_in=4,
+            c_out=8,
+            k=3,
+            pad=1,
+            ideal_seconds=1.0,
+            zero_score_seconds=5.0,
+            stride=1,
+        )
+        layout = build_conv_dataset_layout(Path("/tmp/generated"), prefix="test_")
+        captured: dict[str, list[str]] = {}
+
+        def fake_popen(command, **kwargs):
+            captured["command"] = list(command)
+            return _FakeNativeRunnerProcess()
+
+        with mock.patch(
+            "compute_node.performance_metrics.conv2d.backends.metal_backend.subprocess.Popen",
+            side_effect=fake_popen,
+        ):
+            backend._run_runner(
+                Path("/tmp/fake_runner"),
+                spec,
+                layout,
+                block_sizes=[256],
+                tile_sizes=[16],
+                headroom_fraction=0.9,
+                output_channel_batch=7,
+                autotune_repeats=1,
+                measurement_repeats=1,
+                timeout_seconds=30.0,
+            )
+
+        command = captured["command"]
+        self.assertIn("--include-preparation-in-metrics", command)
+        self.assertEqual(command[command.index("--include-preparation-in-metrics") + 1], "1")
 
     def test_metal_backend_probe_returns_status(self) -> None:
         backend = MetalBackend()
@@ -1098,8 +1309,8 @@ class PerformanceMatricsTests(unittest.TestCase):
                 "--measurement-repeats",
                 str(DEFAULT_MEASUREMENT_REPEATS),
             ]
-            subprocess.run(cpu_command, check=True, capture_output=True, text=True, cwd=PERF_DIR)
-            subprocess.run(metal_command, check=True, capture_output=True, text=True, cwd=PERF_DIR)
+            subprocess.run(cpu_command, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=PERF_DIR)
+            subprocess.run(metal_command, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=PERF_DIR)
 
             cpu_values = load_float32_file(cpu_output)
             metal_values = load_float32_file(metal_output)
@@ -1174,8 +1385,8 @@ class PerformanceMatricsTests(unittest.TestCase):
                 "--measurement-repeats",
                 str(DEFAULT_MEASUREMENT_REPEATS),
             ]
-            subprocess.run(cpu_command, check=True, capture_output=True, text=True, cwd=PERF_DIR)
-            subprocess.run(cuda_command, check=True, capture_output=True, text=True, cwd=PERF_DIR)
+            subprocess.run(cpu_command, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=PERF_DIR)
+            subprocess.run(cuda_command, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=PERF_DIR)
 
             cpu_values = load_float32_file(cpu_output)
             cuda_values = load_float32_file(cuda_output)

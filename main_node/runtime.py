@@ -77,6 +77,7 @@ class MainNodeRuntime:
         self.artifact_manager = ArtifactManager(
             root_dir=self.conv2d_dataset_dir / "artifacts",
             public_host="127.0.0.1",
+            port=self.config.data_plane_port,
             chunk_size=self.config.artifact_chunk_size,
         )
         self._stop_event = threading.Event()
@@ -109,6 +110,7 @@ class MainNodeRuntime:
             config=self.config,
             registry=self.registry,
             build_client_response_for_request=self._build_client_response_for_request,
+            allocate_data_plane_endpoints=self._allocate_data_plane_endpoints,
             remove_client_connection=self._remove_client_connection,
             logger=self.logger,
         )
@@ -148,6 +150,7 @@ class MainNodeRuntime:
         self.logger.info("main_node_ip=%s", local_ip)
         self.logger.info("main_node_mac=%s", local_mac)
         self.logger.info("main_node_tcp_port=%s", self.config.tcp_port)
+        self.logger.info("main_node_data_plane_port=%s", self.artifact_manager.port)
         self.logger.info(
             "Listening for superweb-cluster mDNS discovery on %s:%s",
             self.config.multicast_group,
@@ -156,6 +159,10 @@ class MainNodeRuntime:
         self.logger.info(
             "Listening for superweb-cluster runtime connections on 0.0.0.0:%s",
             self.config.tcp_port,
+        )
+        self.logger.info(
+            "Listening for superweb-cluster artifact data plane on 0.0.0.0:%s",
+            self.artifact_manager.port,
         )
 
     def _runtime_should_stop(self) -> bool:
@@ -420,14 +427,6 @@ class MainNodeRuntime:
             end_oc=end_oc,
         )
 
-    def _max_conv2d_channels_per_task(self, spec) -> int:
-        """Use this when dispatch needs the largest in-band channel chunk for a conv2d task.
-
-        Args: spec convolution workload spec whose wire-size limits are being checked.
-        Returns: The maximum output-channel count allowed in one task payload.
-        """
-        return self.task_exchange.max_conv2d_channels_per_task(spec)
-
     @trace_function
     def _run_worker_task_slice(self, request, assignment: WorkerTaskSlice):
         """Use this wrapper when one prepared assignment should run against its target worker.
@@ -450,11 +449,34 @@ class MainNodeRuntime:
             )
 
     @trace_function
-    def _build_client_response_for_request(self, request):
+    def _build_client_response_for_request(self, request, *, allocation=None):
         """Use this to delegate one client request into the request-handler pipeline.
 
-        Args: request decoded client request payload from the client session service.
+        Args: request decoded client request payload from the client session service,
+            allocation optional data-plane allocation registered before REQUEST_OK.
         Returns: A ready-to-send client response envelope.
+        """
+        self._rebind_request_handler_services()
+        return self.client_request_handler.build_client_response_for_request(
+            request,
+            allocation=allocation,
+        )
+
+    @trace_function
+    def _allocate_data_plane_endpoints(self, request):
+        """Pre-register upload/download IDs on the artifact manager for one request.
+
+        Args: request decoded client request envelope.
+        Returns: A DataPlaneAllocation from the client request handler.
+        """
+        self._rebind_request_handler_services()
+        return self.client_request_handler.allocate_data_plane_endpoints(request)
+
+    def _rebind_request_handler_services(self) -> None:
+        """Refresh mutable service references on the request handler.
+
+        Some tests swap out runtime collaborators after construction, so before
+        dispatching a request we copy the current bindings onto the handler.
         """
         self.client_request_handler.registry = self.registry
         self.client_request_handler.dispatcher = self.dispatcher
@@ -464,7 +486,6 @@ class MainNodeRuntime:
         self.client_request_handler.task_exchange = self.task_exchange
         self.client_request_handler.artifact_manager = self.artifact_manager
         self.client_request_handler.run_worker_task_slice = self._run_worker_task_slice
-        return self.client_request_handler.build_client_response_for_request(request)
 
     @trace_function
     def _remove_client_connection(self, connection: RuntimePeerConnection, reason: str) -> None:
@@ -491,6 +512,7 @@ class MainNodeRuntime:
 
         self._refresh_runtime_service_bindings()
         self.client_session_service.build_client_response_for_request = self._build_client_response_for_request
+        self.client_session_service.allocate_data_plane_endpoints = self._allocate_data_plane_endpoints
         self.client_session_service.remove_client_connection = self._remove_client_connection
         self.client_session_service.serve_client_connection(connection, self._runtime_should_stop)
 
@@ -592,6 +614,16 @@ class MainNodeRuntime:
             message = f"Unable to start main-node TCP listener on port {self.config.tcp_port}: {exc}."
             if getattr(exc, "winerror", None) in {10013, 10048}:
                 message += " The TCP port may already be in use on this machine; try a different --tcp-port value."
+            return DiscoveryResult(success=False, message=message)
+
+        try:
+            self.artifact_manager.start()
+        except OSError as exc:
+            multicast.close(endpoint)
+            network.safe_close(runtime_sock)
+            message = f"Unable to start main-node data-plane listener on port {self.config.data_plane_port}: {exc}."
+            if getattr(exc, "winerror", None) in {10013, 10048}:
+                message += " The TCP port may already be in use on this machine; try a different --data-plane-port value."
             return DiscoveryResult(success=False, message=message)
 
         try:

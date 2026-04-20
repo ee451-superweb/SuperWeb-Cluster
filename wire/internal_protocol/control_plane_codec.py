@@ -225,6 +225,10 @@ def _to_pb_conv2d_request_payload(payload) -> runtime_pb2.Conv2dRequestPayload:
         kernel_size=payload.kernel_size,
         padding=payload.padding,
         stride=payload.stride,
+        client_response_mode=payload.client_response_mode,
+        stats_max_samples=payload.stats_max_samples,
+        upload_size_bytes=getattr(payload, "upload_size_bytes", 0),
+        upload_checksum=getattr(payload, "upload_checksum", ""),
     )
 
 
@@ -243,6 +247,10 @@ def _from_pb_conv2d_request_payload(payload: runtime_pb2.Conv2dRequestPayload):
         kernel_size=payload.kernel_size,
         padding=payload.padding,
         stride=payload.stride,
+        client_response_mode=payload.client_response_mode,
+        stats_max_samples=payload.stats_max_samples,
+        upload_size_bytes=payload.upload_size_bytes,
+        upload_checksum=payload.upload_checksum,
     )
 
 
@@ -281,6 +289,10 @@ def _to_pb_conv2d_response_payload(payload) -> runtime_pb2.Conv2dResponsePayload
         output_length=payload.output_length,
         output_vector=payload.output_vector,
         result_artifact_id=payload.result_artifact_id,
+        stats_element_count=payload.stats_element_count,
+        stats_sum=payload.stats_sum,
+        stats_sum_squares=payload.stats_sum_squares,
+        stats_samples=list(payload.stats_samples),
     )
 
 
@@ -295,6 +307,59 @@ def _from_pb_conv2d_response_payload(payload: runtime_pb2.Conv2dResponsePayload)
         output_length=payload.output_length,
         output_vector=payload.output_vector,
         result_artifact_id=payload.result_artifact_id,
+        stats_element_count=payload.stats_element_count,
+        stats_sum=payload.stats_sum,
+        stats_sum_squares=payload.stats_sum_squares,
+        stats_samples=tuple(payload.stats_samples),
+    )
+
+
+def _to_pb_worker_timing(payload) -> runtime_pb2.WorkerTiming:
+    """Encode one per-worker timing entry into protobuf form."""
+    return runtime_pb2.WorkerTiming(
+        node_id=payload.node_id,
+        task_id=payload.task_id,
+        slice=payload.slice,
+        wall_ms=payload.wall_ms,
+        artifact_fetch_ms=payload.artifact_fetch_ms,
+        computation_ms=payload.computation_ms,
+        peripheral_ms=payload.peripheral_ms,
+    )
+
+
+def _from_pb_worker_timing(payload: runtime_pb2.WorkerTiming):
+    """Decode one per-worker timing entry from protobuf form."""
+    runtime = _runtime()
+    return runtime.WorkerTiming(
+        node_id=payload.node_id,
+        task_id=payload.task_id,
+        slice=payload.slice,
+        wall_ms=payload.wall_ms,
+        artifact_fetch_ms=payload.artifact_fetch_ms,
+        computation_ms=payload.computation_ms,
+        peripheral_ms=payload.peripheral_ms,
+    )
+
+
+def _to_pb_response_timing(payload) -> runtime_pb2.ResponseTiming:
+    """Encode the response-level timing breakdown into protobuf form."""
+    encoded = runtime_pb2.ResponseTiming(
+        dispatch_ms=payload.dispatch_ms,
+        task_window_ms=payload.task_window_ms,
+        aggregate_ms=payload.aggregate_ms,
+    )
+    encoded.workers.extend(_to_pb_worker_timing(worker) for worker in payload.workers)
+    return encoded
+
+
+def _from_pb_response_timing(payload: runtime_pb2.ResponseTiming):
+    """Decode the response-level timing breakdown from protobuf form."""
+    runtime = _runtime()
+    return runtime.ResponseTiming(
+        dispatch_ms=payload.dispatch_ms,
+        task_window_ms=payload.task_window_ms,
+        aggregate_ms=payload.aggregate_ms,
+        workers=tuple(_from_pb_worker_timing(worker) for worker in payload.workers),
     )
 
 
@@ -333,7 +398,7 @@ def _to_pb_conv2d_task_payload(payload) -> runtime_pb2.Conv2dTaskPayload:
     Args: payload internal Conv2dTaskPayload object.
     Returns: The generated protobuf task payload message.
     """
-    return runtime_pb2.Conv2dTaskPayload(
+    message = runtime_pb2.Conv2dTaskPayload(
         start_oc=payload.start_oc,
         end_oc=payload.end_oc,
         tensor_h=payload.tensor_h,
@@ -344,7 +409,12 @@ def _to_pb_conv2d_task_payload(payload) -> runtime_pb2.Conv2dTaskPayload:
         padding=payload.padding,
         stride=payload.stride,
         weight_data=payload.weight_data,
+        client_response_mode=payload.client_response_mode,
+        stats_max_samples=payload.stats_max_samples,
     )
+    if getattr(payload, "weight_artifact", None) is not None:
+        message.weight_artifact.CopyFrom(_to_pb_artifact_descriptor(payload.weight_artifact))
+    return message
 
 
 def _from_pb_conv2d_task_payload(payload: runtime_pb2.Conv2dTaskPayload):
@@ -365,6 +435,13 @@ def _from_pb_conv2d_task_payload(payload: runtime_pb2.Conv2dTaskPayload):
         padding=payload.padding,
         stride=payload.stride,
         weight_data=payload.weight_data,
+        client_response_mode=payload.client_response_mode,
+        stats_max_samples=payload.stats_max_samples,
+        weight_artifact=(
+            _from_pb_artifact_descriptor(payload.weight_artifact)
+            if payload.HasField("weight_artifact")
+            else None
+        ),
     )
 
 
@@ -411,6 +488,10 @@ def _to_pb_conv2d_result_payload(payload) -> runtime_pb2.Conv2dResultPayload:
         output_length=payload.output_length,
         output_vector=payload.output_vector,
         result_artifact_id=payload.result_artifact_id,
+        stats_element_count=payload.stats_element_count,
+        stats_sum=payload.stats_sum,
+        stats_sum_squares=payload.stats_sum_squares,
+        stats_samples=list(payload.stats_samples),
     )
 
 
@@ -429,6 +510,10 @@ def _from_pb_conv2d_result_payload(payload: runtime_pb2.Conv2dResultPayload):
         output_length=payload.output_length,
         output_vector=payload.output_vector,
         result_artifact_id=payload.result_artifact_id,
+        stats_element_count=payload.stats_element_count,
+        stats_sum=payload.stats_sum,
+        stats_sum_squares=payload.stats_sum_squares,
+        stats_samples=tuple(payload.stats_samples),
     )
 
 
@@ -498,6 +583,10 @@ def encode_envelope(message) -> bytes:
         envelope.client_request_ok.size = message.client_request_ok.size
         envelope.client_request_ok.object_id = message.client_request_ok.object_id
         envelope.client_request_ok.accepted_timestamp_ms = message.client_request_ok.accepted_timestamp_ms
+        envelope.client_request_ok.upload_id = message.client_request_ok.upload_id
+        envelope.client_request_ok.download_id = message.client_request_ok.download_id
+        envelope.client_request_ok.data_endpoint_host = message.client_request_ok.data_endpoint_host
+        envelope.client_request_ok.data_endpoint_port = message.client_request_ok.data_endpoint_port
     elif message.kind == runtime.MessageKind.CLIENT_REQUEST:
         if message.client_request is None:
             raise ValueError("CLIENT_REQUEST envelope missing payload")
@@ -550,6 +639,10 @@ def encode_envelope(message) -> bytes:
             envelope.client_response.result_artifact.CopyFrom(
                 _to_pb_artifact_descriptor(message.client_response.result_artifact)
             )
+        if message.client_response.timing is not None:
+            envelope.client_response.timing.CopyFrom(
+                _to_pb_response_timing(message.client_response.timing)
+            )
     elif message.kind == runtime.MessageKind.TASK_ASSIGN:
         if message.task_assign is None:
             raise ValueError("TASK_ASSIGN envelope missing payload")
@@ -601,6 +694,8 @@ def encode_envelope(message) -> bytes:
         envelope.task_result.timestamp_ms = message.task_result.timestamp_ms
         envelope.task_result.status_code = message.task_result.status_code
         envelope.task_result.iteration_count = message.task_result.iteration_count
+        envelope.task_result.computation_ms = message.task_result.computation_ms
+        envelope.task_result.peripheral_ms = message.task_result.peripheral_ms
         if message.task_result.gemv_payload is not None:
             envelope.task_result.gemv.CopyFrom(
                 _to_pb_gemv_result_payload(
@@ -716,6 +811,10 @@ def parse_envelope(payload: bytes):
             size=envelope_pb.client_request_ok.size,
             object_id=envelope_pb.client_request_ok.object_id,
             accepted_timestamp_ms=envelope_pb.client_request_ok.accepted_timestamp_ms,
+            upload_id=envelope_pb.client_request_ok.upload_id,
+            download_id=envelope_pb.client_request_ok.download_id,
+            data_endpoint_host=envelope_pb.client_request_ok.data_endpoint_host,
+            data_endpoint_port=envelope_pb.client_request_ok.data_endpoint_port,
         )
     if envelope_pb.HasField("client_request"):
         request_payload = None
@@ -767,6 +866,11 @@ def parse_envelope(payload: bytes):
             result_artifact=(
                 _from_pb_artifact_descriptor(envelope_pb.client_response.result_artifact)
                 if envelope_pb.client_response.HasField("result_artifact")
+                else None
+            ),
+            timing=(
+                _from_pb_response_timing(envelope_pb.client_response.timing)
+                if envelope_pb.client_response.HasField("timing")
                 else None
             ),
         )
@@ -835,6 +939,8 @@ def parse_envelope(payload: bytes):
                 if envelope_pb.task_result.HasField("result_artifact")
                 else None
             ),
+            computation_ms=envelope_pb.task_result.computation_ms,
+            peripheral_ms=envelope_pb.task_result.peripheral_ms,
         )
     if envelope_pb.HasField("artifact_release"):
         artifact_release = runtime.ArtifactRelease(

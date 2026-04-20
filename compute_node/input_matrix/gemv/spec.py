@@ -11,6 +11,8 @@ SMALL_ROWS = 2_048
 SMALL_COLS = 4_096
 MID_ROWS = 8_192
 MID_COLS = 16_384
+REFRESH_ROWS = MID_ROWS // 2
+REFRESH_COLS = MID_COLS // 2
 DEFAULT_MATRIX_SEED = 0x123456789ABCDEF0
 DEFAULT_VECTOR_SEED = 0x0FEDCBA987654321
 DEFAULT_CHUNK_VALUES = 8_388_608  # 32 MiB per batch
@@ -19,10 +21,14 @@ HASH_READ_BYTES = 16 * 1024 * 1024
 GENERATOR_ALGORITHM = "splitmix64_counter_to_float32_words_v1"
 WORKLOAD_SIZE_SMALL = "small"
 WORKLOAD_SIZE_MID = "mid"
+WORKLOAD_SIZE_REFRESH = "refresh"
 WORKLOAD_SIZE_LARGE = "large"
 LEGACY_SIZE_ALIASES = {
     "test": WORKLOAD_SIZE_SMALL,
     "medium": WORKLOAD_SIZE_MID,
+    "idle": WORKLOAD_SIZE_REFRESH,
+    "auto": WORKLOAD_SIZE_REFRESH,
+    "autotest": WORKLOAD_SIZE_REFRESH,
     "runtime": WORKLOAD_SIZE_LARGE,
 }
 DEFAULT_ROWS = LARGE_ROWS
@@ -86,6 +92,11 @@ def get_mid_input_matrix_spec() -> InputMatrixSpec:
     return InputMatrixSpec(rows=MID_ROWS, cols=MID_COLS)
 
 
+def get_refresh_input_matrix_spec() -> InputMatrixSpec:
+    """Return the dedicated idle-refresh GEMV dataset specification."""
+    return InputMatrixSpec(rows=REFRESH_ROWS, cols=REFRESH_COLS)
+
+
 def get_large_input_matrix_spec() -> InputMatrixSpec:
     """Return the canonical large GEMV dataset specification."""
     return InputMatrixSpec(rows=LARGE_ROWS, cols=LARGE_COLS)
@@ -120,6 +131,8 @@ def build_input_matrix_spec(
             base_spec = get_small_input_matrix_spec()
         elif default_variant == WORKLOAD_SIZE_MID:
             base_spec = get_mid_input_matrix_spec()
+        elif default_variant == WORKLOAD_SIZE_REFRESH:
+            base_spec = get_refresh_input_matrix_spec()
         else:
             base_spec = get_large_input_matrix_spec()
         return InputMatrixSpec(rows=base_spec.rows, cols=base_spec.cols)
@@ -130,6 +143,9 @@ def build_input_matrix_spec(
     elif default_variant == WORKLOAD_SIZE_MID:
         default_rows = MID_ROWS
         default_cols = MID_COLS
+    elif default_variant == WORKLOAD_SIZE_REFRESH:
+        default_rows = REFRESH_ROWS
+        default_cols = REFRESH_COLS
     else:
         default_rows = LARGE_ROWS
         default_cols = LARGE_COLS

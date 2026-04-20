@@ -123,6 +123,9 @@ class BackendResult:
     best_trial: TrialRecord | None
     trials: list[TrialRecord] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    # Detailed per-trial timing / bandwidth breakdown emitted by the native runner
+    # in --verbose mode. Benchmark-analysis only; runtime code paths ignore this.
+    raw_report: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the backend summary for JSON output.
@@ -138,4 +141,5 @@ class BackendResult:
             "best_trial": None if self.best_trial is None else self.best_trial.to_dict(),
             "trials": [trial.to_dict() for trial in self.trials],
             "notes": list(self.notes),
+            "raw_report": dict(self.raw_report),
         }

@@ -8,6 +8,7 @@ from common.float32_codec import pack_float32_values, unpack_float32_bytes
 from common.types import ComputeHardwarePerformance, ComputePerformanceSummary, HardwareProfile
 from app.constants import (
     COMPUTE_NODE_NAME,
+    CONV2D_CLIENT_RESPONSE_STATS_ONLY,
     MAIN_NODE_NAME,
     METHOD_GEMV,
     METHOD_CONV2D,
@@ -19,6 +20,7 @@ from wire.internal_protocol.control_plane_codec import encode_envelope, parse_en
 from wire.internal_protocol.runtime_transport import (
     MessageKind,
     Conv2dRequestPayload,
+    Conv2dResponsePayload,
     Conv2dResultPayload,
     Conv2dTaskPayload,
     TransferMode,
@@ -295,6 +297,137 @@ class RuntimeProtocolTests(unittest.TestCase):
         self.assertEqual(result.task_result.output_w, 8)
         self.assertEqual(result.task_result.output_length, 8 * 8 * 2)
         self.assertEqual(result.task_result.start_oc, 2)
+
+    def test_conv2d_stats_only_request_and_response_round_trip(self) -> None:
+        request = parse_envelope(
+            encode_envelope(
+                build_client_request(
+                    SUPERWEB_CLIENT_NAME,
+                    "req-stats",
+                    METHOD_CONV2D,
+                    b"",
+                    size="small",
+                    object_id="conv2d/small",
+                    stream_id="stream-stats",
+                    tensor_h=8,
+                    tensor_w=8,
+                    channels_in=4,
+                    channels_out=8,
+                    kernel_size=3,
+                    padding=1,
+                    stride=1,
+                    conv2d_client_response_mode=CONV2D_CLIENT_RESPONSE_STATS_ONLY,
+                    conv2d_stats_max_samples=16,
+                )
+            )
+        )
+        self.assertIsInstance(request.client_request.request_payload, Conv2dRequestPayload)
+        assert request.client_request.conv2d_payload is not None
+        self.assertEqual(
+            request.client_request.conv2d_payload.client_response_mode,
+            CONV2D_CLIENT_RESPONSE_STATS_ONLY,
+        )
+        self.assertEqual(request.client_request.conv2d_payload.stats_max_samples, 16)
+
+        task_assign = parse_envelope(
+            encode_envelope(
+                build_task_assign(
+                    request_id="req-stats",
+                    node_id=COMPUTE_NODE_NAME,
+                    task_id="req-stats:worker-a:0",
+                    method=METHOD_CONV2D,
+                    size="small",
+                    object_id="conv2d/small",
+                    stream_id="stream-stats",
+                    iteration_count=1,
+                    transfer_mode=TransferMode.INLINE_PREFERRED,
+                    task_payload=Conv2dTaskPayload(
+                        start_oc=0,
+                        end_oc=4,
+                        tensor_h=8,
+                        tensor_w=8,
+                        channels_in=4,
+                        channels_out=8,
+                        kernel_size=3,
+                        padding=1,
+                        stride=1,
+                        weight_data=b"\x00" * (3 * 3 * 4 * 4 * 4),
+                        client_response_mode=CONV2D_CLIENT_RESPONSE_STATS_ONLY,
+                        stats_max_samples=16,
+                    ),
+                )
+            )
+        )
+        task_conv2d = task_assign.task_assign.conv2d_payload
+        assert task_conv2d is not None
+        self.assertEqual(task_conv2d.client_response_mode, CONV2D_CLIENT_RESPONSE_STATS_ONLY)
+        self.assertEqual(task_conv2d.stats_max_samples, 16)
+
+        worker_result = parse_envelope(
+            encode_envelope(
+                build_task_result(
+                    "req-stats",
+                    COMPUTE_NODE_NAME,
+                    "req-stats:worker-a:0",
+                    STATUS_OK,
+                    iteration_count=1,
+                    result_payload=Conv2dResultPayload(
+                        start_oc=0,
+                        end_oc=4,
+                        output_h=8,
+                        output_w=8,
+                        output_length=8 * 8 * 4,
+                        output_vector=b"",
+                        result_artifact_id="",
+                        stats_element_count=8 * 8 * 4,
+                        stats_sum=12.5,
+                        stats_sum_squares=75.25,
+                        stats_samples=(0.5, 1.0, 1.5),
+                    ),
+                )
+            )
+        )
+        result_conv2d = worker_result.task_result.conv2d_payload
+        assert result_conv2d is not None
+        self.assertEqual(result_conv2d.stats_element_count, 8 * 8 * 4)
+        self.assertAlmostEqual(result_conv2d.stats_sum, 12.5)
+        self.assertAlmostEqual(result_conv2d.stats_sum_squares, 75.25)
+        self.assertEqual(result_conv2d.stats_samples, (0.5, 1.0, 1.5))
+
+        stats_payload = Conv2dResponsePayload(
+            output_length=64,
+            output_vector=b"",
+            result_artifact_id="",
+            stats_element_count=64,
+            stats_sum=10.0,
+            stats_sum_squares=100.0,
+            stats_samples=(1.0, 2.0, 3.0),
+        )
+        response = parse_envelope(
+            encode_envelope(
+                build_client_response(
+                    request_id="req-stats",
+                    status_code=STATUS_OK,
+                    method=METHOD_CONV2D,
+                    object_id="conv2d/small",
+                    stream_id="stream-stats",
+                    worker_count=1,
+                    client_count=1,
+                    client_id="client-1",
+                    iteration_count=1,
+                    response_payload=stats_payload,
+                )
+            )
+        )
+        self.assertEqual(response.kind, MessageKind.CLIENT_RESPONSE)
+        cp = response.client_response.conv2d_payload
+        assert cp is not None
+        self.assertEqual(cp.output_length, 64)
+        self.assertEqual(cp.stats_element_count, 64)
+        self.assertAlmostEqual(cp.stats_sum, 10.0)
+        self.assertAlmostEqual(cp.stats_sum_squares, 100.0)
+        self.assertEqual(cp.stats_samples, (1.0, 2.0, 3.0))
+        self.assertEqual(response.client_response.result_artifact_id, "")
 
     def test_framed_send_receive_round_trip(self) -> None:
         left, right = socket.socketpair()

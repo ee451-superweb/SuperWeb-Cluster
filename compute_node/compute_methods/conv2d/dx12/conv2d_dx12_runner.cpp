@@ -12,6 +12,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -134,6 +135,7 @@ struct Options {
     int autotune_repeats = 1;
     int measurement_repeats = 1;
     bool task_mode = false;
+    bool verbose = false;
 };
 
 struct PhaseMetrics {
@@ -149,6 +151,22 @@ struct TrialMetrics {
     int tile_size = 0;
     PhaseMetrics autotune;
     PhaseMetrics measurement;
+};
+
+struct TrialRecord {
+    std::string phase;
+    int candidate_index = 0;
+    int candidate_total = 0;
+    int trial_index_within_candidate = 0;
+    int repeats_for_candidate = 0;
+    int thread_group_size = 0;
+    int tile_size = 0;
+    int dispatches_per_repeat = 0;
+    double host_prep_seconds = 0.0;
+    double host_compute_seconds = 0.0;
+    double device_to_host_seconds = 0.0;
+    double host_postproc_seconds = 0.0;
+    double total_wall_seconds = 0.0;
 };
 
 struct StatusTargets {
@@ -546,13 +564,20 @@ int choose_output_batch_channels(int c_out, UINT64 spatial_size) {
 
 Options parse_args(int argc, char** argv) {
     Options options;
-    for (int index = 1; index < argc; index += 2) {
+    int index = 1;
+    while (index < argc) {
+        const std::string key = argv[index];
+        if (key == "--verbose") {
+            options.verbose = true;
+            index += 1;
+            continue;
+        }
         if (index + 1 >= argc) {
             throw std::runtime_error("missing value for command line flag");
         }
 
-        const std::string key = argv[index];
         const std::string value = argv[index + 1];
+        index += 2;
         if (key == "--input") {
             options.input_path = value;
         } else if (key == "--weight") {
@@ -1240,6 +1265,31 @@ int main(int argc, char** argv) {
         bool has_best_metrics = false;
         int trials_run = 0;
         const int total_trials = static_cast<int>(options.thread_group_sizes.size() * options.tile_sizes.size());
+
+        std::vector<TrialRecord> trial_records;
+        trial_records.reserve(static_cast<size_t>(total_trials) + 1);
+
+        const int out_h_plan = (options.h + 2 * options.pad - options.k) / options.stride + 1;
+        const int out_w_plan = (options.w + 2 * options.pad - options.k) / options.stride + 1;
+        const double flops_per_run =
+            2.0 * static_cast<double>(out_h_plan) * static_cast<double>(out_w_plan) *
+            static_cast<double>(options.c_out) * static_cast<double>(options.c_in) *
+            static_cast<double>(options.k) * static_cast<double>(options.k);
+        const long long bytes_input =
+            static_cast<long long>(options.h) * options.w * options.c_in * 4;
+        const long long bytes_weight =
+            static_cast<long long>(options.c_out) * options.c_in * options.k * options.k * 4;
+        const long long bytes_output =
+            static_cast<long long>(out_h_plan) * out_w_plan * options.c_out * 4;
+        const long long bytes_kernel_compulsory = bytes_input + bytes_weight + bytes_output;
+
+        if (options.verbose) {
+            std::fprintf(stderr,
+                "[conv2d dx12 plan] phase=autotune candidates=%d autotune_repeats=%d\n",
+                total_trials, options.autotune_repeats);
+            std::fflush(stderr);
+        }
+
         for (const int thread_group_size : options.thread_group_sizes) {
             for (const int tile_size : options.tile_sizes) {
                 const int trial_index = trials_run + 1;
@@ -1261,6 +1311,38 @@ int main(int argc, char** argv) {
                 candidate.tile_size = tile_size;
                 candidate.autotune = runner.run_configuration(thread_group_size, tile_size, options.autotune_repeats);
                 ++trials_run;
+
+                {
+                    TrialRecord record;
+                    record.phase = "autotune";
+                    record.candidate_index = trials_run - 1;
+                    record.candidate_total = total_trials;
+                    record.trial_index_within_candidate = 0;
+                    record.repeats_for_candidate = options.autotune_repeats;
+                    record.thread_group_size = thread_group_size;
+                    record.tile_size = tile_size;
+                    record.dispatches_per_repeat = candidate.autotune.dispatches_per_repeat;
+                    record.host_prep_seconds = 0.0;
+                    record.host_compute_seconds = candidate.autotune.wall_clock_latency_seconds;
+                    record.device_to_host_seconds = 0.0;
+                    record.host_postproc_seconds = 0.0;
+                    record.total_wall_seconds = candidate.autotune.wall_clock_latency_seconds;
+                    trial_records.push_back(std::move(record));
+                }
+
+                if (options.verbose) {
+                    const double compute_gflops = candidate.autotune.effective_gflops;
+                    std::fprintf(stderr,
+                        "[conv2d dx12 autotune %d/%d] thread_group=%d tile=%d "
+                        "repeats=%d per_run=%.6fs effective_gflops=%.3f\n",
+                        trials_run, total_trials,
+                        thread_group_size, tile_size,
+                        options.autotune_repeats,
+                        candidate.autotune.wall_clock_latency_seconds,
+                        compute_gflops);
+                    std::fflush(stderr);
+                }
+
                 const bool became_best =
                     !has_best_metrics ||
                     candidate.autotune.wall_clock_latency_seconds < best_metrics.autotune.wall_clock_latency_seconds;
@@ -1318,12 +1400,51 @@ int main(int argc, char** argv) {
                 json_int_field("repeats", options.measurement_repeats),
             }
         );
+
+        if (options.verbose) {
+            std::fprintf(stderr,
+                "[conv2d dx12 plan] phase=measurement selected_thread_group=%d "
+                "selected_tile=%d measurement_repeats=%d\n",
+                best_metrics.thread_group_size, best_metrics.tile_size,
+                options.measurement_repeats);
+            std::fflush(stderr);
+        }
+
         best_metrics.measurement = runner.run_configuration(
             best_metrics.thread_group_size,
             best_metrics.tile_size,
             options.measurement_repeats,
             output_path
         );
+
+        {
+            TrialRecord record;
+            record.phase = "measurement";
+            record.candidate_index = 0;
+            record.candidate_total = 1;
+            record.trial_index_within_candidate = 0;
+            record.repeats_for_candidate = options.measurement_repeats;
+            record.thread_group_size = best_metrics.thread_group_size;
+            record.tile_size = best_metrics.tile_size;
+            record.dispatches_per_repeat = best_metrics.measurement.dispatches_per_repeat;
+            record.host_prep_seconds = 0.0;
+            record.host_compute_seconds = best_metrics.measurement.wall_clock_latency_seconds;
+            record.device_to_host_seconds = 0.0;
+            record.host_postproc_seconds = 0.0;
+            record.total_wall_seconds = best_metrics.measurement.wall_clock_latency_seconds;
+            trial_records.push_back(std::move(record));
+        }
+
+        if (options.verbose) {
+            std::fprintf(stderr,
+                "[conv2d dx12 measurement 1/1] thread_group=%d tile=%d "
+                "repeats=%d per_run=%.6fs effective_gflops=%.3f\n",
+                best_metrics.thread_group_size, best_metrics.tile_size,
+                options.measurement_repeats,
+                best_metrics.measurement.wall_clock_latency_seconds,
+                best_metrics.measurement.effective_gflops);
+            std::fflush(stderr);
+        }
         emit_native_status(
             "method.conv2d.backend.native_runner.measurement.complete",
             {
@@ -1376,8 +1497,48 @@ int main(int argc, char** argv) {
                   << best_metrics.measurement.wall_clock_latency_seconds << ","
                   << "\"measurement_effective_gflops\":" << std::fixed << std::setprecision(6)
                   << best_metrics.measurement.effective_gflops << ","
-                  << "\"measurement_checksum\":\"" << best_metrics.measurement.checksum << "\""
-                  << "}\n";
+                  << "\"measurement_checksum\":\"" << best_metrics.measurement.checksum << "\","
+                  << "\"flops_per_run\":" << std::fixed << std::setprecision(1) << flops_per_run << ","
+                  << "\"bytes_input\":" << bytes_input << ","
+                  << "\"bytes_weight\":" << bytes_weight << ","
+                  << "\"bytes_output\":" << bytes_output << ","
+                  << "\"bytes_kernel_compulsory_memory_traffic\":" << bytes_kernel_compulsory << ","
+                  << "\"notes_schema\":\"DX12 backend: host_prep/device_to_host/host_postproc are zero in this schema. Each trial record collapses one run_configuration submit where autotune_repeats (or measurement_repeats) dispatches are batched into a single command list; host_compute_seconds and total_wall_seconds both equal the amortized per-run wall clock. Per-phase GPU timing split (prep/compute/D2H/postproc) is deferred pending DX12 timestamp query implementation; memory_bandwidth model assumes perfect DRAM reuse (real traffic >= compulsory).\","
+                  << "\"trials\":[";
+        for (size_t i = 0; i < trial_records.size(); ++i) {
+            const auto& tr = trial_records[i];
+            const double compute_gflops = tr.host_compute_seconds > 0.0
+                ? (flops_per_run / tr.host_compute_seconds / 1e9) : 0.0;
+            const double effective_gflops = tr.total_wall_seconds > 0.0
+                ? (flops_per_run / tr.total_wall_seconds / 1e9) : 0.0;
+            const double kernel_bandwidth_gibps = tr.host_compute_seconds > 0.0
+                ? (static_cast<double>(bytes_kernel_compulsory) / tr.host_compute_seconds / (1024.0 * 1024.0 * 1024.0))
+                : 0.0;
+            std::cout << (i == 0 ? "" : ",")
+                      << "{"
+                      << "\"phase\":\"" << tr.phase << "\","
+                      << "\"candidate_index\":" << tr.candidate_index << ","
+                      << "\"candidate_total\":" << tr.candidate_total << ","
+                      << "\"trial_index_within_candidate\":" << tr.trial_index_within_candidate << ","
+                      << "\"repeats_for_candidate\":" << tr.repeats_for_candidate << ","
+                      << "\"thread_group_size\":" << tr.thread_group_size << ","
+                      << "\"tile_size\":" << tr.tile_size << ","
+                      << "\"dispatches_per_repeat\":" << tr.dispatches_per_repeat << ","
+                      << std::fixed << std::setprecision(9)
+                      << "\"host_prep_seconds\":" << tr.host_prep_seconds << ","
+                      << "\"host_compute_seconds\":" << tr.host_compute_seconds << ","
+                      << "\"device_to_host_seconds\":" << tr.device_to_host_seconds << ","
+                      << "\"host_postproc_seconds\":" << tr.host_postproc_seconds << ","
+                      << "\"total_wall_seconds\":" << tr.total_wall_seconds << ","
+                      << std::setprecision(6)
+                      << "\"compute_gflops\":" << compute_gflops << ","
+                      << "\"effective_gflops\":" << effective_gflops << ","
+                      << "\"pcie_h2d_bandwidth_gibps\":0.0,"
+                      << "\"pcie_d2h_bandwidth_gibps\":0.0,"
+                      << "\"kernel_memory_bandwidth_gibps_compulsory_lower_bound_model\":" << kernel_bandwidth_gibps
+                      << "}";
+        }
+        std::cout << "]}\n";
         return 0;
     } catch (const std::exception& exc) {
         emit_native_status(

@@ -18,6 +18,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from adapters.process import enable_utf8_mode, python_utf8_command
+
+enable_utf8_mode()
+
 from app.runtime_environment import relaunch_with_project_python_if_needed
 from setup import active_python_path
 from app.constants import DX12_BACKEND_DISABLED_REASON, METHOD_GEMV, METHOD_CONV2D
@@ -127,6 +131,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Force backend executables to rebuild instead of reusing cached binaries.",
     )
     parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Stream per-trial autotune progress from native runners and record the "
+        "full per-trial breakdown in each method's raw_report section.",
+    )
+    parser.add_argument(
         "--accumulation-precision",
         choices=("fp32", "fp64_accumulate"),
         default="fp32",
@@ -202,6 +212,7 @@ def _run_gemv_benchmark(args: argparse.Namespace) -> dict[str, object]:
         rows=args.rows,
         cols=args.cols,
         workload_mode=workload_mode,
+        verbose=bool(getattr(args, "verbose", False)),
     )
     previous_default_dataset_dir = gemv_runner.DEFAULT_DATASET_DIR
     try:
@@ -230,23 +241,25 @@ def _run_conv2d_benchmark(args: argparse.Namespace) -> dict[str, object]:
     started = time.perf_counter()
     with tempfile.TemporaryDirectory(prefix="superweb-spatial-benchmark-") as temp_dir:
         temp_output_path = Path(temp_dir) / "conv2d_result.json"
-        command = [
-            str(active_python_path()),
-            str(CONV2D_BENCHMARK_PATH),
+        command = python_utf8_command(
+            active_python_path(),
+            CONV2D_BENCHMARK_PATH,
             "--output",
-            str(temp_output_path),
+            temp_output_path,
             "--role",
             args.role,
             "--dataset-dir",
-            str(METHOD_DATASET_DIRS[METHOD_CONV2D]),
+            METHOD_DATASET_DIRS[METHOD_CONV2D],
             "--workload-mode",
             workload_mode,
-        ]
+        )
         if args.backend:
             for backend in args.backend:
                 command.extend(["--backend", backend])
         if args.rebuild:
             command.append("--rebuild")
+        if getattr(args, "verbose", False):
+            command.append("--verbose")
         for field, cli_flag in (
             ("h", "--h"),
             ("w", "--w"),
@@ -277,6 +290,8 @@ def _run_conv2d_benchmark(args: argparse.Namespace) -> dict[str, object]:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 bufsize=1,
             ) as process:
                 assert process.stdout is not None

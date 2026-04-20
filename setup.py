@@ -19,6 +19,10 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from adapters.process import enable_utf8_mode, python_utf8_command
+
+enable_utf8_mode()
+
 PROJECT_ROOT = Path(__file__).resolve().parent
 VENV_DIR = PROJECT_ROOT / ".venv"
 REQUIREMENTS_PATH = PROJECT_ROOT / "requirements.txt"
@@ -95,13 +99,10 @@ def active_python_path() -> Path:
 def current_python_uses_project_venv() -> bool:
     """Return whether the current interpreter is the project's venv Python."""
 
-    venv_python = project_python_path()
-    if not venv_python.exists():
-        return False
     try:
-        return Path(sys.executable).resolve() == venv_python.resolve()
+        return Path(sys.prefix).resolve() == VENV_DIR.resolve()
     except OSError:
-        return Path(sys.executable) == venv_python
+        return Path(sys.prefix) == VENV_DIR
 
 
 def requirements_hash() -> str:
@@ -148,7 +149,7 @@ def ensure_virtual_environment(logger: logging.Logger) -> bool:
     logger.info("Creating local virtual environment at %s.", display_project_path(VENV_DIR))
     try:
         subprocess.run(
-            [sys.executable, "-m", "venv", str(VENV_DIR)],
+            python_utf8_command(sys.executable, "-m", "venv", VENV_DIR),
             check=True,
             cwd=PROJECT_ROOT,
         )
@@ -181,7 +182,7 @@ def install_project_requirements(logger: logging.Logger) -> bool:
     )
     try:
         subprocess.run(
-            [str(project_python_path()), "-m", "pip", "install", "-r", str(REQUIREMENTS_PATH)],
+            python_utf8_command(project_python_path(), "-m", "pip", "install", "-r", REQUIREMENTS_PATH),
             check=True,
             cwd=PROJECT_ROOT,
         )

@@ -16,6 +16,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from adapters.process import enable_utf8_mode
+
+enable_utf8_mode()
+
 from app.runtime_environment import relaunch_with_project_python_if_needed
 from app.constants import METHOD_GEMV, METHOD_CONV2D
 from compute_node.input_matrix.gemv.generate import main as generate_gemv_main
@@ -57,6 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Chunk size in MiB used while streaming data.",
     )
     parser.add_argument("--skip-small", action="store_true", help="Skip the small dataset.")
+    parser.add_argument("--skip-refresh", action="store_true", help="Skip the idle-refresh dataset.")
     parser.add_argument("--skip-mid", action="store_true", help="Skip the mid-sized dataset.")
     parser.add_argument("--skip-medium", action="store_true", help="Alias for --skip-mid.")
     parser.add_argument("--skip-large", action="store_true", help="Skip the large dataset.")
@@ -74,6 +79,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stride", type=int, help="Conv2d stride override.")
     parser.add_argument("--include-large-weight", action="store_true", help="Generate large weights for compute-role conv2d datasets.")
     parser.add_argument("--include-runtime-weight", action="store_true", help="Alias for --include-large-weight.")
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Emit extra per-method forwarded-argument details to stdout.",
+    )
     return parser
 
 
@@ -112,6 +122,8 @@ def _common_flags(args: argparse.Namespace) -> list[str]:
         argv.extend(["--chunk-mib", str(args.chunk_mib)])
     if args.skip_small or args.skip_test:
         argv.append("--skip-small")
+    if args.skip_refresh:
+        argv.append("--skip-refresh")
     if args.skip_mid or args.skip_medium:
         argv.append("--skip-mid")
     if args.skip_large or args.skip_runtime:
@@ -190,11 +202,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.output_dir is not None and len(methods) > 1:
         raise SystemExit("--output-dir can only be used when generating one method at a time")
 
+    verbose = bool(getattr(args, "verbose", False))
     for method_name in methods:
         if method_name == METHOD_GEMV:
-            generate_gemv_main(_build_gemv_args(args))
+            forwarded = _build_gemv_args(args)
+            if verbose:
+                print(f"[input_matrix verbose] gemv forwarded_args={forwarded}", flush=True)
+            generate_gemv_main(forwarded)
         elif method_name == METHOD_CONV2D:
-            generate_conv2d_main(_build_conv2d_args(args))
+            forwarded = _build_conv2d_args(args)
+            if verbose:
+                print(f"[input_matrix verbose] conv2d forwarded_args={forwarded}", flush=True)
+            generate_conv2d_main(forwarded)
         else:
             raise ValueError(f"unsupported input-matrix method: {method_name}")
     return 0

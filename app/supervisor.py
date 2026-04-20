@@ -6,6 +6,10 @@ import logging
 import random
 import signal
 import time
+import uuid
+
+_PRE_DISCOVERY_STAGGER_MAX_SECONDS = 1.5
+_PRE_DISCOVERY_STAGGER_SLOTS = 1024
 
 from adapters.firewall import cleanup_rules
 from adapters.audit_log import write_audit_event
@@ -65,6 +69,17 @@ class Supervisor:
         """Record and log one supervisor state transition."""
         self.state = state
         self.logger.info("Supervisor state -> %s", state.value)
+
+    def _mac_seeded_pre_discovery_delay(self) -> float:
+        """Return a MAC-derived deterministic stagger before discovery starts.
+
+        Why: two machines booting at the same moment both finish discovery at
+        the same moment and both promote to main (split brain). MAC-derived
+        slotting gives each machine a different start offset so the later
+        starter has time to hear the earlier starter's ANNOUNCE.
+        """
+        slot = uuid.getnode() % _PRE_DISCOVERY_STAGGER_SLOTS
+        return slot * (_PRE_DISCOVERY_STAGGER_MAX_SECONDS / _PRE_DISCOVERY_STAGGER_SLOTS)
 
     def _next_discovery_retry_delay(self, attempt: int) -> float:
         """Return a jittered retry delay for the next discovery attempt.
@@ -170,6 +185,13 @@ class Supervisor:
             # starts listening for future compute nodes on the multicast group.
             if self.config.role == "discover":
                 self._set_state(RuntimeState.DISCOVERY)
+                pre_delay = self._mac_seeded_pre_discovery_delay()
+                if pre_delay > 0 and not self._shutdown_requested:
+                    self.logger.info(
+                        "MAC-seeded pre-discovery stagger: sleeping %.3fs",
+                        pre_delay,
+                    )
+                    time.sleep(pre_delay)
                 result = self._discover_with_retries()
                 if result.success and not self._shutdown_requested:
                     return self._join_main_node(result)

@@ -7,6 +7,7 @@ an artifact by descriptor, and clean up temporary local storage automatically.
 
 from __future__ import annotations
 
+import concurrent.futures
 import hashlib
 import os
 import re
@@ -20,6 +21,7 @@ from pathlib import Path
 from transport.large_data_transfer import (
     LargeDataTransferServer,
     PublishedArtifact,
+    UploadSlot,
     fetch_artifact_to_file,
     publish_file_descriptor,
 )
@@ -56,10 +58,14 @@ class ArtifactManager:
         self.chunk_size = chunk_size
         self.root_dir.mkdir(parents=True, exist_ok=True)
         self._artifacts: dict[str, ManagedArtifact] = {}
+        self._upload_slots: dict[str, UploadSlot] = {}
+        self._upload_lock = threading.Lock()
         self._server = LargeDataTransferServer(
             host="",
             port=port,
             resolve_artifact=self._resolve_artifact,
+            resolve_upload_slot=self._resolve_upload_slot,
+            consume_upload_slot=self._consume_upload_slot,
             chunk_size=chunk_size,
         )
         self._reaper_stop_event = threading.Event()
@@ -121,6 +127,66 @@ class ArtifactManager:
         self._prune_expired_artifacts()
         managed = self._artifacts.get(artifact_id)
         return None if managed is None else managed.published
+
+    def _resolve_upload_slot(self, upload_id: str) -> UploadSlot | None:
+        """Use this internal callback when the data-plane server validates an incoming DELIVER.
+
+        Args: upload_id identifier the client attached to its upload attempt.
+        Returns: The matching pre-registered upload slot, or None when unknown.
+        """
+        with self._upload_lock:
+            return self._upload_slots.get(upload_id)
+
+    def _consume_upload_slot(self, upload_id: str) -> None:
+        """Use this internal callback after an upload slot has been served or failed.
+
+        Args: upload_id identifier of the slot whose lifecycle has completed.
+        Returns: None after the slot is removed from the registry.
+        """
+        with self._upload_lock:
+            self._upload_slots.pop(upload_id, None)
+
+    def register_upload_slot(
+        self,
+        *,
+        upload_id: str,
+        expected_size: int,
+        expected_checksum: str = "",
+        expected_content_type: str = "",
+        destination_suffix: str = ".upload.bin",
+    ) -> concurrent.futures.Future:
+        """Use this when the control plane has negotiated an upload and needs a landing slot.
+
+        Args: upload_id main-assigned id that the client will carry in its DELIVER frame, expected_size declared byte count to enforce, expected_checksum optional SHA-256 to validate at END, expected_content_type optional content label to cross-check, destination_suffix local filename suffix used on disk.
+        Returns: A Future that resolves to the final local path once the upload completes, or raises if the upload is rejected.
+        """
+        self.start()
+        future: concurrent.futures.Future = concurrent.futures.Future()
+        destination_path = self._storage_path_for_artifact_id(upload_id, suffix=destination_suffix)
+        slot = UploadSlot(
+            upload_id=upload_id,
+            expected_size=expected_size,
+            expected_checksum=expected_checksum,
+            expected_content_type=expected_content_type,
+            destination_path=destination_path,
+            completion_future=future,
+        )
+        with self._upload_lock:
+            if upload_id in self._upload_slots:
+                raise ValueError(f"upload slot already registered: {upload_id}")
+            self._upload_slots[upload_id] = slot
+        return future
+
+    def cancel_upload_slot(self, upload_id: str) -> None:
+        """Use this to retire an upload slot that will never be consumed.
+
+        Args: upload_id identifier of the slot to remove.
+        Returns: None. If the slot is still pending its future is cancelled.
+        """
+        with self._upload_lock:
+            slot = self._upload_slots.pop(upload_id, None)
+        if slot is not None and not slot.completion_future.done():
+            slot.completion_future.cancel()
 
     def _reaper_loop(self) -> None:
         """Use this background loop to periodically delete expired managed artifacts.

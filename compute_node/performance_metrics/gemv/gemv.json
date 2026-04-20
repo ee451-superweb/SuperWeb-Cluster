@@ -1,0 +1,180 @@
+{
+  "schema_version": 5,
+  "generated_at_unix": 1776557750.7879863,
+  "benchmark_elapsed_seconds": 144.76883250000537,
+  "device_overview": {
+    "system": "Windows",
+    "release": "11",
+    "machine": "AMD64",
+    "python_version": "3.14.0",
+    "cpu": {
+      "name": "Intel(R) Core(TM) Ultra 9 275HX",
+      "logical_cpu_count": 24
+    },
+    "memory": {
+      "total_bytes": 34359738368,
+      "modules": [
+        {
+          "capacity_bytes": 17179869184,
+          "configured_clock_mhz": 5600,
+          "manufacturer": "SK Hynix",
+          "part_number": "HMCG78AGBSA095N"
+        },
+        {
+          "capacity_bytes": 17179869184,
+          "configured_clock_mhz": 5600,
+          "manufacturer": "SK Hynix",
+          "part_number": "HMCG78AGBSA095N"
+        }
+      ]
+    },
+    "gpus": [
+      {
+        "name": "OrayIddDriver Device",
+        "vendor": "Shanghai Best Oray Information Technology Co., Ltd.",
+        "pnp_device_id": "ROOT\\DISPLAY\\0000"
+      },
+      {
+        "name": "NVIDIA GeForce RTX 5080 Laptop GPU",
+        "vendor": "NVIDIA",
+        "pnp_device_id": "PCI\\VEN_10DE&DEV_2C19&SUBSYS_14741462&REV_A1\\87643B2CD42DB04800"
+      }
+    ]
+  },
+  "methods": {
+    "gemv": {
+      "method": "gemv",
+      "display_name": "Fixed Matrix-Vector Multiplication",
+      "generated_at_unix": 1776557618.7201805,
+      "benchmark_elapsed_seconds": 13.668022899975767,
+      "dataset": {
+        "root_dir": "compute_node/input_matrix/gemv/generated",
+        "artifacts": {
+          "autotune_matrix": "compute_node/input_matrix/gemv/generated/small_A.bin",
+          "autotune_vector": "compute_node/input_matrix/gemv/generated/small_x.bin",
+          "measurement_matrix": "compute_node/input_matrix/gemv/generated/large_A.bin",
+          "measurement_vector": "compute_node/input_matrix/gemv/generated/large_x.bin"
+        },
+        "shape": {
+          "autotune": {
+            "rows": 2048,
+            "cols": 4096
+          },
+          "measurement": {
+            "rows": 16384,
+            "cols": 32768
+          }
+        },
+        "bytes": {
+          "autotune_matrix": 33554432,
+          "autotune_vector": 16384,
+          "measurement_matrix": 2147483648,
+          "measurement_vector": 131072
+        },
+        "generated": false
+      },
+      "workload": {
+        "autotune_plan": {
+          "name": "fixed-gemv-2048x4096",
+          "rows": 2048,
+          "cols": 4096,
+          "dataset_variant": "small",
+          "autotune_repeats": 3,
+          "selection_metric": "autotune_average_latency",
+          "input_dtype": "fp32",
+          "output_dtype": "fp32",
+          "accumulation_precision": "fp32",
+          "workload_mode": "full"
+        },
+        "measurement_plan": {
+          "name": "fixed-gemv-16384x32768",
+          "rows": 16384,
+          "cols": 32768,
+          "dataset_variant": "large",
+          "measurement_repeats": 1,
+          "reported_metric": "measurement_average_latency",
+          "cross_backend_validation": "fp32_tolerance",
+          "full_runtime_measurement": true,
+          "workload_mode": "full"
+        }
+      },
+      "backends_considered": [
+        "cuda"
+      ],
+      "detected_backends": [
+        "cuda"
+      ],
+      "usable_backends": [
+        "cuda"
+      ],
+      "ranking": [
+        "cuda"
+      ],
+      "best_backend": "cuda",
+      "backends": {
+        "cuda": {
+          "backend": "cuda",
+          "available": true,
+          "device_name": "NVIDIA GeForce RTX 5080 Laptop GPU",
+          "rank": 1,
+          "autotune_plan": {
+            "autotune_repeats": 3,
+            "measurement_repeats": 1,
+            "trials_run": 32,
+            "search_space": {
+              "transpose": [
+                0,
+                1
+              ],
+              "block_size": [
+                64,
+                128,
+                256,
+                512
+              ],
+              "tile_size": [
+                1,
+                2,
+                4,
+                8
+              ]
+            }
+          },
+          "autotune_result": {
+            "wall_clock_latency_seconds": 1.5595e-05,
+            "effective_gflops": 1075.830401353,
+            "checksum": "fnv1a64:df420bb0f3c3391e",
+            "score": 1000.0
+          },
+          "best_config": {
+            "transpose": false,
+            "block_size": 128,
+            "tile_size": 8,
+            "accumulation_precision": "fp32",
+            "autotune_repeats": 3,
+            "measurement_repeats": 1,
+            "trials_run": 32
+          },
+          "best_result": {
+            "wall_clock_latency_seconds": 0.002505568,
+            "effective_gflops": 428.542275531,
+            "checksum": "fnv1a64:5e26b13021eea68b",
+            "score": 1000.0
+          },
+          "notes": [
+            "binary recompiled",
+            "self-contained binary",
+            "Autotuned on fixed-gemv-2048x4096 and measured on fixed-gemv-16384x32768."
+          ],
+          "cuda_environment": {
+            "detected_architecture": "Blackwell",
+            "sm_version": "sm_120",
+            "driver_version": "595.97",
+            "nvcc_version": "13.2",
+            "binary_status": "recompiled"
+          }
+        }
+      }
+    }
+  }
+}

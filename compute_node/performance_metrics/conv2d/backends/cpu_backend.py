@@ -11,6 +11,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -191,6 +192,22 @@ def _measurement_repeats(_spec: BenchmarkSpec | None = None) -> int:
     return DEFAULT_MEASUREMENT_REPEATS
 
 
+_RAW_REPORT_KEYS = (
+    "flops_per_run",
+    "bytes_input",
+    "bytes_weight",
+    "bytes_output",
+    "bytes_kernel_compulsory_memory_traffic",
+    "notes_schema",
+    "trials",
+)
+
+
+def _extract_raw_report(metrics: dict[str, object]) -> dict[str, object]:
+    """Copy analysis-only fields out of the runner JSON for the benchmark report."""
+    return {key: metrics[key] for key in _RAW_REPORT_KEYS if key in metrics}
+
+
 def _default_worker_candidates(logical_cpu_count: int | None = None) -> list[int]:
     """Return worker-count candidates under the shared CPU resource cap.
 
@@ -241,14 +258,32 @@ class CpuBackend:
 
         worker_candidates = _default_worker_candidates()
         source_is_newer_than_binary = (
-                artifacts.executable_path.exists() and artifacts.source_path.exists() and
-                artifacts.executable_path.stat().st_mtime < artifacts.source_path.stat().st_mtime
+            artifacts.executable_path.exists()
+            and artifacts.source_path.exists()
+            and artifacts.executable_path.stat().st_mtime < artifacts.source_path.stat().st_mtime
         )
         if artifacts.executable_path.exists():
             if not source_is_newer_than_binary:
-                return (True, f"{artifacts.platform_label} CPU backend available. worker search order: {worker_candidates}")
-            can_build, _ = self._can_build_for_artifacts(artifacts)
-            return (True, f"{artifacts.platform_label} CPU backend available. worker search order: {worker_candidates}")
+                return (
+                    True,
+                    f"{artifacts.platform_label} CPU backend available via self-contained binary at "
+                    f"{_relative_project_path(artifacts.executable_path)}. worker search order: {worker_candidates}",
+                )
+            can_build, build_message = self._can_build_for_artifacts(artifacts)
+            if not can_build:
+                return (
+                    True,
+                    f"{artifacts.platform_label} CPU backend available via self-contained binary at "
+                    f"{_relative_project_path(artifacts.executable_path)}. Source is newer, but the build toolchain "
+                    f"is unavailable ({build_message}), so the existing binary will be used. "
+                    f"worker search order: {worker_candidates}",
+                )
+            return (
+                True,
+                f"{artifacts.platform_label} CPU backend available. Existing binary at "
+                f"{_relative_project_path(artifacts.executable_path)} is older than the source, so the runner can be "
+                f"rebuilt locally. worker search order: {worker_candidates}",
+            )
 
         if not artifacts.source_path.exists():
             return False, f"missing CPU runner source at {_relative_project_path(artifacts.source_path)}"
@@ -256,7 +291,11 @@ class CpuBackend:
         can_build, build_message = self._can_build_for_artifacts(artifacts)
         if not can_build:
             return False, build_message
-        return (True, f"{artifacts.platform_label} CPU backend available. worker search order: {worker_candidates}")
+        return (
+            True,
+            f"{artifacts.platform_label} CPU backend available. Binary is missing, so it can be built locally "
+            f"({build_message}). worker search order: {worker_candidates}",
+        )
 
     def run(
         self,
@@ -268,6 +307,7 @@ class CpuBackend:
         time_budget_seconds: float,
         force_rebuild: bool = False,
         phase_callback=None,
+        verbose: bool = False,
     ) -> BackendResult:
         """Run autotune plus final measurement for the CPU backend.
 
@@ -315,6 +355,7 @@ class CpuBackend:
                 autotune_repeats=_autotune_repeats(spec),
                 measurement_repeats=1,
                 timeout_seconds=max(time_budget_seconds, 30.0),
+                verbose=verbose,
             )
         except Exception as exc:
             notes.append(_sanitize_note(f"CPU autotune failed: {exc}"))
@@ -342,6 +383,7 @@ class CpuBackend:
                 autotune_repeats=1,
                 measurement_repeats=final_measurement_repeats,
                 timeout_seconds=max(time_budget_seconds, 30.0),
+                verbose=verbose,
             )
         except Exception as exc:
             notes.append(_sanitize_note(f"CPU runtime measurement failed: {exc}"))
@@ -373,7 +415,11 @@ class CpuBackend:
         }
         autotune_trial = TrialRecord(self.name, autotune_config, float(autotune_metrics["autotune_wall_clock_latency_seconds"]), float(autotune_metrics["autotune_effective_gflops"]), str(autotune_metrics["autotune_checksum"]), autotune_score, [])
         trial = TrialRecord(self.name, measurement_config, float(measurement_metrics["measurement_wall_clock_latency_seconds"]), float(measurement_metrics["measurement_effective_gflops"]), str(measurement_metrics["measurement_checksum"]), measurement_score, [])
-        return BackendResult(self.name, True, dict(measurement_config), autotune_trial, trial, [autotune_trial, trial], notes)
+        raw_report = {
+            "autotune": _extract_raw_report(autotune_metrics),
+            "measurement": _extract_raw_report(measurement_metrics),
+        }
+        return BackendResult(self.name, True, dict(measurement_config), autotune_trial, trial, [autotune_trial, trial], notes, raw_report)
 
     def _run_runner(
         self,
@@ -386,6 +432,7 @@ class CpuBackend:
         autotune_repeats: int,
         measurement_repeats: int,
         timeout_seconds: float,
+        verbose: bool = False,
     ) -> dict[str, object]:
         """Invoke the native CPU runner and parse its JSON metrics.
 
@@ -398,6 +445,7 @@ class CpuBackend:
             autotune_repeats: Repeat count for autotune trials.
             measurement_repeats: Repeat count for the selected configuration.
             timeout_seconds: Subprocess timeout for the native runner.
+            verbose: Request per-trial progress on the runner's stderr channel.
 
         Returns:
             The parsed JSON metrics emitted by the native runner.
@@ -415,6 +463,8 @@ class CpuBackend:
             "--autotune-repeats", str(autotune_repeats),
             "--measurement-repeats", str(measurement_repeats),
         ]
+        if verbose:
+            command.append("--verbose")
         emit_status(
             "method.conv2d.backend.native_runner.start",
             status="running",
@@ -425,14 +475,58 @@ class CpuBackend:
             autotune_repeats=autotune_repeats,
             measurement_repeats=measurement_repeats,
         )
-        completed = subprocess.run(
+        # Stream stderr line-by-line so verbose progress reaches the parent
+        # terminal (and any bootstrap log tee) as it happens, while stdout is
+        # read in a separate thread and parsed as JSON after the process exits.
+        # We cannot use ``process.communicate()`` here: it spawns its own
+        # drain thread that would race our stderr pump for the same pipe and
+        # silently swallow per-trial progress lines.
+        process = subprocess.Popen(
             command,
-            check=True,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout_seconds,
+            encoding="utf-8",
+            errors="replace",
             cwd=ROOT_DIR,
         )
+        stderr_chunks: list[str] = []
+        stdout_chunks: list[str] = []
+
+        def _pump_stderr() -> None:
+            assert process.stderr is not None
+            for line in process.stderr:
+                stderr_chunks.append(line)
+                sys.stderr.write(line)
+                sys.stderr.flush()
+
+        def _pump_stdout() -> None:
+            assert process.stdout is not None
+            for line in process.stdout:
+                stdout_chunks.append(line)
+
+        stderr_pump = threading.Thread(target=_pump_stderr, daemon=True)
+        stdout_pump = threading.Thread(target=_pump_stdout, daemon=True)
+        stderr_pump.start()
+        stdout_pump.start()
+        try:
+            return_code = process.wait(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            stderr_pump.join(timeout=1.0)
+            stdout_pump.join(timeout=1.0)
+            raise
+        stderr_pump.join(timeout=5.0)
+        stdout_pump.join(timeout=5.0)
+        stdout_data = "".join(stdout_chunks)
+        if return_code != 0:
+            raise subprocess.CalledProcessError(
+                return_code,
+                command,
+                output=stdout_data,
+                stderr="".join(stderr_chunks),
+            )
         emit_status(
             "method.conv2d.backend.native_runner.complete",
             status="running",
@@ -440,7 +534,7 @@ class CpuBackend:
             backend=self.name,
             command=command,
         )
-        return json.loads(completed.stdout)
+        return json.loads(stdout_data)
 
     def _compile_if_needed(self, *, force_rebuild: bool = False) -> Path:
         """Ensure the native CPU runner exists and return its path.
@@ -465,14 +559,59 @@ class CpuBackend:
             A tuple of ``(executable_path, note)`` describing the resolution.
         """
         resolved_artifacts = _current_cpu_artifacts() if artifacts is None else artifacts
-        if resolved_artifacts is None: raise FileNotFoundError("Unsupported platform")
+        if resolved_artifacts is None:
+            raise FileNotFoundError(f"CPU backend is unsupported on platform {sys.platform!r}")
         resolved_artifacts.build_dir.mkdir(parents=True, exist_ok=True)
+        compile_reason = "binary is missing"
         build_inputs = [resolved_artifacts.source_path, Path(__file__)]
+        if force_rebuild:
+            compile_reason = "rebuild was explicitly requested"
+            can_build, build_message = self._can_build_for_artifacts(resolved_artifacts)
+            if not can_build:
+                raise FileNotFoundError(
+                    f"force rebuild requested for the {resolved_artifacts.platform_label} CPU runner, but the build "
+                    f"toolchain is unavailable ({build_message})"
+                )
+        elif resolved_artifacts.executable_path.exists():
+            if _binary_is_stale(resolved_artifacts.executable_path, build_inputs):
+                can_build, build_message = self._can_build_for_artifacts(resolved_artifacts)
+                if can_build:
+                    compile_reason = "source or build recipe is newer than binary"
+                else:
+                    return (
+                        resolved_artifacts.executable_path,
+                        f"using prebuilt {resolved_artifacts.platform_label} CPU binary at "
+                        f"{_relative_project_path(resolved_artifacts.executable_path)} because the source or build "
+                        f"recipe is newer but the build toolchain is unavailable ({build_message})",
+                    )
+            else:
+                return (
+                    resolved_artifacts.executable_path,
+                    f"using prebuilt {resolved_artifacts.platform_label} CPU binary at "
+                    f"{_relative_project_path(resolved_artifacts.executable_path)}",
+                )
 
-        if force_rebuild or (resolved_artifacts.executable_path.exists() and _binary_is_stale(resolved_artifacts.executable_path, build_inputs)):
-            if resolved_artifacts.platform_key == "windows": self._compile_windows_runner(resolved_artifacts)
-            elif resolved_artifacts.platform_key == "macos": self._compile_macos_runner(resolved_artifacts)
-        return resolved_artifacts.executable_path, "CPU runner resolved"
+        if not resolved_artifacts.source_path.exists():
+            raise FileNotFoundError(
+                f"missing CPU runner source at {_relative_project_path(resolved_artifacts.source_path)}"
+            )
+
+        if resolved_artifacts.platform_key == "windows":
+            self._compile_windows_runner(resolved_artifacts)
+        elif resolved_artifacts.platform_key == "macos":
+            self._compile_macos_runner(resolved_artifacts)
+        else:
+            raise FileNotFoundError(f"no CPU build flow is registered for platform {resolved_artifacts.platform_key!r}")
+
+        if not resolved_artifacts.executable_path.exists():
+            raise FileNotFoundError(
+                f"CPU runner build completed without producing {_relative_project_path(resolved_artifacts.executable_path)}"
+            )
+        return (
+            resolved_artifacts.executable_path,
+            f"compiled {resolved_artifacts.platform_label} CPU runner from "
+            f"{_relative_project_path(resolved_artifacts.source_path)} because {compile_reason}",
+        )
 
     def _compile_windows_runner(self, artifacts: CpuArtifacts) -> None:
         """Build the Windows CPU runner through an on-disk batch script.
@@ -487,7 +626,7 @@ class CpuBackend:
         compile_script_path.write_text(
             "\n".join(["@echo off", *_windows_vsdevcmd_setup_lines(), "pushd \"%~dp0\"", f"cl /nologo /std:c++20 /O2 /fp:fast /MT /EHsc /Fe:{artifacts.executable_path.name} ..\\{artifacts.source_path.name}", "set \"BUILD_EXIT=%ERRORLEVEL%\"", "popd", "exit /b %BUILD_EXIT%"]) + "\n", encoding="ascii"
         )
-        subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", f"& '{compile_script_path}'"], capture_output=True, text=True, check=True)
+        subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", f"& '{compile_script_path}'"], capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
 
     def _compile_macos_runner(self, artifacts: CpuArtifacts) -> None:
         """Build the macOS CPU runner with the detected C++ compiler.
@@ -499,7 +638,30 @@ class CpuBackend:
             ``None`` after the compile step finishes successfully.
         """
         compiler = self._find_macos_cpp_compiler()
-        subprocess.run([compiler, f"../{artifacts.source_path.name}", "-std=c++20", "-O3", "-ffast-math", "-fvisibility=hidden", "-fvisibility-inlines-hidden", "-pthread", "-Wl,-dead_strip", "-Wl,-dead_strip_dylibs", "-o", artifacts.executable_path.name], cwd=artifacts.build_dir, capture_output=True, text=True, check=True)
+        if compiler is None:
+            raise FileNotFoundError("clang++, c++, or g++ was not found")
+        subprocess.run(
+            [
+                compiler,
+                f"../{artifacts.source_path.name}",
+                "-std=c++20",
+                "-O3",
+                "-ffast-math",
+                "-fvisibility=hidden",
+                "-fvisibility-inlines-hidden",
+                "-pthread",
+                "-Wl,-dead_strip",
+                "-Wl,-dead_strip_dylibs",
+                "-o",
+                artifacts.executable_path.name,
+            ],
+            cwd=artifacts.build_dir,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=True,
+        )
 
     def _can_build_for_artifacts(self, artifacts: CpuArtifacts) -> tuple[bool, str]:
         """Return whether the backend can build the given artifact bundle.
@@ -510,7 +672,15 @@ class CpuBackend:
         Returns:
             A ``(can_build, message)`` tuple for probe-time checks.
         """
-        return True, ""
+        if artifacts.platform_key == "windows":
+            if self._find_vsdevcmd() is None:
+                return False, "VsDevCmd.bat was not found; MSVC build environment is unavailable."
+            return True, "MSVC build environment is available"
+
+        compiler = self._find_macos_cpp_compiler()
+        if compiler is None:
+            return False, "No C++ compiler (clang++, c++, or g++) was found on PATH."
+        return True, f"compiler {Path(compiler).name} is available"
 
     def _macos_linkage_note(self, executable_path: Path) -> str:
         """Return a short linkage note for the macOS runner binary.
@@ -521,7 +691,31 @@ class CpuBackend:
         Returns:
             A short note describing macOS linkage expectations.
         """
-        return "macOS linkage notes"
+        completed = subprocess.run(
+            ["otool", "-L", str(executable_path)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if completed.returncode != 0:
+            return "macOS CPU linkage inspection failed; full static linkage is not expected on Apple toolchains."
+
+        dynamic_libraries: list[str] = []
+        for line in completed.stdout.splitlines()[1:]:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            library_path = stripped.split(" (compatibility version", 1)[0].strip()
+            dynamic_libraries.append(Path(library_path).name or library_path)
+
+        if not dynamic_libraries:
+            return "macOS CPU linkage inspection found no explicit dylib records."
+
+        return (
+            "macOS CPU build uses best-effort self-contained flags, but Apple toolchains still require "
+            f"dynamic system libraries: {', '.join(dynamic_libraries)}"
+        )
 
     @staticmethod
     def _find_macos_cpp_compiler() -> str | None:
@@ -541,4 +735,32 @@ class CpuBackend:
         Returns:
             The resolved ``VsDevCmd`` path, or ``None`` when unavailable.
         """
-        return None  # Simplified for brevity; relies on script
+        program_files_x86 = os.environ.get("ProgramFiles(x86)")
+        if not program_files_x86:
+            return None
+
+        vswhere_path = Path(program_files_x86) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
+        if vswhere_path.exists():
+            completed = subprocess.run(
+                [
+                    str(vswhere_path),
+                    "-latest",
+                    "-products",
+                    "*",
+                    "-find",
+                    "Common7\\Tools\\VsDevCmd.bat",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            if completed.returncode == 0:
+                resolved = completed.stdout.strip().splitlines()
+                if resolved:
+                    return Path(resolved[0])
+
+        fallback = Path(program_files_x86) / "Microsoft Visual Studio" / "18" / "BuildTools" / "Common7" / "Tools" / "VsDevCmd.bat"
+        if fallback.exists():
+            return fallback
+        return None

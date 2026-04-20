@@ -19,6 +19,10 @@ PROJECT_ROOT = ROOT_DIR.parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from adapters.process import enable_utf8_mode, python_utf8_command
+
+enable_utf8_mode()
+
 from app.constants import (
     DEFAULT_CONV2D_CUDA_COOLDOWN_MS,
     DEFAULT_CONV2D_CUDA_OUTPUT_CHANNEL_BATCH_SCALE,
@@ -94,6 +98,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-channel-batch-scale", type=float)
     parser.add_argument("--cooldown-ms", type=float)
     parser.add_argument("--rebuild", action="store_true")
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Ask each native runner to stream per-trial timing progress to stderr, "
+        "and record the full per-trial breakdown in the benchmark report's raw_report section.",
+    )
     return parser
 
 
@@ -171,11 +181,11 @@ def _generate_if_needed(
         return
 
     script = METHOD_GENERATE_SCRIPT_PATH
-    cmd = [
-        str(active_python_path()),
-        str(script),
+    cmd = python_utf8_command(
+        active_python_path(),
+        script,
         "--output-dir",
-        str(dataset_dir),
+        dataset_dir,
         "--role",
         role,
         "--h",
@@ -192,9 +202,10 @@ def _generate_if_needed(
         str(spec.pad),
         "--stride",
         str(spec.stride),
-    ]
+    )
     if not generate_small_dataset:
         cmd.append("--skip-small")
+    cmd.append("--skip-refresh")
     if not generate_mid_dataset:
         cmd.append("--skip-mid")
     if generate_large_dataset:
@@ -319,6 +330,11 @@ def _backend_timeout_seconds(
         WORKLOAD_MODE_MEDIUM,
     }:
         return max(timeout_seconds, 360.0)
+    # Autotune on mid/large tensors runs one long native sweep; zero_score_seconds is too small as a wall-clock cap.
+    if autotune_dataset_variant in {WORKLOAD_MODE_MID, WORKLOAD_MODE_MEDIUM}:
+        return max(timeout_seconds, 3600.0)
+    if autotune_dataset_variant == WORKLOAD_MODE_LARGE:
+        return max(timeout_seconds, 7200.0)
     return timeout_seconds
 
 
@@ -542,11 +558,26 @@ def run_benchmark(args: argparse.Namespace) -> dict:
     backend_results = {}
     hardware_inventory = {}
 
+    backend_time_budget_seconds = _backend_timeout_seconds(
+        autotune_dataset_variant,
+        measurement_dataset_variant,
+        measurement_spec,
+    )
+
     print("\n=== Benchmarking conv2d Backends ===", flush=True)
     print(
         f"    Autotune stage: {_phase_label(autotune_dataset_variant, spec)}",
         flush=True,
     )
+    if bool(getattr(args, "verbose", False)):
+        print(
+            f"[conv2d verbose] workload_mode={workload_mode} "
+            f"autotune_variant={autotune_dataset_variant} "
+            f"measurement_variant={measurement_dataset_variant} "
+            f"force_rebuild={bool(args.rebuild)} "
+            f"backend_time_budget_seconds={backend_time_budget_seconds}",
+            flush=True,
+        )
     small_layout = build_dataset_layout(dataset_dir, prefix=dataset_prefix_for_size("small"))
     mid_layout = build_dataset_layout(dataset_dir, prefix=dataset_prefix_for_size("mid"))
     large_layout = build_dataset_layout(dataset_dir, prefix=dataset_prefix_for_size("large"))
@@ -562,11 +593,6 @@ def run_benchmark(args: argparse.Namespace) -> dict:
         measurement_layout = mid_layout
     else:
         measurement_layout = autotune_layout
-    backend_time_budget_seconds = _backend_timeout_seconds(
-        autotune_dataset_variant,
-        measurement_dataset_variant,
-        measurement_spec,
-    )
 
     for b in backends:
         diagnostic_context = _backend_diagnostic_context(b, spec)
@@ -651,6 +677,7 @@ def run_benchmark(args: argparse.Namespace) -> dict:
             time_budget_seconds=backend_time_budget_seconds,
             force_rebuild=args.rebuild,
             phase_callback=_announce_phase,
+            verbose=bool(getattr(args, "verbose", False)),
         )
         res = result.to_dict() if hasattr(result, 'to_dict') else result
         backend_results[b.name] = res
@@ -671,7 +698,10 @@ def run_benchmark(args: argparse.Namespace) -> dict:
             print(f"    Available on {hardware_name}. Performance: {gflops:.2f} GFLOPS", flush=True)
         else:
             notes = res.get("notes", ["No details"])
-            print(f"    Not available on {hardware_name}: {notes[0] if notes else 'No details'}", flush=True)
+            # Probe success is stored in notes[0]; real failure reasons are appended after it.
+            detail_parts = notes[1:] if len(notes) > 1 else notes
+            detail = "\n      ".join(detail_parts) if detail_parts else "No details"
+            print(f"    Not available on {hardware_name}: {detail}", flush=True)
 
     # 3. 生成排名
     ranking = sorted(

@@ -45,6 +45,8 @@ from wire.external_protocol.control_plane import (
     GemvResponsePayload,
     Conv2dRequestPayload,
     Conv2dResponsePayload,
+    ResponseTiming,
+    WorkerTiming,
 )
 from wire.external_protocol.data_plane import ArtifactDescriptor
 from wire.internal_protocol.common import MessageKind, NodeStatus, RuntimeEnvelope, TransferMode
@@ -279,6 +281,8 @@ def build_client_request(
     kernel_size: int = 0,
     padding: int = 0,
     stride: int = 1,
+    conv2d_client_response_mode: int = 0,
+    conv2d_stats_max_samples: int = 0,
     request_payload: GemvRequestPayload | Conv2dRequestPayload | None = None,
 ) -> RuntimeEnvelope:
     """Use this when a client submits one structured compute request."""
@@ -310,6 +314,8 @@ def build_client_request(
             kernel_size=kernel_size,
             padding=padding,
             stride=stride,
+            conv2d_client_response_mode=conv2d_client_response_mode,
+            conv2d_stats_max_samples=conv2d_stats_max_samples,
         ),
     )
 
@@ -323,6 +329,10 @@ def build_client_request_ok(
     size: str = "",
     object_id: str,
     accepted_timestamp_ms: int | None = None,
+    upload_id: str = "",
+    download_id: str = "",
+    data_endpoint_host: str = "",
+    data_endpoint_port: int = 0,
 ) -> RuntimeEnvelope:
     """Use this when the main node assigns a task id for one client request."""
     if accepted_timestamp_ms is None:
@@ -336,6 +346,10 @@ def build_client_request_ok(
             size=size,
             object_id=object_id,
             accepted_timestamp_ms=accepted_timestamp_ms,
+            upload_id=upload_id,
+            download_id=download_id,
+            data_endpoint_host=data_endpoint_host,
+            data_endpoint_port=data_endpoint_port,
         ),
     )
 
@@ -362,6 +376,7 @@ def build_client_response(
     result_artifact_id: str = "",
     result_artifact: ArtifactDescriptor | None = None,
     response_payload: GemvResponsePayload | Conv2dResponsePayload | None = None,
+    timing: ResponseTiming | None = None,
 ) -> RuntimeEnvelope:
     """Use this when the main node replies to CLIENT_JOIN or CLIENT_REQUEST."""
     if timestamp_ms is None:
@@ -393,6 +408,7 @@ def build_client_response(
             result_artifact_id=result_artifact_id,
             output_length=output_length,
             output_vector=output_vector,
+            timing=timing,
         ),
     )
 
@@ -540,6 +556,8 @@ def build_task_result(
     result_artifact_id: str = "",
     result_artifact: ArtifactDescriptor | None = None,
     result_payload: GemvResultPayload | Conv2dResultPayload | None = None,
+    computation_ms: int = 0,
+    peripheral_ms: int = 0,
 ) -> RuntimeEnvelope:
     """Use this when a worker completes one assigned task slice."""
     if timestamp_ms is None:
@@ -569,6 +587,8 @@ def build_task_result(
             output_h=output_h,
             output_w=output_w,
             result_artifact_id=result_artifact_id,
+            computation_ms=computation_ms,
+            peripheral_ms=peripheral_ms,
         ),
     )
 
@@ -671,6 +691,7 @@ __all__ = [
     "NodeStatus",
     "RegisterOk",
     "RegisterWorker",
+    "ResponseTiming",
     "RuntimeEnvelope",
     "Conv2dRequestPayload",
     "Conv2dResponsePayload",
@@ -681,6 +702,7 @@ __all__ = [
     "TaskFail",
     "TaskResult",
     "TransferMode",
+    "WorkerTiming",
     "WorkerUpdate",
     "build_artifact_release",
     "build_client_info_reply",

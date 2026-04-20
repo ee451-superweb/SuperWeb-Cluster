@@ -14,7 +14,6 @@ the 2 GiB input-file I/O cost.
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import subprocess
@@ -30,6 +29,9 @@ from compute_node.compute_methods.gemv import (
     CPU_WINDOWS_BUILD_DIR,
     CPU_WINDOWS_EXECUTABLE_PATH,
     CPU_WINDOWS_SOURCE_PATH,
+)
+from compute_node.performance_metrics.gemv.backends._native_runner_launcher import (
+    run_native_runner_with_streaming,
 )
 from compute_node.performance_metrics.gemv.models import (
     DEFAULT_AUTOTUNE_REPEATS,
@@ -200,6 +202,23 @@ def _default_worker_candidates(logical_cpu_count: int | None = None) -> list[int
     return _binary_tree_worker_candidates(resolve_capped_cpu_worker_count(logical_cpu_count))
 
 
+_RAW_REPORT_KEYS = (
+    "flops_per_run",
+    "bytes_input",
+    "bytes_weight",
+    "bytes_output",
+    "bytes_kernel_compulsory_memory_traffic",
+    "notes_schema",
+    "trials",
+)
+
+
+def _extract_raw_report(metrics: dict[str, object]) -> dict[str, object]:
+    """Copy analysis-only fields out of the runner JSON for the benchmark report."""
+
+    return {key: metrics[key] for key in _RAW_REPORT_KEYS if key in metrics}
+
+
 class CpuBackend:
     """Compile and invoke the current platform's C++ CPU runner."""
 
@@ -266,6 +285,7 @@ class CpuBackend:
         time_budget_seconds: float,
         force_rebuild: bool = False,
         phase_callback=None,
+        verbose: bool = False,
     ) -> BackendResult:
         """Run the C++ CPU executable once and return its best found configuration."""
 
@@ -328,6 +348,7 @@ class CpuBackend:
                 autotune_repeats=autotune_repeats,
                 measurement_repeats=1,
                 timeout_seconds=max(time_budget_seconds, 30.0),
+                verbose=verbose,
             )
         except subprocess.TimeoutExpired:
             notes.append("CPU benchmark timed out")
@@ -377,6 +398,7 @@ class CpuBackend:
                 autotune_repeats=1,
                 measurement_repeats=final_measurement_repeats,
                 timeout_seconds=max(time_budget_seconds, 30.0),
+                verbose=verbose,
             )
         except subprocess.TimeoutExpired:
             notes.append("CPU benchmark timed out")
@@ -452,6 +474,10 @@ class CpuBackend:
             score=measurement_score,
             notes=trial_notes,
         )
+        raw_report = {
+            "autotune": _extract_raw_report(autotune_metrics),
+            "measurement": _extract_raw_report(metrics),
+        }
         return BackendResult(
             backend=self.name,
             available=True,
@@ -460,6 +486,7 @@ class CpuBackend:
             best_trial=trial,
             trials=[autotune_trial, trial],
             notes=notes,
+            raw_report=raw_report,
         )
 
     def _run_runner(
@@ -473,6 +500,7 @@ class CpuBackend:
         autotune_repeats: int,
         measurement_repeats: int,
         timeout_seconds: float,
+        verbose: bool = False,
     ) -> dict[str, object]:
         """Invoke the native CPU runner and parse its JSON metrics.
 
@@ -510,15 +538,13 @@ class CpuBackend:
             "--measurement-repeats",
             str(measurement_repeats),
         ]
-        completed = subprocess.run(
+        if verbose:
+            command.append("--verbose")
+        return run_native_runner_with_streaming(
             command,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
+            timeout_seconds=timeout_seconds,
             cwd=ROOT_DIR,
         )
-        return json.loads(completed.stdout)
 
     def _compile_if_needed(self, *, force_rebuild: bool = False) -> Path:
         """Return the current platform CPU executable, compiling only when needed."""
@@ -636,6 +662,8 @@ class CpuBackend:
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         if completed.returncode != 0:
             raise subprocess.CalledProcessError(
@@ -673,6 +701,8 @@ class CpuBackend:
             cwd=artifacts.build_dir,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         if completed.returncode != 0:
             raise subprocess.CalledProcessError(
@@ -702,6 +732,8 @@ class CpuBackend:
             ["otool", "-L", str(executable_path)],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         if completed.returncode != 0:
             return "macOS CPU linkage inspection failed; full static linkage is not expected on Apple toolchains."
@@ -754,6 +786,8 @@ class CpuBackend:
                 ],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
             )
             if completed.returncode == 0:
                 resolved = completed.stdout.strip().splitlines()

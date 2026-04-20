@@ -6,10 +6,10 @@ from app.trace_utils import trace_function
 
 
 @trace_function
-def ensure_rules(discovery_port: int, is_admin_user: bool) -> FirewallStatus:
+def ensure_rules(discovery_port: int, is_admin_user: bool, data_plane_port: int = 0) -> FirewallStatus:
     """Placeholder Linux firewall implementation."""
 
-    del discovery_port, is_admin_user
+    del discovery_port, is_admin_user, data_plane_port
     return FirewallStatus(
         supported=False,
         applied=False,
@@ -20,10 +20,10 @@ def ensure_rules(discovery_port: int, is_admin_user: bool) -> FirewallStatus:
 
 
 @trace_function
-def cleanup_rules(discovery_port: int, is_admin_user: bool) -> FirewallStatus:
+def cleanup_rules(discovery_port: int, is_admin_user: bool, data_plane_port: int = 0) -> FirewallStatus:
     """Placeholder Linux firewall cleanup implementation."""
 
-    del discovery_port, is_admin_user
+    del discovery_port, is_admin_user, data_plane_port
     return FirewallStatus(
         supported=False,
         applied=False,

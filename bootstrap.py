@@ -8,6 +8,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+from adapters.process import enable_utf8_mode, python_utf8_command
+
+enable_utf8_mode()
+
 from adapters.firewall import ensure_rules
 from adapters.platform import detect_os, relaunch_as_admin
 from adapters.audit_log import write_audit_event
@@ -22,6 +26,7 @@ from app.constants import (
     DEFAULT_DISCOVERY_TIMEOUT,
     DEFAULT_MULTICAST_GROUP,
     DEFAULT_TCP_PORT,
+    DEFAULT_DATA_PLANE_PORT,
     MAIN_NODE_NAME,
 )
 from app.logging_setup import archive_existing_logs, cleanse_existing_logs, configure_logging
@@ -79,28 +84,34 @@ def _runtime_relaunch_argv(argv: list[str]) -> list[str]:
     return relaunch_argv
 
 
-def _input_matrix_command(*, force_regenerate: bool = False) -> list[str]:
+def _input_matrix_command(*, force_regenerate: bool = False, verbose: bool = False) -> list[str]:
     """Build the local dataset-generation command using the current Python executable."""
 
-    command = [str(active_python_path()), str(INPUT_MATRIX_SCRIPT_PATH), "--method", "all"]
+    command = python_utf8_command(active_python_path(), INPUT_MATRIX_SCRIPT_PATH, "--method", "all")
     if force_regenerate:
         command.append("--force")
+    if verbose:
+        command.append("--verbose")
     return command
 
 
-def _benchmark_command(*, force_rebuild: bool = False) -> list[str]:
+def _benchmark_command(*, force_rebuild: bool = False, verbose: bool = False) -> list[str]:
     """Build the local benchmark command using the current Python executable."""
 
-    command = [str(active_python_path()), str(BENCHMARK_SCRIPT_PATH), "--method", "all"]
+    command = python_utf8_command(
+        active_python_path(), BENCHMARK_SCRIPT_PATH, "--method", "all"
+    )
     if force_rebuild:
         command.append("--rebuild")
+    if verbose:
+        command.append("--verbose")
     return command
 
 
 def _setup_command() -> list[str]:
     """Build the setup command used to prepare the project venv and dependencies."""
 
-    return [sys.executable, str(PROJECT_ROOT / "setup.py")]
+    return python_utf8_command(sys.executable, PROJECT_ROOT / "setup.py")
 
 
 def _run_streaming_command(
@@ -123,6 +134,8 @@ def _run_streaming_command(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         bufsize=1,
     ) as process:
         assert process.stdout is not None
@@ -233,6 +246,13 @@ def ensure_bootstrap_runtime_environment(logger, argv: list[str]) -> int | None:
     """
 
     status = inspect_project_environment()
+    logger.info(
+        "Bootstrap interpreter check: current=%s project=%s using_project_python=%s ready=%s",
+        sys.executable,
+        project_python_path(),
+        status.using_project_python,
+        status.ready,
+    )
     if not status.ready:
         setup_command = _setup_command()
         logger.info(
@@ -270,11 +290,11 @@ def ensure_bootstrap_runtime_environment(logger, argv: list[str]) -> int | None:
     if status.using_project_python:
         return None
 
-    relaunch_command = [
-        str(project_python_path()),
-        str(PROJECT_ROOT / "bootstrap.py"),
+    relaunch_command = python_utf8_command(
+        project_python_path(),
+        PROJECT_ROOT / "bootstrap.py",
         *_runtime_relaunch_argv(argv),
-    ]
+    )
     logger.info(
         "Relaunching bootstrap with the project virtual environment: %s",
         " ".join(relaunch_command),
@@ -334,6 +354,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_TCP_PORT,
         help="TCP port used by the main-node runtime server.",
+    )
+    parser.add_argument(
+        "--data-plane-port",
+        type=int,
+        default=DEFAULT_DATA_PLANE_PORT,
+        help="TCP port used by the main-node artifact data-plane server.",
     )
     parser.add_argument(
         "--timeout",
@@ -404,6 +430,7 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         multicast_group=args.multicast_group,
         udp_port=args.udp_port,
         tcp_port=args.tcp_port,
+        data_plane_port=args.data_plane_port,
         discovery_timeout=args.timeout,
         discovery_attempts=args.discover_attempts,
         discovery_retry_delay=args.retry_delay,
@@ -415,6 +442,7 @@ def ensure_compute_node_benchmark_ready(
     *,
     force_retest: bool = False,
     force_rebuild: bool = False,
+    verbose: bool = False,
 ) -> bool:
     """Make sure a local compute benchmark result exists before bootstrap continues."""
 
@@ -422,10 +450,13 @@ def ensure_compute_node_benchmark_ready(
         logger.warning(
             "Bootstrap retest requested. Regenerating compute input matrices now.",
         )
-        logger.info("Input-matrix command: %s", " ".join(_input_matrix_command(force_regenerate=True)))
+        logger.info(
+            "Input-matrix command: %s",
+            " ".join(_input_matrix_command(force_regenerate=True, verbose=verbose)),
+        )
         try:
             return_code = _run_passthrough_command(
-                _input_matrix_command(force_regenerate=True),
+                _input_matrix_command(force_regenerate=True, verbose=verbose),
                 cwd=PROJECT_ROOT,
             )
         except OSError as exc:
@@ -466,11 +497,14 @@ def ensure_compute_node_benchmark_ready(
             "Compute benchmark assets are missing or stale at %s. Running the local benchmark now.",
             _display_project_path(BENCHMARK_RESULT_PATH),
         )
-    logger.info("Benchmark command: %s", " ".join(_benchmark_command(force_rebuild=force_rebuild)))
+    logger.info(
+        "Benchmark command: %s",
+        " ".join(_benchmark_command(force_rebuild=force_rebuild, verbose=verbose)),
+    )
 
     try:
         return_code = _run_streaming_command(
-            _benchmark_command(force_rebuild=force_rebuild),
+            _benchmark_command(force_rebuild=force_rebuild, verbose=verbose),
             cwd=PROJECT_ROOT,
             logger=logger,
         )
@@ -527,19 +561,9 @@ def main(argv: list[str] | None = None) -> int:
         if relaunch_result is not None:
             return relaunch_result
 
-        if not ensure_compute_node_benchmark_ready(
-            logger,
-            force_retest=args.retest,
-            force_rebuild=args.rebuild,
-        ):
-            return 1
-
-        # Import runtime-heavy modules only after the project Python environment
-        # check has had a chance to relaunch into `.venv`.
-        Supervisor = _load_supervisor_class()
-
-        # Platform detection happens before firewall setup so we can route into the
-        # correct adapter and decide whether elevation is even meaningful.
+        # Platform detect + elevation run before benchmark so a pending admin
+        # relaunch does not waste minutes of compute that the elevated process
+        # would then redo from scratch.
         platform_info = detect_os()
         write_audit_event(
             _platform_bootstrap_summary(platform_info),
@@ -563,10 +587,22 @@ def main(argv: list[str] | None = None) -> int:
             logger.info("Relaunched with administrator privileges.")
             return 0
 
+        if not ensure_compute_node_benchmark_ready(
+            logger,
+            force_retest=args.retest,
+            force_rebuild=args.rebuild,
+            verbose=args.verbose,
+        ):
+            return 1
+
+        # Import runtime-heavy modules only after the project Python environment
+        # check has had a chance to relaunch into `.venv`.
+        Supervisor = _load_supervisor_class()
+
         config = build_config(args)
         # Firewall work is intentionally limited to discovery-phase UDP exposure.
         write_audit_event("setting up firewall", stdout=True, logger=logger)
-        firewall_status = ensure_rules(platform_info, config.udp_port)
+        firewall_status = ensure_rules(platform_info, config.udp_port, config.data_plane_port)
         logger.info("Firewall setup: %s", firewall_status.message)
 
         supervisor = Supervisor(
@@ -602,4 +638,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-

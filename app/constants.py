@@ -20,11 +20,12 @@ RUNTIME_ROLE_CLIENT = "client"
 DEFAULT_MULTICAST_GROUP = "224.0.0.251"
 DEFAULT_DISCOVERY_PORT = 5353
 DEFAULT_TCP_PORT = 52020
-DEFAULT_DISCOVERY_TIMEOUT = 3.0
+DEFAULT_DATA_PLANE_PORT = 52021
+DEFAULT_DISCOVERY_TIMEOUT = 1.0
 DEFAULT_BUFFER_SIZE = 2048
 DEFAULT_MULTICAST_TTL = 255
 DEFAULT_DISCOVERY_ATTEMPTS = 3
-DEFAULT_DISCOVERY_RETRY_DELAY = 1.0
+DEFAULT_DISCOVERY_RETRY_DELAY = 0.3
 DEFAULT_MAIN_NODE_POLL_TIMEOUT = 1.0
 DEFAULT_RUNTIME_SOCKET_TIMEOUT = 1.0
 DEFAULT_TCP_CONNECT_TIMEOUT = 5.0
@@ -68,6 +69,12 @@ METHOD_GEMV = "gemv"
 METHOD_CONV2D = "conv2d"
 METHOD_FREE_CONTENT = "free_content"
 
+# Conv2dClientResponseMode (wire/proto/superweb_cluster_runtime.proto); default is FULL.
+CONV2D_CLIENT_RESPONSE_FULL = 0
+CONV2D_CLIENT_RESPONSE_STATS_ONLY = 1
+# First N float32 values (file order) included in STATS_ONLY responses.
+CONV2D_STATS_MAX_SAMPLES = 32
+
 DX12_BACKEND_DISABLED_REASON = (
     "DX12 backend is disabled due to a fatal instability bug that can trigger "
     "system-level crashes or power-protection events during benchmark execution. "
@@ -82,6 +89,7 @@ STATUS_CONFLICT = 409
 STATUS_INTERNAL_ERROR = 500
 
 WINDOWS_FIREWALL_RULE_NAME = "SuperWebClusterDiscoveryUDP"
+WINDOWS_FIREWALL_DATA_PLANE_RULE_NAME = "SuperWebClusterDataPlaneTCP"
 
 MSG_DISCOVERY_TIMEOUT = "Discovery timed out."
 MSG_MANUAL_PROMPT = "Enter peer host or host:port (leave blank to cancel): "

@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cfloat>
+#include <cstdio>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -20,6 +21,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using namespace std;
@@ -39,6 +41,23 @@ struct TileConfig {
     int tile_h;
     int shared_input;
     float milliseconds;
+};
+
+struct TrialRecord {
+    string phase;
+    int candidate_index = 0;
+    int candidate_total = 0;
+    int trial_index_within_candidate = 0;
+    int repeats_for_candidate = 0;
+    int block_size = 0;
+    int tile_size = 0;
+    int output_channel_batch = 0;
+    int shared_input = 0;
+    double host_prep_seconds = 0.0;
+    double host_compute_seconds = 0.0;
+    double device_to_host_seconds = 0.0;
+    double host_postproc_seconds = 0.0;
+    double total_wall_seconds = 0.0;
 };
 
 constexpr int kOutputsPerThread = 4;
@@ -483,10 +502,12 @@ int main(int argc, char** argv) {
         double cooldown_ms = 0.0;
         vector<int> block_sizes;
         vector<int> tile_sizes;
+        bool verbose = false;
 
         for (int i = 1; i < argc; ++i) {
             const string arg = argv[i];
-            if (arg == "--input" && i + 1 < argc) input_path = argv[++i];
+            if (arg == "--verbose") verbose = true;
+            else if (arg == "--input" && i + 1 < argc) input_path = argv[++i];
             else if (arg == "--weight" && i + 1 < argc) weight_path = argv[++i];
             else if (arg == "--output" && i + 1 < argc) output_path = argv[++i];
             else if (arg == "--h" && i + 1 < argc) h = stoi(argv[++i]);
@@ -575,6 +596,32 @@ int main(int argc, char** argv) {
         int best_channel_batch = channel_batch_candidates.front();
         float best_autotune_ms = FLT_MAX;
 
+        const int total_autotune_candidates =
+            static_cast<int>(candidates.size() * channel_batch_candidates.size());
+        vector<TrialRecord> trial_records;
+        trial_records.reserve(static_cast<size_t>(total_autotune_candidates) + 1);
+        int autotune_candidate_counter = 0;
+
+        const double flops_per_run_plan =
+            2.0 * static_cast<double>(out_h) * static_cast<double>(out_w) *
+            static_cast<double>(c_out) * static_cast<double>(c_in) *
+            static_cast<double>(k) * static_cast<double>(k);
+        const long long bytes_input_plan =
+            static_cast<long long>(h) * w * c_in * 4;
+        const long long bytes_weight_plan =
+            static_cast<long long>(c_out) * c_in * k * k * 4;
+        const long long bytes_output_plan =
+            static_cast<long long>(out_h) * out_w * c_out * 4;
+        const long long bytes_kernel_compulsory_plan =
+            bytes_input_plan + bytes_weight_plan + bytes_output_plan;
+
+        if (verbose) {
+            fprintf(stderr,
+                "[conv2d cuda plan] phase=autotune candidates=%d autotune_repeats=%d\n",
+                total_autotune_candidates, autotune_repeats);
+            fflush(stderr);
+        }
+
         for (int channel_batch : channel_batch_candidates) {
             for (const TileConfig& candidate : candidates) {
                 for (int oc_offset = 0; oc_offset < c_out; oc_offset += channel_batch) {
@@ -610,12 +657,56 @@ int main(int argc, char** argv) {
                 float elapsed_ms = 0.0f;
                 CUDA_CHECK(cudaEventElapsedTime(&elapsed_ms, ev_start, ev_stop));
                 const float candidate_milliseconds = elapsed_ms / static_cast<float>(autotune_repeats);
+
+                {
+                    TrialRecord record;
+                    record.phase = "autotune";
+                    record.candidate_index = autotune_candidate_counter;
+                    record.candidate_total = total_autotune_candidates;
+                    record.trial_index_within_candidate = 0;
+                    record.repeats_for_candidate = autotune_repeats;
+                    record.block_size = candidate.tile_w * candidate.tile_h;
+                    record.tile_size = candidate.tile_w;
+                    record.output_channel_batch = channel_batch;
+                    record.shared_input = candidate.shared_input;
+                    record.host_prep_seconds = 0.0;
+                    record.host_compute_seconds = static_cast<double>(candidate_milliseconds) / 1000.0;
+                    record.device_to_host_seconds = 0.0;
+                    record.host_postproc_seconds = 0.0;
+                    record.total_wall_seconds = record.host_compute_seconds;
+                    trial_records.push_back(std::move(record));
+                }
+
+                if (verbose) {
+                    const double per_run_seconds = static_cast<double>(candidate_milliseconds) / 1000.0;
+                    const double effective_gflops = per_run_seconds > 0.0
+                        ? (flops_per_run_plan / per_run_seconds / 1e9) : 0.0;
+                    fprintf(stderr,
+                        "[conv2d cuda autotune %d/%d] block=%d tile=%d channel_batch=%d shared=%d "
+                        "repeats=%d per_run=%.6fs effective_gflops=%.3f\n",
+                        autotune_candidate_counter + 1, total_autotune_candidates,
+                        candidate.tile_w * candidate.tile_h, candidate.tile_w,
+                        channel_batch, candidate.shared_input,
+                        autotune_repeats, per_run_seconds, effective_gflops);
+                    fflush(stderr);
+                }
+                ++autotune_candidate_counter;
+
                 if (candidate_milliseconds < best_autotune_ms) {
                     best_autotune_ms = candidate_milliseconds;
                     best_config = candidate;
                     best_channel_batch = channel_batch;
                 }
             }
+        }
+
+        if (verbose) {
+            fprintf(stderr,
+                "[conv2d cuda plan] phase=measurement selected_block=%d selected_tile=%d "
+                "selected_channel_batch=%d measurement_repeats=%d\n",
+                best_config.tile_w * best_config.tile_h, best_config.tile_w,
+                best_channel_batch, measurement_repeats);
+            fflush(stderr);
         }
 
         CUDA_CHECK(cudaEventRecord(ev_start));
@@ -638,6 +729,37 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaEventElapsedTime(&measurement_ms_total, ev_start, ev_stop));
         const double measurement_seconds = (measurement_ms_total / 1000.0) / static_cast<double>(measurement_repeats);
         const double autotune_seconds = static_cast<double>(best_autotune_ms) / 1000.0;
+
+        {
+            TrialRecord record;
+            record.phase = "measurement";
+            record.candidate_index = 0;
+            record.candidate_total = 1;
+            record.trial_index_within_candidate = 0;
+            record.repeats_for_candidate = measurement_repeats;
+            record.block_size = best_config.tile_w * best_config.tile_h;
+            record.tile_size = best_config.tile_w;
+            record.output_channel_batch = best_channel_batch;
+            record.shared_input = best_config.shared_input;
+            record.host_prep_seconds = 0.0;
+            record.host_compute_seconds = measurement_seconds;
+            record.device_to_host_seconds = 0.0;
+            record.host_postproc_seconds = 0.0;
+            record.total_wall_seconds = measurement_seconds;
+            trial_records.push_back(std::move(record));
+        }
+
+        if (verbose) {
+            const double effective_gflops = measurement_seconds > 0.0
+                ? (flops_per_run_plan / measurement_seconds / 1e9) : 0.0;
+            fprintf(stderr,
+                "[conv2d cuda measurement 1/1] block=%d tile=%d channel_batch=%d shared=%d "
+                "repeats=%d per_run=%.6fs effective_gflops=%.3f\n",
+                best_config.tile_w * best_config.tile_h, best_config.tile_w,
+                best_channel_batch, best_config.shared_input,
+                measurement_repeats, measurement_seconds, effective_gflops);
+            fflush(stderr);
+        }
 
         double checksum_value = 0.0;
         for (int oc_offset = 0; oc_offset < c_out; oc_offset += best_channel_batch) {
@@ -702,7 +824,50 @@ int main(int argc, char** argv) {
              << "  \"autotune_checksum\": \"chk_" << checksum_rounded << "\",\n"
              << "  \"measurement_wall_clock_latency_seconds\": " << fixed << setprecision(9) << measurement_seconds << ",\n"
              << "  \"measurement_effective_gflops\": " << (flops_per_run / measurement_seconds / 1e9) << ",\n"
-             << "  \"measurement_checksum\": \"chk_" << checksum_rounded << "\"\n"
+             << "  \"measurement_checksum\": \"chk_" << checksum_rounded << "\",\n"
+             << "  \"flops_per_run\": " << fixed << setprecision(1) << flops_per_run << ",\n"
+             << "  \"bytes_input\": " << bytes_input_plan << ",\n"
+             << "  \"bytes_weight\": " << bytes_weight_plan << ",\n"
+             << "  \"bytes_output\": " << bytes_output_plan << ",\n"
+             << "  \"bytes_kernel_compulsory_memory_traffic\": " << bytes_kernel_compulsory_plan << ",\n"
+             << "  \"notes_schema\": \"CUDA backend: host_prep/device_to_host/host_postproc are zero in this schema. Each trial's host_compute_seconds is the cudaEvent-bracketed amortized per-run kernel time (autotune_repeats or measurement_repeats launches batched into one event window); H2D is done once up-front and excluded from the timing window; D2H + checksum happen after the measurement window and are not measured here. Per-phase GPU timing split (H2D/kernel/D2H) is deferred pending separate cudaEvent ranges; memory_bandwidth model assumes perfect DRAM reuse (real traffic >= compulsory).\",\n"
+             << "  \"trials\": [\n";
+        for (size_t i = 0; i < trial_records.size(); ++i) {
+            const auto& tr = trial_records[i];
+            const double compute_gflops = tr.host_compute_seconds > 0.0
+                ? (flops_per_run_plan / tr.host_compute_seconds / 1e9) : 0.0;
+            const double effective_gflops = tr.total_wall_seconds > 0.0
+                ? (flops_per_run_plan / tr.total_wall_seconds / 1e9) : 0.0;
+            const double kernel_bandwidth_gibps = tr.host_compute_seconds > 0.0
+                ? (static_cast<double>(bytes_kernel_compulsory_plan) / tr.host_compute_seconds / (1024.0 * 1024.0 * 1024.0))
+                : 0.0;
+            cout << "    {"
+                 << "\"phase\": \"" << tr.phase << "\", "
+                 << "\"candidate_index\": " << tr.candidate_index << ", "
+                 << "\"candidate_total\": " << tr.candidate_total << ", "
+                 << "\"trial_index_within_candidate\": " << tr.trial_index_within_candidate << ", "
+                 << "\"repeats_for_candidate\": " << tr.repeats_for_candidate << ", "
+                 << "\"block_size\": " << tr.block_size << ", "
+                 << "\"tile_size\": " << tr.tile_size << ", "
+                 << "\"output_channel_batch\": " << tr.output_channel_batch << ", "
+                 << "\"shared_input\": " << tr.shared_input << ", "
+                 << fixed << setprecision(9)
+                 << "\"host_prep_seconds\": " << tr.host_prep_seconds << ", "
+                 << "\"host_compute_seconds\": " << tr.host_compute_seconds << ", "
+                 << "\"device_to_host_seconds\": " << tr.device_to_host_seconds << ", "
+                 << "\"host_postproc_seconds\": " << tr.host_postproc_seconds << ", "
+                 << "\"total_wall_seconds\": " << tr.total_wall_seconds << ", "
+                 << setprecision(6)
+                 << "\"compute_gflops\": " << compute_gflops << ", "
+                 << "\"effective_gflops\": " << effective_gflops << ", "
+                 << "\"pcie_h2d_bandwidth_gibps\": 0.0, "
+                 << "\"pcie_d2h_bandwidth_gibps\": 0.0, "
+                 << "\"kernel_memory_bandwidth_gibps_compulsory_lower_bound_model\": " << kernel_bandwidth_gibps
+                 << "}";
+            if (i + 1 < trial_records.size()) cout << ",";
+            cout << "\n";
+        }
+        cout << "  ]\n"
              << "}\n";
 
         CUDA_CHECK(cudaEventDestroy(ev_start));

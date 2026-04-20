@@ -89,9 +89,12 @@ def relaunch_as_admin(argv: list[str] | None = None) -> bool:
         return False
 
     # ShellExecuteW with the "runas" verb is the standard Windows elevation
-    # hook for reopening the same Python entry point as administrator.
+    # hook for reopening the same Python entry point as administrator. argv[0]
+    # is the script path — dropping it leaves the elevated python.exe with
+    # only flags and no entry point, so the new admin window would exit
+    # immediately. Keep the full argv instead.
     argv = list(sys.argv if argv is None else argv)
-    params = subprocess.list2cmdline(argv[1:])
+    params = subprocess.list2cmdline(["-X", "utf8", *argv])
 
     try:
         result = ctypes.windll.shell32.ShellExecuteW(

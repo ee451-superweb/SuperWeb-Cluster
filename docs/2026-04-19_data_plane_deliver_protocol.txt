@@ -1,0 +1,303 @@
+SuperWeb-Cluster DELIVER 数据面协议说明
+时间戳: 2026-04-19
+关联工作: client↔main 从 pull 模型切换到 push 模型，conv2d weight 走数据面
+背景文档:
+  - docs/large_data_transfer_plan_2026-04-15.txt （独立 TCP artifact 数据面）
+  - docs/sprint3_plan_2026-04-15.txt
+
+================================================================
+1. 动机
+================================================================
+
+此前的 conv2d weight 上传走的是 pull 模型:
+
+  - client 启动本地 ClientArtifactServer
+  - client 把 weight 以 ArtifactDescriptor 形式塞进 Conv2dRequestPayload
+  - main 收到 CLIENT_REQUEST 后 **主动回连** client 拉取 weight
+
+这个模型在课程项目场景下有三个实际问题:
+
+  1. client 必须被 main 反向可达，NAT/WiFi 场景下不成立。
+  2. client 要多维护一个 artifact server 线程和监听端口，比 main 的数据面更
+     复杂，调试成本高。
+  3. client 上传和 main 下发结果用的是两个完全独立的 TCP 连接，无法把建立连接
+     的 RTT 摊销掉。
+
+推论很直接:
+  - client 始终是连接发起方（控制面已经如此）。
+  - cluster 里只有 main node 监听数据面端口。
+  - 一个请求在数据面上的完整生命周期只用一条 TCP 连接。
+
+================================================================
+2. 协议总览
+================================================================
+
+数据面复用 "SWAD" MAGIC + PROTOCOL_VERSION=1 的 length-prefixed 帧格式。
+消息类型:
+
+  MSG_DOWNLOAD_REQUEST = 1  -- client → main: 请拉取一个已发布的 artifact
+                               （旧名 MSG_REQUEST，为和控制面的 CLIENT_REQUEST
+                               区分，2026-04-19 改名；线上字节码仍为 1）
+  MSG_INIT             = 2  -- main → client: artifact 元信息 (既有)
+  MSG_CHUNK            = 3  -- 双向: 一段数据
+  MSG_END              = 4  -- 双向: 本次传输结束
+  MSG_ERROR            = 5  -- 任意方向的错误帧
+  MSG_DELIVER          = 6  -- client → main: 我要按此 upload_id 向你推一个
+                               artifact （2026-04-19 新增）
+
+DELIVER_HEADER 的结构:
+
+  struct.Struct("!4sBBQIII")
+    magic            = "SWAD"
+    version          = 1
+    message_type     = MSG_DELIVER
+    size_bytes       : uint64  -- 本次上传的总字节数
+    upload_id_len    : uint32
+    checksum_len     : uint32
+    content_type_len : uint32
+
+头后紧跟 `upload_id || checksum || content_type` 三段 UTF-8 字节。
+这三段会和 main 早先 `register_upload_slot` 时记录的期望值比对，不一致立刻
+回 ERROR 并关连接。
+
+  - upload_id       : 充当一次性凭证 (capability token)
+  - size_bytes      : 用于拒绝 "声明 1KB 实际发 2KB" 的越界写
+  - checksum        : 全量收完后校验；不一致则 future.set_exception
+  - content_type    : 目前仅作兜底标注，不参与路由决策
+
+================================================================
+3. 控制面的配合字段
+================================================================
+
+ClientRequestOk 新增以下字段:
+
+  upload_id           : string   -- main 预注册的 upload slot id
+  download_id         : string   -- main 预注册的 download artifact id
+  data_endpoint_host  : string   -- main 数据面监听地址
+  data_endpoint_port  : int32    -- main 数据面监听端口
+
+Conv2dRequestPayload 用以下字段替换旧的 weight_artifact (ArtifactDescriptor):
+
+  upload_size_bytes  : int64   -- client 声明自己打算推多少字节
+  upload_checksum    : string  -- client 预先算好的 sha256
+
+这两个字段是 main 在 `allocate_data_plane_endpoints` 阶段就要知道的，用来
+注册一个 upload slot 和对应的 Future。
+
+路由决策:
+
+  | method | stats_only | upload_size_bytes | upload_id | download_id |
+  |--------|-----------:|------------------:|-----------|-------------|
+  | gemv   | -          |                 0 | ""        | ""          |
+  | conv2d |  true      |                 0 | ""        | ""          |
+  | conv2d |  true      |               > 0 | 非空      | ""          |
+  | conv2d | false      |                 0 | ""        | 非空        |
+  | conv2d | false      |               > 0 | 非空      | 非空        |
+
+这个表由 `main_node/request_handler.py:allocate_data_plane_endpoints` 保证。
+tests/test_data_plane_upload.py::AllocateDataPlaneEndpointsTests 覆盖全部五
+种组合。
+
+================================================================
+4. 单连接生命周期
+================================================================
+
+一个 conv2d-full 请求在 client 上的完整时间线:
+
+  1. client 发 CLIENT_REQUEST (控制面)，其中 Conv2dRequestPayload 已带
+     upload_size_bytes / upload_checksum。
+  2. main 返回 CLIENT_REQUEST_OK (控制面)，填上 upload_id / download_id /
+     data_endpoint_host / data_endpoint_port。
+     同一时刻 main 已经在 ArtifactManager 里注册好了 upload slot。
+  3. client 收到 REQUEST_OK 后 **立即** 用 `open_data_plane_socket` 连上
+     data_endpoint_host:data_endpoint_port，从此这条 socket 一直开到响应
+     落地。
+  4. client 在后台线程里 `deliver_bytes` 发送:
+        DELIVER → CHUNK × N → END
+     main 在数据面 accept 线程里 `_consume_upload_slot`，把字节流写到一个
+     临时文件，END 时校验 size + checksum，成功就 Future.set_result(路径)。
+  5. 主线程同时用控制 socket 等 CLIENT_RESPONSE。
+     request_handler 在做 dispatch/aggregate 时，用 `upload_future.result()`
+     拿到 weight 文件路径，交给 worker 的内部协议继续往下。
+  6. 内部协议 (main ↔ worker) **不动**: worker 依然走老的
+     Conv2dTaskPayload.weight_artifact 的 pull 路径从 main 拉 weight。
+  7. main 算完后，按 allocation.download_id 把结果 artifact 发布到同一个
+     ArtifactManager，CLIENT_RESPONSE.result_artifact 的 artifact_id 直接用
+     download_id。
+  8. client 收到 CLIENT_RESPONSE 后:
+        - 上传线程 join 一下 (通常早已结束)
+        - **复用同一条数据 socket** 发 DOWNLOAD_REQUEST(download_id)，读
+          INIT + CHUNK* + END，落盘
+        - 关闭数据 socket
+     这一步由 `_Conv2dUploadCoordinator.materialize_output` 驱动。
+
+两个 socket 的对应关系:
+
+  control socket   : CLIENT_REQUEST → CLIENT_REQUEST_OK → CLIENT_RESPONSE
+  data socket      : DELIVER CHUNK* END  →  DOWNLOAD_REQUEST INIT CHUNK* END
+                     ^^^^^^^^^^^^^^^^^^        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                     上传 weight               下载结果 (同一连接内复用)
+
+================================================================
+5. 关键失效路径
+================================================================
+
+5.1 orphan upload slot
+  - main 在 `allocate_data_plane_endpoints` 就已经登记了 slot。
+  - 如果后续 `build_client_response_for_request` 在任何一条提前返回分支上
+    抛错 / 直接 return 一个失败响应，slot 会悬挂。
+  - 解决: 把整个 method body 包在 try/finally 里，finally 中对
+    allocation.upload_id 做一次 idempotent 的 `cancel_upload_slot`。
+  - 覆盖: tests/test_data_plane_upload.py::UploadSlotCancellationTests::
+    test_orphan_upload_slot_is_cancelled_when_request_fails_validation
+
+5.2 size / checksum 欺骗
+  - DELIVER 声明的 size_bytes 必须等于 slot 预期 size，否则直接 ERROR 帧 +
+    关连接。覆盖: test_upload_slot_rejects_mismatched_upload_size。
+  - END 到达后重新算 sha256；不匹配时 future.set_exception(ValueError)。
+    覆盖: DeliverThenErrorOnChecksumTests::test_deliver_with_wrong_checksum_is_rejected
+
+5.3 client 侧 coordinator 异常传播
+  - on_request_ok 检测到 upload_id 或 endpoint 为空会立即 RuntimeError，
+    避免空拉连接。覆盖: tests/test_data_plane_upload_client.py::
+    Conv2dUploadCoordinatorTests
+
+5.4 timeout
+  - `request_handler` 里 `upload_future.result(timeout=artifact_timeout)`
+    捕获 TimeoutError 与 CancelledError 两条分支，分别映射到不同的错误
+    message，方便用户在日志里区分 "client 没发完" 和 "slot 被主动取消"。
+
+================================================================
+6. 端到端示例 (conv2d full, 非 stats_only)
+================================================================
+
+设定: client 在 10.0.0.9，main 在 10.0.0.5:31000 控制面、:45000 数据面。
+weight 32 KB，sha256 = "abc..."。
+
+step 1. client → main (控制 socket)
+        CLIENT_REQUEST {
+          request_id = "req-7"
+          method     = "conv2d"
+          size       = "small"
+          request_payload.Conv2dRequestPayload {
+            tensor_h=32, tensor_w=32, channels_in=3, channels_out=4,
+            kernel_size=3, padding=1, stride=1,
+            client_response_mode = 0               # 要完整输出 artifact
+            upload_size_bytes    = 32768
+            upload_checksum      = "abc..."
+          }
+        }
+
+step 2. main → client (控制 socket)
+        CLIENT_REQUEST_OK {
+          task_id             = "req-7:worker-1:0"
+          upload_id           = "req-7-upload-<nonce>"
+          download_id         = "req-7-download-<nonce>"
+          data_endpoint_host  = "10.0.0.5"
+          data_endpoint_port  = 45000
+        }
+        main 在此刻已登记:
+          ArtifactManager.register_upload_slot(upload_id, 32768, "abc...")
+
+step 3. client → main (新建数据 socket: 10.0.0.5:45000)
+        DELIVER  upload_id="req-7-upload-<nonce>", size=32768, checksum="abc..."
+        CHUNK    offset=0     data=weight[0 : 16384]
+        CHUNK    offset=16384 data=weight[16384 : 32768]
+        END      size_bytes=32768
+        main 这一侧 future.set_result(<临时文件路径>)
+
+step 4. main (内部流程)
+        request_handler.upload_future.result() → 拿到临时文件
+        走原内部协议把 weight 分片给 worker 做 conv2d
+        所有 worker 回完后聚合结果
+        ArtifactManager.register_existing_file(..., artifact_id=download_id)
+
+step 5. main → client (控制 socket)
+        CLIENT_RESPONSE {
+          status_code = OK
+          elapsed_ms  = ...
+          result_artifact = {
+            artifact_id    = "req-7-download-<nonce>"
+            transfer_host  = "10.0.0.5"
+            transfer_port  = 45000
+            size_bytes     = <result size>
+            checksum       = "def..."
+            content_type   = "application/x-superweb-conv2d-result"
+          }
+        }
+
+step 6. client → main (复用 step 3 的同一条数据 socket)
+        DOWNLOAD_REQUEST  artifact_id="req-7-download-<nonce>"
+
+step 7. main → client (同一条数据 socket)
+        INIT   size=..., checksum="def..."
+        CHUNK  offset=0    data=...
+        CHUNK  offset=...  data=...
+        END    size_bytes=...
+
+step 8. client 落盘 → 关 data socket → 返回 RequestResult 给上层
+
+================================================================
+7. 端到端示例 (conv2d stats_only)
+================================================================
+
+同样的流程，差别在 step 1 / 2 / 5:
+
+step 1. Conv2dRequestPayload.client_response_mode = CONV2D_CLIENT_RESPONSE_STATS_ONLY
+        upload_size_bytes / upload_checksum 仍按实际 weight 填。
+
+step 2. CLIENT_REQUEST_OK 中 download_id = ""  （不需要）
+        upload_id 仍然非空，client 照旧推 weight。
+
+step 5. CLIENT_RESPONSE.result_artifact = None
+        client 的 _Conv2dUploadCoordinator.materialize_output 走 inline
+        分支，直接把 response.output_vector 写盘、关 socket 返回。
+
+即: stats_only 只吃掉了下行 artifact，不影响上行 DELIVER。
+
+================================================================
+8. 与内部协议的边界
+================================================================
+
+  - 外部协议 (client ↔ main): 本 doc 讨论的全部内容都在这个范围里。
+  - 内部协议 (main ↔ worker): 保持 pull 模型不变。worker 仍然通过
+    Conv2dTaskPayload.weight_artifact → main ArtifactManager 拉 weight。
+  - 原因: worker 是 main 主动下发任务才建立关系的被动端，pull 模型本来就
+    匹配 "谁先有任务谁先拉" 的触发顺序。
+  - 因此 wire/internal_protocol 下的 proto / codec 本轮一行未改。
+
+================================================================
+9. 相关测试清单
+================================================================
+
+集群侧:
+  tests/test_large_data_transfer.py
+    - test_publish_and_fetch_bytes_round_trip
+    - test_publish_and_fetch_bytes_round_trip_with_windows_unsafe_artifact_id
+    - test_upload_slot_accepts_deliver_and_completes_future      *本轮新增*
+    - test_upload_then_download_on_same_socket                   *本轮新增*
+  tests/test_data_plane_upload.py                                *本轮新增文件*
+    - DeliverCodecTests.test_encode_decode_round_trip
+    - DeliverCodecTests.test_decode_rejects_mismatched_payload_length
+    - AllocateDataPlaneEndpointsTests (5 个 case, 覆盖 §3 的决策表)
+    - UploadSlotCancellationTests.test_orphan_upload_slot_is_cancelled_when_request_fails_validation
+    - UploadSlotCancellationTests.test_upload_slot_rejects_mismatched_upload_size
+    - DeliverThenErrorOnChecksumTests.test_deliver_with_wrong_checksum_is_rejected
+
+客户端:
+  tests/test_data_plane_upload_client.py                         *本轮新增文件*
+    - DeliverCodecTests (encode/decode + 长度不符)
+    - DeliverBytesFramingTests.test_deliver_bytes_sends_deliver_then_chunks_then_end
+    - DeliverBytesFramingTests.test_deliver_bytes_computes_checksum_when_omitted
+    - FetchDownloadOverSocketTests.test_fetch_download_over_socket_reads_init_chunk_end
+    - Conv2dUploadCoordinatorTests (upload_id / endpoint 缺失的防御)
+
+================================================================
+10. 后续可改进方向 (仅记录，不在本次 scope)
+================================================================
+
+  - DELIVER 允许分片重入 (当前遇到 ERROR 就整连接重开)
+  - 把 chunk_size 作为 DELIVER 头的一部分，让 main 能主动 backpressure
+  - stats_only 路径把 weight 上传时机再往后挪一些，等 main 真正决定要跑再传
+  - 数据面复用到 heartbeat / info_reply 之外的其他大对象场景 (目前只给 conv2d
+    用)

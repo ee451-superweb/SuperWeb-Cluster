@@ -90,6 +90,8 @@ class BootstrapTests(unittest.TestCase):
             run_mock.call_args_list[1].args[0],
             [
                 str(Path("C:/venv/python.exe")),
+                "-X",
+                "utf8",
                 str(bootstrap.PROJECT_ROOT / "bootstrap.py"),
                 "--elevate-if-needed",
             ],
@@ -145,6 +147,8 @@ class BootstrapTests(unittest.TestCase):
             run_mock.call_args.args[0],
             [
                 str(Path("C:/venv/python.exe")),
+                "-X",
+                "utf8",
                 str(bootstrap.PROJECT_ROOT / "bootstrap.py"),
                 "--role",
                 "discover",
@@ -227,9 +231,9 @@ class BootstrapTests(unittest.TestCase):
         self.assertTrue(ready)
         dataset_run_mock.assert_called_once()
         benchmark_run_mock.assert_called_once()
-        self.assertEqual(dataset_run_mock.call_args.args[0][1], str(dataset_script_path))
+        self.assertEqual(dataset_run_mock.call_args.args[0][3], str(dataset_script_path))
         self.assertEqual(dataset_run_mock.call_args.args[0][-1], "--force")
-        self.assertEqual(benchmark_run_mock.call_args.args[0][1], str(benchmark_script_path))
+        self.assertEqual(benchmark_run_mock.call_args.args[0][3], str(benchmark_script_path))
         self.assertNotIn("--rebuild", benchmark_run_mock.call_args.args[0])
         validate_mock.assert_called_once_with(logger, result_path)
 
@@ -265,7 +269,7 @@ class BootstrapTests(unittest.TestCase):
         self.assertTrue(ready)
         dataset_run_mock.assert_not_called()
         run_mock.assert_called_once()
-        self.assertEqual(run_mock.call_args.args[0][1], str(benchmark_script_path))
+        self.assertEqual(run_mock.call_args.args[0][3], str(benchmark_script_path))
         self.assertIn("--rebuild", run_mock.call_args.args[0])
         validate_mock.assert_called_once_with(logger, result_path)
 
@@ -314,13 +318,23 @@ class BootstrapTests(unittest.TestCase):
         detect_os_mock: mock.Mock,
     ) -> None:
         configure_logging_mock.return_value = mock.Mock()
+        detect_os_mock.return_value = PlatformInfo(
+            platform_name="windows",
+            system="Windows",
+            release="11",
+            machine="AMD64",
+            hostname="mdong-zephy14",
+            is_wsl=False,
+            is_admin=False,
+            can_elevate=True,
+        )
 
         result = bootstrap.main([])
 
         self.assertEqual(result, 1)
         runtime_environment_mock.assert_called_once()
-        benchmark_ready_mock.assert_called_once_with(configure_logging_mock.return_value, force_retest=False, force_rebuild=False)
-        detect_os_mock.assert_not_called()
+        benchmark_ready_mock.assert_called_once_with(configure_logging_mock.return_value, force_retest=False, force_rebuild=False, verbose=False)
+        detect_os_mock.assert_called_once()
 
     @mock.patch("bootstrap._load_supervisor_class")
     @mock.patch("bootstrap.ensure_rules")
@@ -374,7 +388,7 @@ class BootstrapTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         runtime_environment_mock.assert_called_once()
-        benchmark_ready_mock.assert_called_once_with(logger, force_retest=False, force_rebuild=False)
+        benchmark_ready_mock.assert_called_once_with(logger, force_retest=False, force_rebuild=False, verbose=False)
         detect_os_mock.assert_called_once()
         ensure_rules_mock.assert_called_once()
         load_supervisor_class_mock.assert_called_once()
@@ -450,7 +464,7 @@ class BootstrapTests(unittest.TestCase):
 
         self.assertEqual(result, 1)
         runtime_environment_mock.assert_called_once()
-        benchmark_ready_mock.assert_called_once_with(logger, force_retest=True, force_rebuild=True)
+        benchmark_ready_mock.assert_called_once_with(logger, force_retest=True, force_rebuild=True, verbose=False)
 
 
 if __name__ == "__main__":

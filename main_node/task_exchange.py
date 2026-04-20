@@ -13,11 +13,14 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from contextlib import nullcontext
 from pathlib import Path
 
 from adapters.audit_log import write_audit_event
+from adapters.process import python_utf8_command
 from app.constants import (
+    CONV2D_CLIENT_RESPONSE_STATS_ONLY,
     MAIN_NODE_NAME,
     RUNTIME_MSG_ARTIFACT_RELEASE,
     METHOD_CONV2D,
@@ -36,6 +39,7 @@ from wire.internal_protocol.runtime_transport import (
     MessageKind,
     Conv2dTaskPayload,
     TransferMode,
+    WorkerTiming,
     build_artifact_release,
     build_task_assign,
     describe_message_kind,
@@ -72,6 +76,18 @@ class WorkerTaskExchange:
         self.logger = logger
         self._artifact_workers: dict[str, tuple[str, str]] = {}
         self._artifact_workers_lock = threading.Lock()
+        self._client_weight_paths: dict[str, Path] = {}
+        self._client_weight_paths_lock = threading.Lock()
+
+    def register_client_weight_path(self, request_id: str, weight_path: Path) -> None:
+        """Record a client-uploaded weight file so task-assign slicing can read it."""
+        with self._client_weight_paths_lock:
+            self._client_weight_paths[request_id] = weight_path
+
+    def unregister_client_weight_path(self, request_id: str) -> Path | None:
+        """Drop the weight-path override for one request and return the path if any."""
+        with self._client_weight_paths_lock:
+            return self._client_weight_paths.pop(request_id, None)
 
     def ensure_conv2d_dataset_ready(self) -> None:
         """Generate the shared conv2d dataset if the main node is missing it.
@@ -102,20 +118,28 @@ class WorkerTaskExchange:
             return
 
         subprocess.run(
-            [
+            python_utf8_command(
                 sys.executable,
-                str(CONV2D_DATASET_GENERATE_SCRIPT_PATH),
+                CONV2D_DATASET_GENERATE_SCRIPT_PATH,
                 "--output-dir",
-                str(self.conv2d_dataset_dir),
+                self.conv2d_dataset_dir,
                 "--role",
                 "main",
                 "--include-large-weight",
-            ],
+            ),
             check=True,
             timeout=1800.0,
         )
 
-    def conv2d_weight_slice(self, *, variant: str, spec, start_oc: int, end_oc: int) -> bytes:
+    def conv2d_weight_slice(
+        self,
+        *,
+        variant: str,
+        spec,
+        start_oc: int,
+        end_oc: int,
+        weight_path: Path | None = None,
+    ) -> bytes:
         """Read the requested output-channel slice from a conv2d weight file.
 
         Use this while building ``TASK_ASSIGN`` for conv2d so each
@@ -126,37 +150,23 @@ class WorkerTaskExchange:
             spec: Workload specification describing tensor dimensions.
             start_oc: Inclusive starting output-channel index.
             end_oc: Exclusive ending output-channel index.
+            weight_path: Optional explicit weight file, for example one fetched
+                from a client-published artifact. Bypasses variant-based lookup
+                when provided.
 
         Returns:
             The raw bytes covering the requested weight-channel slice.
         """
-        weight_path = self.conv2d_dataset_dir / f"{variant}_weight.bin"
-        if not weight_path.exists():
-            legacy_variant = {"small": "test", "mid": "medium", "large": "runtime"}.get(variant, variant)
-            weight_path = self.conv2d_dataset_dir / f"{legacy_variant}_weight.bin"
+        if weight_path is None:
+            weight_path = self.conv2d_dataset_dir / f"{variant}_weight.bin"
+            if not weight_path.exists():
+                legacy_variant = {"small": "test", "mid": "medium", "large": "runtime"}.get(variant, variant)
+                weight_path = self.conv2d_dataset_dir / f"{legacy_variant}_weight.bin"
         if not weight_path.exists():
             raise FileNotFoundError(f"missing conv2d weight file at {weight_path}")
         weight_data = weight_path.read_bytes()
         bytes_per_output_channel = spec.k * spec.k * spec.c_in * 4
         return weight_data[start_oc * bytes_per_output_channel:end_oc * bytes_per_output_channel]
-
-    def max_conv2d_channels_per_task(self, spec) -> int:
-        """Estimate how many output channels fit in one inline task payload.
-
-        Use this when partitioning conv2d work for control-plane delivery so the
-        sliced weight bytes stay under the runtime message-size budget.
-
-        Args:
-            spec: Workload specification describing kernel and channel counts.
-
-        Returns:
-            The maximum number of output channels that fit in one task payload.
-        """
-        bytes_per_channel = spec.k * spec.k * spec.c_in * 4
-        if bytes_per_channel <= 0:
-            raise ValueError("conv2d weight slice size must be positive")
-        payload_budget = max(self.config.max_message_size - 4096, 1)
-        return max(1, payload_budget // bytes_per_channel)
 
     def _wait_for_task_message(self, connection, task_id: str):
         """Wait for the next task-scoped message from one worker.
@@ -317,19 +327,16 @@ class WorkerTaskExchange:
         digest = hashlib.sha256(artifact_id.encode("utf-8")).hexdigest()[:12]
         return self.artifact_manager.root_dir / f"fetch-{normalized[:80]}-{digest}.bin"
 
-    def _select_transfer_mode(self, method: str) -> TransferMode:
+    def _select_transfer_mode(self, method: str, *, stats_only: bool = False) -> TransferMode:
         """Choose the preferred result-transfer mode for one method.
 
         Use this while building ``TASK_ASSIGN`` so large conv2d workloads bias
         toward artifact transfer while small GEMV tasks stay inline by default.
-
-        Args:
-            method: Logical compute method name.
-
-        Returns:
-            The transfer-mode enum to place in the task assignment.
+        Conv2d requests that only need aggregated stats bypass the artifact
+        plane since the worker returns a tiny inline summary instead of a full
+        output tensor.
         """
-        if method == METHOD_CONV2D:
+        if method == METHOD_CONV2D and not stats_only:
             return TransferMode.ARTIFACT_REQUIRED
         return TransferMode.INLINE_PREFERRED
 
@@ -345,8 +352,11 @@ class WorkerTaskExchange:
             assignment: One worker slice chosen by the dispatcher.
 
         Returns:
-            The normalized ``TaskResult`` reported by that worker slice.
+            A ``(TaskResult, WorkerTiming)`` tuple where the timing entry
+            captures the main-node observed wall time and any artifact fetch
+            duration.
         """
+        slice_started_at = time.monotonic()
         sock = assignment.connection.sock
         task_lock = self._resolve_connection_lock(
             getattr(assignment.connection, "task_lock", None),
@@ -355,6 +365,16 @@ class WorkerTaskExchange:
         io_lock = self._resolve_connection_lock(getattr(assignment.connection, "io_lock", None))
         send_lock = nullcontext() if io_lock is task_lock else io_lock
         artifact_timeout_ms = int(max(self.config.compute_artifact_ttl_seconds, 0.0) * 1000)
+        conv2d_request_payload = (
+            request.conv2d_payload if request.method == METHOD_CONV2D else None
+        )
+        client_response_mode = (
+            int(conv2d_request_payload.client_response_mode) if conv2d_request_payload is not None else 0
+        )
+        stats_max_samples = (
+            int(conv2d_request_payload.stats_max_samples) if conv2d_request_payload is not None else 0
+        )
+        stats_only = client_response_mode == CONV2D_CLIENT_RESPONSE_STATS_ONLY
         build_kwargs = dict(
             request_id=request.request_id,
             node_id=assignment.connection.runtime_id,
@@ -364,12 +384,29 @@ class WorkerTaskExchange:
             size=request.size,
             stream_id=request.stream_id,
             iteration_count=request.iteration_count,
-            transfer_mode=self._select_transfer_mode(request.method),
+            transfer_mode=self._select_transfer_mode(request.method, stats_only=stats_only),
             artifact_id=assignment.artifact_id,
             artifact_timeout_ms=artifact_timeout_ms,
         )
+        weight_artifact_id: str | None = None
         if request.method == METHOD_CONV2D:
+            if self.artifact_manager is None:
+                raise RuntimeError("artifact manager is required to publish conv2d weight slices")
             conv2d_spec, variant = load_named_workload_spec(request.object_id, size=request.size)
+            weight_bytes = self.conv2d_weight_slice(
+                variant=variant,
+                spec=conv2d_spec,
+                start_oc=assignment.start_oc,
+                end_oc=assignment.end_oc,
+                weight_path=self._client_weight_paths.get(request.request_id),
+            )
+            weight_artifact_id = f"{assignment.task_id}-weight"
+            weight_artifact_descriptor = self.artifact_manager.publish_bytes(
+                weight_bytes,
+                producer_node_id=MAIN_NODE_NAME,
+                content_type="application/x-superweb-conv2d-weight",
+                artifact_id=weight_artifact_id,
+            )
             build_kwargs.update(
                 task_payload=Conv2dTaskPayload(
                     start_oc=assignment.start_oc,
@@ -381,12 +418,10 @@ class WorkerTaskExchange:
                     kernel_size=conv2d_spec.k,
                     padding=conv2d_spec.pad,
                     stride=conv2d_spec.stride,
-                    weight_data=self.conv2d_weight_slice(
-                        variant=variant,
-                        spec=conv2d_spec,
-                        start_oc=assignment.start_oc,
-                        end_oc=assignment.end_oc,
-                    ),
+                    weight_data=b"",
+                    weight_artifact=weight_artifact_descriptor,
+                    client_response_mode=client_response_mode,
+                    stats_max_samples=stats_max_samples,
                 ),
             )
         else:
@@ -465,6 +500,7 @@ class WorkerTaskExchange:
                         f"expected {RUNTIME_MSG_TASK_RESULT}, got {describe_message_kind(result_message.kind)}"
                     )
                 task_result = result_message.task_result
+                result_received_at = time.monotonic()
                 if (
                     task_result.request_id != request.request_id
                     or task_result.task_id != assignment.task_id
@@ -478,6 +514,7 @@ class WorkerTaskExchange:
                     stdout=True,
                     logger=self.logger,
                 )
+                artifact_fetch_started_at = result_received_at
                 if task_result.result_artifact is not None:
                     if self.artifact_manager is None:
                         raise RuntimeError("artifact manager is required to fetch large task results")
@@ -549,6 +586,8 @@ class WorkerTaskExchange:
                         output_h=task_result.output_h,
                         output_w=task_result.output_w,
                         result_artifact_id=task_result.result_artifact_id,
+                        computation_ms=task_result.computation_ms,
+                        peripheral_ms=task_result.peripheral_ms,
                     )
                 else:
                     write_audit_event(
@@ -556,9 +595,33 @@ class WorkerTaskExchange:
                         f"output_length={task_result.output_length} inline_bytes={len(task_result.output_vector)}",
                         logger=self.logger,
                     )
-                return task_result
+                slice_finished_at = time.monotonic()
+                wall_ms = max(0, int((slice_finished_at - slice_started_at) * 1000))
+                artifact_fetch_ms = max(
+                    0, int((slice_finished_at - artifact_fetch_started_at) * 1000)
+                ) if task_result.result_artifact is not None else 0
+                slice_label = (
+                    f"oc={assignment.start_oc}:{assignment.end_oc}"
+                    if request.method == METHOD_CONV2D
+                    else f"rows={assignment.row_start}:{assignment.row_end}"
+                )
+                timing = WorkerTiming(
+                    node_id=assignment.connection.runtime_id,
+                    task_id=assignment.task_id,
+                    slice=slice_label,
+                    wall_ms=wall_ms,
+                    artifact_fetch_ms=artifact_fetch_ms,
+                    computation_ms=int(getattr(task_result, "computation_ms", 0) or 0),
+                    peripheral_ms=int(getattr(task_result, "peripheral_ms", 0) or 0),
+                )
+                return task_result, timing
         except (OSError, ValueError, ConnectionError, RuntimeError) as exc:
             self._remove_worker_connection(assignment.connection, str(exc))
             raise
         finally:
             self._pop_artifact_owner(assignment.artifact_id)
+            if weight_artifact_id is not None and self.artifact_manager is not None:
+                try:
+                    self.artifact_manager.remove_artifact(weight_artifact_id)
+                except OSError:
+                    pass

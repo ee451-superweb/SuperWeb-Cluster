@@ -7,7 +7,12 @@ from unittest import mock
 from adapters.firewall import cleanup_rules, ensure_rules
 from adapters.firewall import windows as windows_firewall
 from common.types import PlatformInfo
-from app.constants import DEFAULT_DISCOVERY_PORT, WINDOWS_FIREWALL_RULE_NAME
+from app.constants import (
+    DEFAULT_DATA_PLANE_PORT,
+    DEFAULT_DISCOVERY_PORT,
+    WINDOWS_FIREWALL_DATA_PLANE_RULE_NAME,
+    WINDOWS_FIREWALL_RULE_NAME,
+)
 
 
 class FirewallTests(unittest.TestCase):
@@ -57,6 +62,31 @@ class FirewallTests(unittest.TestCase):
         self.assertIn("dir=out", outbound_command)
         self.assertIn(f"remoteport={DEFAULT_DISCOVERY_PORT}", outbound_command)
         self.assertIn("profile=any", outbound_command)
+
+    @mock.patch("adapters.firewall.windows.subprocess.run")
+    def test_windows_ensure_rules_adds_data_plane_inbound_when_requested(
+        self,
+        subprocess_run_mock: mock.Mock,
+    ) -> None:
+        subprocess_run_mock.side_effect = [
+            CompletedProcess(args=[], returncode=0, stdout="inbound ok", stderr=""),
+            CompletedProcess(args=[], returncode=0, stdout="outbound ok", stderr=""),
+            CompletedProcess(args=[], returncode=0, stdout="data-plane inbound ok", stderr=""),
+        ]
+
+        status = windows_firewall.ensure_rules(
+            discovery_port=DEFAULT_DISCOVERY_PORT,
+            is_admin_user=True,
+            data_plane_port=DEFAULT_DATA_PLANE_PORT,
+        )
+
+        self.assertTrue(status.applied)
+        self.assertEqual(subprocess_run_mock.call_count, 3)
+        data_plane_command = subprocess_run_mock.call_args_list[2].args[0]
+        self.assertIn("dir=in", data_plane_command)
+        self.assertIn("protocol=TCP", data_plane_command)
+        self.assertIn(f"localport={DEFAULT_DATA_PLANE_PORT}", data_plane_command)
+        self.assertIn(f"name={WINDOWS_FIREWALL_DATA_PLANE_RULE_NAME}-Inbound", data_plane_command)
 
     @mock.patch("adapters.firewall.windows.subprocess.run")
     def test_windows_cleanup_rules_deletes_both_rules(

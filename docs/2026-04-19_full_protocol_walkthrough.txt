@@ -1,0 +1,531 @@
+SuperWeb-Cluster 三方协议全景导览 (Client ↔ Main ↔ Worker)
+时间戳: 2026-04-19
+关联文档:
+  - 2026-04-19_data_plane_deliver_protocol.txt  (数据面 DELIVER 协议细节)
+  - large_data_transfer_plan_2026-04-15.txt     (数据面拆分动机)
+  - implementation_plan.txt                     (总体设计)
+
+阅读方法: 这份文档不替代任何单独协议的 spec, 而是把 discovery / 控制面 /
+数据面三层在真实请求里的交织关系画清楚, 让新加入的人不必读三遍代码就能
+回答 "这一刻 client 在等哪条线上的什么消息"。
+
+
+================================================================
+0. 拓扑速览
+================================================================
+
+                   UDP 5353 (mDNS 发现面)
+                  ┌───────────────────────┐
+                  │                       │
+                  ▼                       ▼
+           ┌──────────────┐        ┌─────────────┐
+           │  Client 1    │        │  Worker 1   │
+           └──────┬───────┘        └──────┬──────┘
+                  │ TCP                   │ TCP
+                  │ control (protobuf)    │ control (protobuf)
+                  │ data    (SWAD 帧)     │ data    (SWAD 帧)
+                  ▼                       ▼
+               ┌──────────────────────────────────┐
+               │             Main Node            │
+               │  ┌───────────────────────────┐   │
+               │  │ control server  (31000)   │   │
+               │  │ data server     (45000)   │   │
+               │  │ discovery announcer (UDP) │   │
+               │  │ ArtifactManager           │   │
+               │  │ Registry / Dispatcher     │   │
+               │  └───────────────────────────┘   │
+               └──────────────────────────────────┘
+                          ▲              ▲
+                          │ TCP control  │ TCP control
+                          │ TCP data     │ TCP data
+                   ┌──────┴──────┐┌──────┴──────┐
+                   │  Worker 2   ││  Worker 3   │
+                   └─────────────┘└─────────────┘
+
+  - Main 既对 client 开放, 又对 worker 开放, 是拓扑里唯一同时扮演
+    "control server" 和 "data server" 两种角色的节点。
+  - Client 只知道 main, 不直接和 worker 通信。
+  - Worker 也只知道 main, 不和其他 worker 横向通信。
+  - 所有 TCP 都由 **外圈节点主动发起连接**; main 永不反向连接。
+
+
+================================================================
+1. 三个协议面速查表
+================================================================
+
+ ┌──────────────┬────────────────────┬────────────────────┬────────────────────┐
+ │              │ 发现面 (discovery) │ 控制面 (control)   │ 数据面 (data)      │
+ ├──────────────┼────────────────────┼────────────────────┼────────────────────┤
+ │ 运输          │ UDP / mDNS 5353    │ TCP (长连接, 31000)│ TCP (短连接, 45000)│
+ │ 编码          │ DNS wire format    │ length-prefixed    │ 固定头 + 可变尾    │
+ │              │ (PTR/SRV/TXT/A)    │ protobuf           │ (SWAD MAGIC)       │
+ │ 谁发起        │ 任一找 main 的节点 │ client / worker    │ client / worker    │
+ │ 持续时间      │ 毫秒级一次问答     │ 整个会话生命周期   │ 一次 artifact 交换 │
+ │ 典型用途      │ 找 main 的 ip:port │ 注册 / 心跳 / 请求 │ 推 weight / 拉结果 │
+ │ 用的头尾      │ DNS header         │ MessageKind (enum) │ u8 message_type    │
+ │ 对应 codec    │ discovery.py       │ control_plane_     │ data_plane_codec   │
+ │              │                    │   codec.py         │   .py              │
+ └──────────────┴────────────────────┴────────────────────┴────────────────────┘
+
+ 控制面 TCP 端口 (31000) 上跑 **所有** 的 protobuf 消息, 包括 client 和
+ worker; 消息类型由 protobuf 的 MessageKind 区分, 不再单独拆端口。
+ 数据面 TCP 端口 (45000) 上只跑 artifact 相关的 SWAD 帧; 控制面收到请求后
+ 把 host:port 作为字段告诉对端再去连, 不在控制 socket 上混发 artifact。
+
+
+================================================================
+2. 控制面消息字典 (protobuf over TCP)
+================================================================
+
+ 所有控制面消息都由 wire/proto/superweb_cluster_runtime.proto 定义, 用
+ oneof kind 区分。一个消息在线上是:
+
+     [ uint32 length ][ RuntimeMessage (protobuf) ]
+     RuntimeMessage.kind = <具体消息>
+
+ MessageKind 枚举 (见 wire/internal_protocol/control_plane_codec.py):
+
+ ┌────────────────────┬──────────┬─────────┬─────────────────────────────┐
+ │ MessageKind         │ 发起者    │ 接收者   │ 主要字段                   │
+ ├────────────────────┼──────────┼─────────┼─────────────────────────────┤
+ │                                EXTERNAL (client ↔ main)               │
+ ├────────────────────┼──────────┼─────────┼─────────────────────────────┤
+ │ CLIENT_JOIN         │ client    │ main     │ client_name                │
+ │ CLIENT_RESPONSE*    │ main      │ client   │ status_code, client_id,    │
+ │  (for join)         │           │          │ ...                        │
+ │ CLIENT_REQUEST      │ client    │ main     │ request_id, method,        │
+ │                     │           │          │ size, object_id,           │
+ │                     │           │          │ iteration_count,           │
+ │                     │           │          │ request_payload (oneof):   │
+ │                     │           │          │   · GemvRequestPayload     │
+ │                     │           │          │   · Conv2dRequestPayload   │
+ │                     │           │          │     └─ upload_size_bytes,  │
+ │                     │           │          │        upload_checksum     │
+ │ CLIENT_REQUEST_OK   │ main      │ client   │ task_id, method, size,     │
+ │                     │           │          │ accepted_timestamp_ms,     │
+ │                     │           │          │ ─── 数据面协商字段 ───    │
+ │                     │           │          │ upload_id, download_id,    │
+ │                     │           │          │ data_endpoint_host,        │
+ │                     │           │          │ data_endpoint_port         │
+ │ CLIENT_RESPONSE     │ main      │ client   │ status_code, task_id,      │
+ │  (for request)      │           │          │ elapsed_ms,                │
+ │                     │           │          │ response_payload (oneof),  │
+ │                     │           │          │ result_artifact,           │
+ │                     │           │          │ timing (ResponseTiming)    │
+ │ CLIENT_INFO_REQUEST │ client    │ main     │ client_id, timestamp_ms    │
+ │ CLIENT_INFO_REPLY   │ main      │ client   │ has_active_tasks,          │
+ │                     │           │          │ active_task_ids, ...       │
+ │ HEARTBEAT           │ main      │ client   │ unix_time_ms (server 时钟) │
+ │ HEARTBEAT_OK        │ client    │ main     │ heartbeat_unix_time_ms     │
+ ├────────────────────┼──────────┼─────────┼─────────────────────────────┤
+ │                                INTERNAL (main ↔ worker)               │
+ ├────────────────────┼──────────┼─────────┼─────────────────────────────┤
+ │ REGISTER_WORKER     │ worker    │ main     │ node_name, hardware,       │
+ │                     │           │          │ performance                │
+ │ REGISTER_OK         │ main      │ worker   │ main_node_ip, port,        │
+ │                     │           │          │ assigned node_id           │
+ │ HEARTBEAT           │ main      │ worker   │ unix_time_ms               │
+ │ HEARTBEAT_OK        │ worker    │ main     │ heartbeat_unix_time_ms,    │
+ │                     │           │          │ active_task_ids,           │
+ │                     │           │          │ node_status,               │
+ │                     │           │          │ completed_task_count       │
+ │ TASK_ASSIGN         │ main      │ worker   │ task_id, request_id,       │
+ │                     │           │          │ method, size,              │
+ │                     │           │          │ transfer_mode,             │
+ │                     │           │          │ artifact_id,               │
+ │                     │           │          │ task_payload (oneof):      │
+ │                     │           │          │   · GemvTaskPayload        │
+ │                     │           │          │     (row slice + vector)   │
+ │                     │           │          │   · Conv2dTaskPayload      │
+ │                     │           │          │     (output-channel slice, │
+ │                     │           │          │      weight_artifact ← 指  │
+ │                     │           │          │      向 main 数据面)       │
+ │ TASK_ACCEPT         │ worker    │ main     │ task_id, status_code       │
+ │ TASK_FAIL           │ worker    │ main     │ task_id, error_message     │
+ │ TASK_RESULT         │ worker    │ main     │ task_id, status_code,      │
+ │                     │           │          │ result_payload (oneof),    │
+ │                     │           │          │ result_artifact            │
+ │ ARTIFACT_RELEASE    │ main      │ worker   │ task_id, artifact_id       │
+ │ WORKER_UPDATE       │ worker    │ main     │ performance (空闲时刷新)   │
+ └────────────────────┴──────────┴─────────┴─────────────────────────────┘
+
+ * "CLIENT_RESPONSE (for join)" 和 "CLIENT_RESPONSE (for request)" 是同一
+   种 MessageKind; 靠 status_code 之外的字段区分。join 的那一条只是个简单
+   确认 (无 response_payload)。
+
+
+================================================================
+3. 数据面消息字典 (SWAD 帧, TCP)
+================================================================
+
+ 所有数据面消息共用同一个 header 前缀:
+
+     [ 4s MAGIC="SWAD" ][ u8 version=1 ][ u8 message_type ][ ...类型专属 ...]
+
+ 关于 MAGIC="SWAD":
+   - 含义:     "SuperWeb Artifact Data" 的首字母缩写。
+   - 用途:     让数据面接收端在只读取最前 4 字节时就能一眼判断
+               "这是我们的协议帧", 快速甩掉:
+                 · 连错端口误闯进来的 HTTP/TLS 报文 (不会以 "SWAD" 开头)
+                 · 半包 / 乱码
+                 · 将来协议换代留下的老客户端
+   - 为什么是 4 字节: 这是二进制协议的通行惯例 (对比 PNG 的 "\x89PNG",
+                     ZIP 的 "PK\x03\x04", ELF 的 "\x7FELF"), 既够区分度
+                     又不浪费带宽 —— CHUNK 帧在大文件下会发上万次, magic
+                     每多一个字节都会累积成 overhead。
+   - 为什么不改成全名: magic 不是给人读的, 是给解析器 peek 用的;
+                     想让代码自解释, 加注释比改字节划算得多。
+
+ 消息类型 (2026-04-19 起):
+
+ ┌──────────────────────┬─────┬──────────┬────────────┬────────────────────────┐
+ │ message_type          │ 值   │ 发起者    │ 接收者     │ 主要字段               │
+ ├──────────────────────┼─────┼──────────┼────────────┼────────────────────────┤
+ │ DOWNLOAD_REQUEST      │  1  │ 想拉的一方│ 拥有方      │ artifact_id            │
+ │   (旧名 REQUEST)      │     │ (client   │ (main /     │                        │
+ │                       │     │  或 worker│  worker)    │                        │
+ │                       │     │  或 main) │             │                        │
+ │ INIT                  │  2  │ 拥有方    │ 拉的一方    │ size_bytes, chunk_size,│
+ │                       │     │           │             │ checksum, content_type │
+ │ CHUNK                 │  3  │ 发送方    │ 接收方      │ offset, data           │
+ │ END                   │  4  │ 发送方    │ 接收方      │ size_bytes (校验总长)  │
+ │ ERROR                 │  5  │ 任一方    │ 对端        │ message                │
+ │ DELIVER               │  6  │ client    │ main        │ upload_id, size_bytes, │
+ │  (2026-04-19 新增,     │     │           │             │ checksum, content_type │
+ │   push-upload 入口)   │     │           │             │                        │
+ └──────────────────────┴─────┴──────────┴────────────┴────────────────────────┘
+
+ 数据面的两种典型 "一次连接":
+
+ ┌─────────────────────────────────────────────────────────────────────────┐
+ │ A. 纯拉 (既有模式, worker 拉 weight, client 拉 result)                  │
+ │                                                                          │
+ │     拉方  ──DOWNLOAD_REQUEST(artifact_id)──▶  拥有方                     │
+ │     拉方  ◀────INIT(size,checksum,...)─────   拥有方                     │
+ │     拉方  ◀────CHUNK(offset,data) × N──────   拥有方                     │
+ │     拉方  ◀────END(size)───────────────────   拥有方                     │
+ │     (连接关闭)                                                           │
+ └─────────────────────────────────────────────────────────────────────────┘
+
+ ┌─────────────────────────────────────────────────────────────────────────┐
+ │ B. 推后拉 (2026-04-19 新路径, 仅 client→main 的 conv2d full)             │
+ │                                                                          │
+ │     client  ──DELIVER(upload_id,size,checksum)──▶  main                 │
+ │     client  ──CHUNK(offset,data) × N────────────▶  main                 │
+ │     client  ──END(size)─────────────────────────▶  main                 │
+ │                    (同一条 TCP socket 不关)                              │
+ │     client  ──DOWNLOAD_REQUEST(download_id)──────▶  main                │
+ │     client  ◀────INIT(size,checksum,...)──────── main                   │
+ │     client  ◀────CHUNK × N─────────────────────── main                  │
+ │     client  ◀────END──────────────────────────── main                   │
+ │     (连接关闭)                                                           │
+ └─────────────────────────────────────────────────────────────────────────┘
+
+ 注: main ↔ worker 的数据面始终是 A 模式 (pull 模型), 没有 DELIVER 的位置。
+
+
+================================================================
+4. 发现面消息字典 (UDP / mDNS)
+================================================================
+
+ 短小, 单独列:
+
+ ┌────────────┬──────────┬────────┬────────────────────────────────────────┐
+ │ 消息        │ 发起者    │ 运输   │ 载荷                                  │
+ ├────────────┼──────────┼────────┼────────────────────────────────────────┤
+ │ DISCOVER    │ client /  │ UDP    │ mDNS PTR 查询: MDNS_SERVICE_TYPE       │
+ │             │ worker    │ mcast  │                                        │
+ │ ANNOUNCE    │ main      │ UDP    │ mDNS response: PTR + SRV(port) +       │
+ │             │           │ mcast/ │ TXT(role,node) + A(host)               │
+ │             │           │ ucast  │                                        │
+ └────────────┴──────────┴────────┴────────────────────────────────────────┘
+
+ 走完一个 DISCOVER / ANNOUNCE 往返, 发起方得到
+     AnnouncePayload(host, port, node_name)
+ 接下来所有交互都走 TCP, 发现面就此退场; 除非 TCP 断线后重新发现。
+
+
+================================================================
+5. 阶段 I: 启动协商 (没有 client 参与的后台阶段)
+================================================================
+
+ 时间顺序, 从左到右跨越 worker / main 两方:
+
+ ─────────────┬─────────────────────────────────────────┬─────────────
+  WORKER 1    │                MAIN                    │   外部
+ ─────────────┼─────────────────────────────────────────┼─────────────
+  启动        │                                         │
+  UDP 发 DISCOVER ───────────────────▶ UDP 收           │
+              │ ◀─────── UDP 回 ANNOUNCE ── (host,port) │
+  TCP connect ───────────────────────▶ TCP accept       │
+  REGISTER_WORKER(name,hardware,perf) ─────────────────▶│
+              │ ◀────── REGISTER_OK(node_id) ──────────│
+              │                                         │
+  <长连接保持>│ <HEARTBEAT 每 N 秒一次>                 │
+              │ ◀── HEARTBEAT_OK(active_task_ids) ──   │
+  空闲时定期: │                                         │
+  WORKER_UPDATE(performance) ────────────────────────▶ │
+ ─────────────┴─────────────────────────────────────────┴─────────────
+
+ 发现面仅用在 **首次拿到 main 地址**。之后 worker 把这条 TCP 控制连接
+ 当作长连接保持, 出错才重走 DISCOVER。
+ Heartbeat 双向都有: main → worker 是主动探活, worker → main (作为
+ HEARTBEAT_OK 的 piggyback) 同时回报 active_task_ids / node_status。
+
+
+================================================================
+6. 阶段 II: Client 加入
+================================================================
+
+ ─────────────┬─────────────────────────────────────────────┬─────────────
+  CLIENT 1    │                    MAIN                    │
+ ─────────────┼─────────────────────────────────────────────┼─────────────
+  启动        │                                             │
+  UDP DISCOVER ──────────────────────────────▶ UDP 收       │
+              │ ◀─────── UDP ANNOUNCE ──── (host, port)    │
+  TCP connect ───────────────────────────────▶ TCP accept   │
+  CLIENT_JOIN(client_name) ───────────────────────────────▶│
+              │ ◀── CLIENT_RESPONSE(status=OK, client_id) ─│
+              │ (从此 client 可发起任意次 CLIENT_REQUEST)   │
+ ─────────────┴─────────────────────────────────────────────┴─────────────
+
+ CLIENT_JOIN 之后 main 会为这条连接开始发 HEARTBEAT; client 用
+ HEARTBEAT_OK 应答。client 在自己的 request 中通过 CLIENT_INFO_REQUEST /
+ CLIENT_INFO_REPLY 查 "我的任务还在吗", 避免控制通道假死。
+
+
+================================================================
+7. 阶段 III: GEMV 请求 (小 payload, 不触发数据面)
+================================================================
+
+ GEMV 的 vector 和 output 都小 (KB 级), 整段走控制面的 protobuf inline
+ 字段即可, 数据面全程空闲。
+
+ ─────────────┬─────────────────────┬──────────────────────┬─────────────
+  CLIENT 1    │        MAIN         │    WORKER n (n 个)   │
+ ─────────────┼─────────────────────┼──────────────────────┼─────────────
+  CLIENT_REQUEST                                                          │
+  (method=gemv, vector_data inline) ──▶                                  │
+              │ allocate_data_plane_endpoints                            │
+              │   └─ 看到 method=gemv → upload_id=""/download_id=""      │
+              │ ◀─ CLIENT_REQUEST_OK(task_id, upload_id="",              │
+              │        download_id="", data_endpoint_* 仍填但 client     │
+              │        不会去连)                                          │
+              │                                                           │
+              │ 分片: request 拆成 N 个 row-slice, 每个 worker 一片       │
+              │ TASK_ASSIGN(slice_i, row_start, row_end,                  │
+              │             vector_data inline) ──────▶ worker i         │
+              │ ◀── TASK_ACCEPT ────────────────────────               │
+              │ ◀── TASK_RESULT(output_vector inline) ─ (N 次)           │
+              │ aggregator 拼 N 个 row-slice                              │
+              │ ◀─ CLIENT_RESPONSE(gemv_payload.output_vector inline)    │
+              │      elapsed_ms, timing (dispatch/task_window/aggregate) │
+ ─────────────┴─────────────────────┴──────────────────────┴─────────────
+
+ 整条路径上没有任何 SWAD 帧, 也没有 artifact_id。
+
+
+================================================================
+8. 阶段 IV: Conv2D full (完整 artifact 输出, 最复杂的一路)
+================================================================
+
+ 这一路同时用到:
+   - 控制面 (client ↔ main, main ↔ worker)
+   - 数据面 (client → main 推 weight; worker → main 拉 weight;
+             client ← main 拉 result)
+
+ 字段 legend:
+   ctrl = 控制面帧, data = 数据面帧, (*) 标记带分片会放大 N 倍的消息
+
+ ──────────────┬──────────────────────┬──────────────────────┬─────────────
+  CLIENT 1     │        MAIN          │      WORKER n        │
+ ──────────────┼──────────────────────┼──────────────────────┼─────────────
+  (前置: client 本地 generate_default_weight_bytes + sha256)                │
+  ctrl CLIENT_REQUEST                                                       │
+   method=conv2d                                                             │
+   stats_only=false                                                          │
+   upload_size_bytes=32768                                                   │
+   upload_checksum="abc..."                                                  │
+               ─────────────────▶                                           │
+               │ allocate_data_plane_endpoints                              │
+               │   ├─ register_upload_slot(upload_id, 32768, "abc...")     │
+               │   ├─ download_id = "req-7-download-<nonce>"                │
+               │   └─ Future<path>                                          │
+               │ ◀─ ctrl CLIENT_REQUEST_OK                                  │
+               │       task_id, upload_id, download_id,                     │
+               │       data_endpoint_host=10.0.0.5, _port=45000             │
+                                                                             │
+  (control socket 等 CLIENT_RESPONSE)                                       │
+  (开一条新 TCP 到 10.0.0.5:45000, 后台线程推 weight)                       │
+                                                                             │
+  data DELIVER(upload_id=..., size=32768, checksum="abc...")                │
+               ─────────────────▶                                           │
+  data CHUNK(0, 16384) (*)                                                  │
+               ─────────────────▶                                           │
+  data CHUNK(16384, 16384)                                                  │
+               ─────────────────▶                                           │
+  data END(32768)                                                           │
+               ─────────────────▶ main _consume_upload_slot                 │
+               │     ├─ 校验 size, 校验 sha256                              │
+               │     └─ Future.set_result(<temp_path>)                      │
+                                                                             │
+               │ request_handler.upload_future.result()                     │
+               │  → 拿到 temp_path                                          │
+               │ register_existing_file(temp_path,                          │
+               │     artifact_id = "req-7-weights")  (给 worker 拉用)       │
+               │                                                             │
+               │ 分片: 按 output-channel 切 N 片                            │
+               │ ctrl TASK_ASSIGN(task_id_i,                                │
+               │     method=conv2d,                                         │
+               │     start_oc/end_oc=...                                    │
+               │     transfer_mode=ARTIFACT_REQUIRED                        │
+               │     artifact_id="req-7-weights",                           │
+               │     task_payload.Conv2dTaskPayload{                        │
+               │       weight_artifact=ArtifactDescriptor{                  │
+               │         artifact_id="req-7-weights",                       │
+               │         transfer_host=main_host,                           │
+               │         transfer_port=main_data_port,                      │
+               │         size_bytes=32768, checksum="abc..."                │
+               │       }                                                    │
+               │     }) ──────────────────────────▶ worker_n                │
+               │                                    (每个 worker 重复)      │
+                                                                             │
+                                    (worker 侧: 内部 data-plane 拉 weight)  │
+                                    data DOWNLOAD_REQUEST(                  │
+                                      artifact_id="req-7-weights")          │
+                                      ─────────────────▶ main               │
+                                    ◀── data INIT/CHUNK × M/END ──          │
+                                    worker 落盘                             │
+                                                                             │
+               │ ◀── ctrl TASK_ACCEPT ──                                    │
+               │                                                             │
+                                    worker 本地执行 conv2d slice             │
+                                    把本 slice 结果写到一个本地 artifact     │
+                                    (内嵌 data-plane server 暴露该 artifact) │
+               │ ◀── ctrl TASK_RESULT(                                      │
+               │     result_payload.Conv2dResultPayload{                    │
+               │       start_oc, end_oc, output_h, output_w,                │
+               │       result_artifact_id=<worker 的 artifact id>           │
+               │     },                                                      │
+               │     result_artifact=ArtifactDescriptor{指向 worker})       │
+                                                                             │
+               │ main 按 descriptor 去 worker 的数据面拉:                   │
+               │ ── data DOWNLOAD_REQUEST(artifact_id) ───▶ worker          │
+               │ ◀── data INIT/CHUNK × M/END ────          worker           │
+               │                                                             │
+               │ ── ctrl ARTIFACT_RELEASE(artifact_id) ──▶ worker            │
+               │   (告诉 worker 可以本地删除了)                              │
+               │                                                             │
+               │ aggregator 把 N 片 output 拼成完整 result                  │
+               │ ArtifactManager.publish_bytes(result,                       │
+               │   artifact_id = download_id)                                │
+                                                                             │
+               │ ◀─ ctrl CLIENT_RESPONSE                                    │
+               │     method=conv2d,                                         │
+               │     result_artifact=ArtifactDescriptor{                    │
+               │       artifact_id = download_id,                           │
+               │       transfer_host=main_host,                             │
+               │       transfer_port=45000, ...                             │
+               │     }                                                      │
+                                                                             │
+  (控制面消息到手; 现在轮到复用 step 2 打开的那条数据 socket)              │
+  data DOWNLOAD_REQUEST(download_id)                                        │
+               ─────────────────▶                                           │
+               ◀── data INIT(size, checksum, chunk_size)                    │
+               ◀── data CHUNK × K                                           │
+               ◀── data END(size)                                           │
+  (client 落盘, 关数据 socket)                                              │
+ ──────────────┴──────────────────────┴──────────────────────┴─────────────
+
+ 同步点:
+   - main 线程等 upload_future.result() 才能做 dispatch, 所以 client
+     的 DELIVER 必须在 main 开始分片前就 END 到。
+   - main 在收齐所有 worker 的 TASK_RESULT 之后才会发 CLIENT_RESPONSE,
+     这保证 client 去 DOWNLOAD_REQUEST(download_id) 时 artifact 已经
+     在 main ArtifactManager 中注册。
+
+
+================================================================
+9. 阶段 V: Conv2D stats_only (无下行 artifact, 上行照旧)
+================================================================
+
+ 与阶段 IV 的差异仅在两处:
+
+   ctrl CLIENT_REQUEST_OK.download_id = ""        (main 不预占 result id)
+   ctrl CLIENT_RESPONSE.result_artifact = None    (结果压回 protobuf)
+        response_payload.Conv2dResponsePayload {
+          stats_element_count, stats_sum, stats_sum_squares,
+          stats_samples[..]
+        }
+
+ 上行 DELIVER / CHUNK / END 流程与阶段 IV 完全一致;
+ worker 端的 TASK_ASSIGN / TASK_RESULT 行为也完全一致, 因为 worker 不
+ 感知 client_response_mode。只是 main 在组装 CLIENT_RESPONSE 时选择走
+ stats 分支而不再 publish result artifact。
+
+
+================================================================
+10. 哪条消息走哪个面: 一句话速记
+================================================================
+
+ 控制面 (必走, 始终):
+   - 身份管理 (JOIN/REGISTER/OK)
+   - 心跳与活性检测 (HEARTBEAT/HEARTBEAT_OK/CLIENT_INFO_*)
+   - 请求协商 (CLIENT_REQUEST / CLIENT_REQUEST_OK / TASK_ASSIGN / ...)
+   - 小 payload 的直接回传 (gemv output, stats-only 结果)
+   - 任务生命周期事件 (TASK_ACCEPT/FAIL/RESULT, ARTIFACT_RELEASE)
+
+ 数据面 (触发条件):
+   - client → main: conv2d 请求且 upload_size_bytes > 0 (DELIVER 入口)
+   - main → worker 逆向: worker 从 main 拉 conv2d weight
+                         (TASK_ASSIGN.weight_artifact 指向 main)
+   - worker → main: main 按 TASK_RESULT.result_artifact 反拉 worker 结果
+   - main → client: conv2d full 的 result artifact (同 socket 复用上面)
+
+ 发现面 (只在冷启动):
+   - 任何想找 main 的节点 (client / worker) 第一次连线时
+   - TCP 断线重连时, 先看能不能再发现一次; 否则走配置里的显式地址
+
+
+================================================================
+11. 常见误区
+================================================================
+
+ Q1. "为什么 main 不直接在控制 socket 里塞 result bytes?"
+     因为控制面是 length-prefixed protobuf, 整个消息必须一次读完再解码;
+     一个 10MB 的 result 会堵住 heartbeat 和其他请求的 ack。所以
+     超过几 KB 的 payload 一律走 SWAD 数据面。
+
+ Q2. "为什么 client 不直接 P2P 给 worker 推 weight?"
+     因为 client 完全不可见 worker 的存在 (拓扑里根本没这条线); worker
+     是 main 的内部实现细节。client 统一只和 main 对话, 简化权限、发现、
+     防火墙三件事。
+
+ Q3. "DELIVER 和 DOWNLOAD_REQUEST 为什么是两个不同帧?"
+     方向相反 (DELIVER 是发起 push, DOWNLOAD_REQUEST 是发起 pull), 字段
+     也不一样 (DELIVER 要声明 size/checksum, DOWNLOAD_REQUEST 只带
+     artifact_id)。共用一个帧会让 main 侧 dispatcher 无法判断来意。
+
+ Q4. "worker 间为什么不需要数据面?"
+     当前算子 (gemv, conv2d) 都是 map-only, 每个 slice 独立。没有 shuffle
+     就不需要 worker 互联。
+
+ Q5. "mDNS 在不支持组播的网络里怎么办?"
+     client / worker 可以跳过 DISCOVER, 直接用 `--main-host host:port`
+     指定 main 的 TCP 端点。发现面本质只是 "host:port 的首次解析"。
+
+
+================================================================
+12. 快速自检清单 (给正在 debug 的你)
+================================================================
+
+  [ ] 连不上 main:             先 tcpdump 看 UDP 5353 有没有 ANNOUNCE
+  [ ] CLIENT_JOIN 超时:        main control server 是否真的在 31000
+  [ ] REQUEST_OK 丢 upload_id: method/stats_only/upload_size_bytes 三元
+                               组对照 §3 决策表
+  [ ] DELIVER 后 future 不回:  main data server (45000) 是否在监听,
+                               upload slot 的 size/checksum 是否对齐
+  [ ] worker 拉 weight 失败:   TASK_ASSIGN.weight_artifact.transfer_host
+                               是否 main 在 worker 侧可达的那个网卡
+  [ ] client 拉 result 失败:   CLIENT_RESPONSE.result_artifact 是否非 None,
+                               download_id 是否等于 result_artifact.artifact_id

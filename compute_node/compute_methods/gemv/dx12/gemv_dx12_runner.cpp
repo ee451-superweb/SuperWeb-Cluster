@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cctype>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <iomanip>
@@ -104,6 +105,7 @@ struct Options {
     std::string accumulation_precision = "fp32";
     bool task_mode = false;
     bool server_mode = false;
+    bool verbose = false;
 };
 
 struct PhaseMetrics {
@@ -119,6 +121,25 @@ struct TrialMetrics {
     int rows_per_thread = 0;
     PhaseMetrics autotune;
     PhaseMetrics measurement;
+};
+
+// One per-trial record for the raw_report.trials array. Schema mirrors the
+// conv2d CPU/GPU layout so downstream aggregators share a common shape.
+struct TrialRecord {
+    std::string phase;                  // "autotune" or "measurement"
+    int candidate_index = 0;
+    int candidate_total = 0;
+    int trial_index_within_candidate = 0;
+    int repeats_for_candidate = 0;
+    int thread_group_size = 0;
+    int rows_per_thread = 0;
+    int dispatches_per_repeat = 0;
+    double host_prep_seconds = 0.0;
+    double host_compute_seconds = 0.0;
+    double device_to_host_seconds = 0.0;
+    double host_postproc_seconds = 0.0;
+    double total_wall_seconds = 0.0;
+    std::string checksum;
 };
 
 struct alignas(256) ShaderParams {
@@ -253,13 +274,20 @@ std::vector<std::string> split_tab_fields(const std::string& line) {
 
 Options parse_args(int argc, char** argv) {
     Options options;
-    for (int index = 1; index < argc; index += 2) {
+    int index = 1;
+    while (index < argc) {
+        const std::string key = argv[index];
+        if (key == "--verbose") {
+            options.verbose = true;
+            index += 1;
+            continue;
+        }
+
         if (index + 1 >= argc) {
             throw std::runtime_error("missing value for command line flag");
         }
-
-        const std::string key = argv[index];
         const std::string value = argv[index + 1];
+
         if (key == "--matrix") {
             options.matrix_path = value;
         } else if (key == "--vector") {
@@ -295,6 +323,7 @@ Options parse_args(int argc, char** argv) {
         } else {
             throw std::runtime_error("unknown flag: " + key);
         }
+        index += 2;
     }
 
     if (options.matrix_path.empty()) {
@@ -996,6 +1025,58 @@ int main(int argc, char** argv) {
         const double setup_wall_clock_latency_seconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - setup_started).count();
 
+        // Memory-traffic model (FC-layer analogy): A is "weights", x is "input
+        // activation", y is output. task_rows counts the rows this runner owns.
+        const int task_rows = options.row_end - options.row_start;
+        const double flops_per_run =
+            2.0 * static_cast<double>(task_rows) * static_cast<double>(options.cols);
+        const size_t bytes_input =
+            static_cast<size_t>(options.cols) * sizeof(float);
+        const size_t bytes_weight =
+            static_cast<size_t>(task_rows) * static_cast<size_t>(options.cols) * sizeof(float);
+        const size_t bytes_output =
+            static_cast<size_t>(task_rows) * sizeof(float);
+        const size_t bytes_kernel_compulsory =
+            bytes_input + bytes_weight + bytes_output;
+
+        auto emit_verbose_trial = [&](const TrialRecord& tr, int global_index, int global_total) {
+            if (!options.verbose) return;
+            const double compute_gflops = tr.host_compute_seconds > 0.0
+                ? (flops_per_run / tr.host_compute_seconds / 1e9) : 0.0;
+            const double effective_gflops = tr.total_wall_seconds > 0.0
+                ? (flops_per_run / tr.total_wall_seconds / 1e9) : 0.0;
+            fprintf(stderr,
+                    "[gemv dx12 %s %d/%d] candidate=%d/%d (trial %d/%d) "
+                    "thread_group_size=%d rows_per_thread=%d dispatches_per_repeat=%d "
+                    "compute=%.6fs total=%.6fs "
+                    "compute_gflops=%.3f effective_gflops=%.3f\n",
+                    tr.phase.c_str(), global_index, global_total,
+                    tr.candidate_index + 1, tr.candidate_total,
+                    tr.trial_index_within_candidate + 1, tr.repeats_for_candidate,
+                    tr.thread_group_size, tr.rows_per_thread, tr.dispatches_per_repeat,
+                    tr.host_compute_seconds, tr.total_wall_seconds,
+                    compute_gflops, effective_gflops);
+            fflush(stderr);
+        };
+
+        if (options.verbose) {
+            fprintf(stderr,
+                    "[gemv dx12 plan] mode=%s device=\"%s\" adapter_kind=%s "
+                    "row_start=%d row_end=%d cols=%d task_rows=%d "
+                    "setup_wall_clock=%.6fs static_upload_wall_clock=%.6fs\n",
+                    options.server_mode ? "server"
+                        : (options.task_mode ? "task_execution" : "benchmark"),
+                    runner.device_name().c_str(),
+                    runner.adapter_kind().c_str(),
+                    options.row_start,
+                    options.row_end,
+                    options.cols,
+                    task_rows,
+                    setup_wall_clock_latency_seconds,
+                    runner.static_upload_wall_clock_latency_seconds());
+            fflush(stderr);
+        }
+
         if (options.server_mode) {
             std::cout << "READY\t"
                       << "{\"backend\":\"dx12\",\"device_name\":\"" << runner.device_name()
@@ -1111,6 +1192,25 @@ int main(int argc, char** argv) {
         TrialMetrics best_metrics;
         bool has_best_metrics = false;
         int trials_run = 0;
+        std::vector<TrialRecord> trials;
+
+        const int autotune_total =
+            static_cast<int>(options.thread_group_sizes.size()
+                * options.rows_per_thread_values.size());
+        int emitted_autotune = 0;
+        int candidate_index = 0;
+
+        if (options.verbose) {
+            fprintf(stderr,
+                    "[gemv dx12 plan] phase=autotune thread_group_size_candidates=%zu "
+                    "rows_per_thread_candidates=%zu autotune_repeats=%d total_candidates=%d\n",
+                    options.thread_group_sizes.size(),
+                    options.rows_per_thread_values.size(),
+                    options.autotune_repeats,
+                    autotune_total);
+            fflush(stderr);
+        }
+
         for (const int thread_group_size : options.thread_group_sizes) {
             for (const int rows_per_thread : options.rows_per_thread_values) {
                 TrialMetrics candidate;
@@ -1118,11 +1218,29 @@ int main(int argc, char** argv) {
                 candidate.rows_per_thread = rows_per_thread;
                 candidate.autotune = runner.run_configuration(thread_group_size, rows_per_thread, options.autotune_repeats);
                 ++trials_run;
+
+                TrialRecord tr;
+                tr.phase = "autotune";
+                tr.candidate_index = candidate_index;
+                tr.candidate_total = autotune_total;
+                tr.trial_index_within_candidate = 0;
+                tr.repeats_for_candidate = candidate.autotune.repeats;
+                tr.thread_group_size = thread_group_size;
+                tr.rows_per_thread = rows_per_thread;
+                tr.dispatches_per_repeat = candidate.autotune.dispatches_per_repeat;
+                tr.host_compute_seconds = candidate.autotune.wall_clock_latency_seconds;
+                tr.total_wall_seconds = candidate.autotune.wall_clock_latency_seconds;
+                tr.checksum = candidate.autotune.checksum;
+                ++emitted_autotune;
+                emit_verbose_trial(tr, emitted_autotune, autotune_total);
+                trials.push_back(std::move(tr));
+
                 if (!has_best_metrics ||
                     candidate.autotune.wall_clock_latency_seconds < best_metrics.autotune.wall_clock_latency_seconds) {
                     best_metrics = candidate;
                     has_best_metrics = true;
                 }
+                ++candidate_index;
             }
         }
 
@@ -1130,11 +1248,39 @@ int main(int argc, char** argv) {
             throw std::runtime_error("DX12 benchmark ran zero valid trials");
         }
 
+        if (options.verbose) {
+            fprintf(stderr,
+                    "[gemv dx12 plan] phase=measurement "
+                    "selected_thread_group_size=%d selected_rows_per_thread=%d "
+                    "measurement_repeats=%d\n",
+                    best_metrics.thread_group_size,
+                    best_metrics.rows_per_thread,
+                    options.measurement_repeats);
+            fflush(stderr);
+        }
+
         best_metrics.measurement = runner.run_configuration(
             best_metrics.thread_group_size,
             best_metrics.rows_per_thread,
             options.measurement_repeats
         );
+
+        {
+            TrialRecord tr;
+            tr.phase = "measurement";
+            tr.candidate_index = 0;
+            tr.candidate_total = 1;
+            tr.trial_index_within_candidate = 0;
+            tr.repeats_for_candidate = best_metrics.measurement.repeats;
+            tr.thread_group_size = best_metrics.thread_group_size;
+            tr.rows_per_thread = best_metrics.rows_per_thread;
+            tr.dispatches_per_repeat = best_metrics.measurement.dispatches_per_repeat;
+            tr.host_compute_seconds = best_metrics.measurement.wall_clock_latency_seconds;
+            tr.total_wall_seconds = best_metrics.measurement.wall_clock_latency_seconds;
+            tr.checksum = best_metrics.measurement.checksum;
+            emit_verbose_trial(tr, 1, 1);
+            trials.push_back(std::move(tr));
+        }
 
         std::cout << "{"
                   << "\"mode\":\"benchmark\","
@@ -1164,7 +1310,50 @@ int main(int argc, char** argv) {
                   << best_metrics.measurement.wall_clock_latency_seconds << ","
                   << "\"measurement_effective_gflops\":" << std::fixed << std::setprecision(6)
                   << best_metrics.measurement.effective_gflops << ","
-                  << "\"measurement_checksum\":\"" << best_metrics.measurement.checksum << "\""
+                  << "\"measurement_checksum\":\"" << best_metrics.measurement.checksum << "\","
+                  << "\"flops_per_run\":" << std::fixed << std::setprecision(1) << flops_per_run << ","
+                  << "\"bytes_input\":" << bytes_input << ","
+                  << "\"bytes_weight\":" << bytes_weight << ","
+                  << "\"bytes_output\":" << bytes_output << ","
+                  << "\"bytes_kernel_compulsory_memory_traffic\":" << bytes_kernel_compulsory << ","
+                  << "\"notes_schema\":\"gemv DX12 backend (HLSL compute shader with thread_group_reduction layout): host_prep_seconds is zero per-trial because matrix A is uploaded exactly once upfront (see static_upload_wall_clock_latency_seconds) and vector x is uploaded per-call (see vector_upload_wall_clock_latency_seconds); host_compute_seconds is the per-repeat averaged CPU-measured wall-clock around the dispatch+wait loop (GPU timestamp queries are not yet wired); device_to_host_seconds is reported as zero because the readback is performed inline with the dispatch loop and is included in host_compute_seconds; host_postproc_seconds excludes checksum cost; memory_bandwidth model treats matrix A as weights, vector x as input activation, vector y as output, and uses compulsory one-touch DRAM traffic as a lower bound (real traffic >= compulsory).\","
+                  << "\"trials\":[";
+        for (size_t i = 0; i < trials.size(); ++i) {
+            const TrialRecord& tr = trials[i];
+            const double compute_gflops = tr.host_compute_seconds > 0.0
+                ? (flops_per_run / tr.host_compute_seconds / 1e9) : 0.0;
+            const double effective_gflops = tr.total_wall_seconds > 0.0
+                ? (flops_per_run / tr.total_wall_seconds / 1e9) : 0.0;
+            const double kernel_bandwidth_gibps = tr.host_compute_seconds > 0.0
+                ? (static_cast<double>(bytes_kernel_compulsory) / tr.host_compute_seconds
+                   / (1024.0 * 1024.0 * 1024.0))
+                : 0.0;
+            std::cout << "{"
+                      << "\"phase\":\"" << tr.phase << "\","
+                      << "\"candidate_index\":" << tr.candidate_index << ","
+                      << "\"candidate_total\":" << tr.candidate_total << ","
+                      << "\"trial_index_within_candidate\":" << tr.trial_index_within_candidate << ","
+                      << "\"repeats_for_candidate\":" << tr.repeats_for_candidate << ","
+                      << "\"thread_group_size\":" << tr.thread_group_size << ","
+                      << "\"rows_per_thread\":" << tr.rows_per_thread << ","
+                      << "\"dispatches_per_repeat\":" << tr.dispatches_per_repeat << ","
+                      << std::fixed << std::setprecision(9)
+                      << "\"host_prep_seconds\":" << tr.host_prep_seconds << ","
+                      << "\"host_compute_seconds\":" << tr.host_compute_seconds << ","
+                      << "\"device_to_host_seconds\":" << tr.device_to_host_seconds << ","
+                      << "\"host_postproc_seconds\":" << tr.host_postproc_seconds << ","
+                      << "\"total_wall_seconds\":" << tr.total_wall_seconds << ","
+                      << std::setprecision(6)
+                      << "\"compute_gflops\":" << compute_gflops << ","
+                      << "\"effective_gflops\":" << effective_gflops << ","
+                      << "\"pcie_h2d_bandwidth_gibps\":0.0,"
+                      << "\"pcie_d2h_bandwidth_gibps\":0.0,"
+                      << "\"kernel_memory_bandwidth_gibps_compulsory_lower_bound_model\":" << kernel_bandwidth_gibps << ","
+                      << "\"checksum\":\"" << tr.checksum << "\""
+                      << "}";
+            if (i + 1 < trials.size()) std::cout << ",";
+        }
+        std::cout << "]"
                   << "}\n";
         return 0;
     } catch (const std::exception& exc) {

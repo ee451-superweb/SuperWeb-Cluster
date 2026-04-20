@@ -7,20 +7,25 @@ runner, and package the result back into a ``TaskResult``.
 
 from __future__ import annotations
 
+import array
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from app.constants import (
+    CONV2D_CLIENT_RESPONSE_STATS_ONLY,
+    CONV2D_STATS_MAX_SAMPLES,
     DEFAULT_CONV2D_CUDA_COOLDOWN_MS,
     DX12_BACKEND_DISABLED_REASON,
     METHOD_CONV2D,
     STATUS_OK,
 )
-from app.compute_resource_policy import resolve_capped_cpu_worker_count
+from adapters.process import python_utf8_command
+from app.compute_resource_policy import resolve_capped_cpu_worker_count, resolve_metal_headroom_policy
 from compute_node.compute_methods.conv2d.paths import (
     CPU_MACOS_EXECUTABLE_PATH,
     CPU_WINDOWS_EXECUTABLE_PATH,
@@ -37,7 +42,35 @@ from compute_node.performance_metrics.conv2d.config import (
 from compute_node.input_matrix.conv2d import build_input_matrix_spec, normalize_size_variant
 from compute_node.performance_summary import RuntimeProcessorProfile, load_runtime_processor_inventory
 from setup import active_python_path
+from wire.internal_protocol.control_plane import Conv2dResultPayload
 from wire.internal_protocol.runtime_transport import TaskAssign, TaskResult, TransferMode
+
+
+def _summarize_conv2d_slice_file(path: Path, *, max_samples: int) -> tuple[int, float, float, tuple[float, ...]]:
+    """Stream a float32 conv2d slice file and return count, sum, sum-of-squares, and leading samples."""
+    size = path.stat().st_size
+    if size % 4 != 0:
+        raise ValueError(f"conv2d slice file size is not a multiple of 4: {size}")
+    element_count = size // 4
+    sum_v = 0.0
+    sum_sq = 0.0
+    samples: list[float] = []
+    remaining = max(0, int(max_samples))
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(256 * 1024)
+            if not chunk:
+                break
+            values = array.array("f")
+            values.frombytes(chunk)
+            for x in values:
+                xf = float(x)
+                sum_v += xf
+                sum_sq += xf * xf
+                if remaining > 0:
+                    samples.append(xf)
+                    remaining -= 1
+    return element_count, sum_v, sum_sq, tuple(samples)
 
 METHOD_DIR = CONV2D_METHOD_DIR
 DEFAULT_CONV_RESULT_PATH = TOP_LEVEL_RESULT_PATH
@@ -129,6 +162,34 @@ def _runner_path(backend_name: str) -> Path:
     if backend_name == "metal":
         return METAL_EXECUTABLE_PATH
     raise ValueError(f"unsupported conv2d backend: {backend_name}")
+
+
+def _prepare_runner_path(backend_name: str) -> Path:
+    """Resolve one runtime runner path, compiling on demand when needed."""
+
+    executable_path = _runner_path(backend_name)
+    if executable_path.exists():
+        return executable_path
+
+    if backend_name == "cpu":
+        from compute_node.performance_metrics.conv2d.backends.cpu_backend import CpuBackend
+
+        executable_path, _note = CpuBackend()._resolve_executable_path(force_rebuild=False)
+        return executable_path
+
+    if backend_name == "cuda":
+        from compute_node.performance_metrics.conv2d.backends.cuda_backend import CudaBackend
+
+        executable_path, _note = CudaBackend()._resolve_executable_path(force_rebuild=False)
+        return executable_path
+
+    if backend_name == "metal":
+        from compute_node.performance_metrics.conv2d.backends.metal_backend import MetalBackend
+
+        executable_path, _note = MetalBackend()._compile_if_needed(force_rebuild=False)
+        return executable_path
+
+    return executable_path
 
 
 def _spec_for_task(task: TaskAssign):
@@ -271,14 +332,14 @@ def _ensure_dataset_ready(dataset_dir: Path, variant: str) -> None:
     if _resolve_input_path(dataset_dir, variant).exists():
         return
     subprocess.run(
-        [
-            str(active_python_path()),
-            str(DATASET_GENERATE_SCRIPT_PATH),
+        python_utf8_command(
+            active_python_path(),
+            DATASET_GENERATE_SCRIPT_PATH,
             "--output-dir",
-            str(dataset_dir),
+            dataset_dir,
             "--role",
             "compute",
-        ],
+        ),
         check=True,
         cwd=METHOD_DIR,
         timeout=600.0,
@@ -312,13 +373,15 @@ class Conv2dTaskExecutor:
         Returns:
             A ``TaskResult`` containing the output-channel slice bytes.
         """
+        task_started_at = time.monotonic()
+        computation_ms_total = 0
         spec, variant = _spec_for_task(task)
         _validate_task_against_spec(task, spec)
         _ensure_dataset_ready(self.dataset_root, variant)
         backend_profile = _best_backend_profile(self.result_path)
         backend_name = backend_profile.hardware_type if backend_profile is not None else _best_backend_name(self.result_path)
         best_config = {} if backend_profile is None else dict(backend_profile.best_config)
-        executable_path = _runner_path(backend_name)
+        executable_path = _prepare_runner_path(backend_name)
         if not executable_path.exists():
             raise FileNotFoundError(f"conv2d runner is missing: {executable_path}")
 
@@ -400,14 +463,43 @@ class Conv2dTaskExecutor:
                             str(CONV2D_CUDA_COOLDOWN_MS),
                         ]
                     )
+                elif backend_name == "metal":
+                    block_size = int(best_config.get("block_size") or 256)
+                    tile_size = int(best_config.get("tile_size") or 16)
+                    headroom_fraction = best_config.get("headroom_fraction")
+                    if headroom_fraction is None:
+                        headroom_policy = resolve_metal_headroom_policy(task.end_oc - task.start_oc)
+                    else:
+                        headroom_policy = resolve_metal_headroom_policy(
+                            task.end_oc - task.start_oc,
+                            fraction=float(headroom_fraction),
+                        )
+                    cmd.extend(
+                        [
+                            "--block-sizes",
+                            str(block_size),
+                            "--tile-sizes",
+                            str(tile_size),
+                            "--headroom-fraction",
+                            f"{headroom_policy.headroom_fraction:.6f}",
+                            "--output-channel-batch",
+                            str(headroom_policy.work_chunk_size),
+                        ]
+                    )
 
+                subprocess_started_at = time.monotonic()
                 completed = subprocess.run(
                     cmd,
                     check=True,
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     cwd=METHOD_DIR,
                     timeout=900.0,
+                )
+                computation_ms_total += max(
+                    0, int((time.monotonic() - subprocess_started_at) * 1000)
                 )
                 if not output_path.exists():
                     raise RuntimeError(
@@ -434,13 +526,70 @@ class Conv2dTaskExecutor:
                         f"conv2d runtime output has {output_size} bytes, expected {expected_output_bytes}"
                     )
 
-                output_bytes = b"" if disk_first_result else output_path.read_bytes()
-                local_result_path = str(output_path) if disk_first_result else ""
+                conv2d_task_payload = task.conv2d_payload
+                client_response_mode = (
+                    int(conv2d_task_payload.client_response_mode) if conv2d_task_payload is not None else 0
+                )
+                stats_max_samples = (
+                    int(conv2d_task_payload.stats_max_samples) if conv2d_task_payload is not None else 0
+                )
+                stats_only = client_response_mode == CONV2D_CLIENT_RESPONSE_STATS_ONLY
+                if stats_only:
+                    effective_max_samples = stats_max_samples if stats_max_samples > 0 else CONV2D_STATS_MAX_SAMPLES
+                    stats_count, stats_sum, stats_sum_squares, stats_samples = _summarize_conv2d_slice_file(
+                        output_path,
+                        max_samples=effective_max_samples,
+                    )
+                    expected_length = conv_spec.output_h * conv_spec.output_w * (task.end_oc - task.start_oc)
+                    if stats_count != expected_length:
+                        raise ValueError(
+                            f"conv2d slice element count {stats_count} does not match expected {expected_length}"
+                        )
+                    if disk_first_result:
+                        output_path.unlink(missing_ok=True)
+                    output_bytes = b""
+                    local_result_path = ""
+                else:
+                    output_bytes = b"" if disk_first_result else output_path.read_bytes()
+                    local_result_path = str(output_path) if disk_first_result else ""
+                    stats_count = 0
+                    stats_sum = 0.0
+                    stats_sum_squares = 0.0
+                    stats_samples: tuple[float, ...] = ()
             except Exception:
                 if disk_first_result:
                     output_path.unlink(missing_ok=True)
                 raise
 
+        output_length = conv_spec.output_h * conv_spec.output_w * (task.end_oc - task.start_oc)
+        wall_ms = max(0, int((time.monotonic() - task_started_at) * 1000))
+        peripheral_ms = max(0, wall_ms - computation_ms_total)
+        if stats_only:
+            result_payload = Conv2dResultPayload(
+                start_oc=task.start_oc,
+                end_oc=task.end_oc,
+                output_h=conv_spec.output_h,
+                output_w=conv_spec.output_w,
+                output_length=output_length,
+                output_vector=b"",
+                result_artifact_id="",
+                stats_element_count=stats_count,
+                stats_sum=stats_sum,
+                stats_sum_squares=stats_sum_squares,
+                stats_samples=stats_samples,
+            )
+            return TaskResult(
+                request_id=task.request_id,
+                node_id=task.node_id,
+                task_id=task.task_id,
+                timestamp_ms=task.timestamp_ms,
+                status_code=STATUS_OK,
+                iteration_count=task.iteration_count,
+                result_payload=result_payload,
+                local_result_path="",
+                computation_ms=computation_ms_total,
+                peripheral_ms=peripheral_ms,
+            )
         return TaskResult(
             request_id=task.request_id,
             node_id=task.node_id,
@@ -450,11 +599,13 @@ class Conv2dTaskExecutor:
             local_result_path=local_result_path,
             row_start=0,
             row_end=0,
-            output_length=conv_spec.output_h * conv_spec.output_w * (task.end_oc - task.start_oc),
+            output_length=output_length,
             output_vector=output_bytes,
             iteration_count=task.iteration_count,
             start_oc=task.start_oc,
             end_oc=task.end_oc,
             output_h=conv_spec.output_h,
             output_w=conv_spec.output_w,
+            computation_ms=computation_ms_total,
+            peripheral_ms=peripheral_ms,
         )
