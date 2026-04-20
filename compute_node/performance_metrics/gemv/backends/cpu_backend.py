@@ -30,7 +30,7 @@ from compute_node.compute_methods.gemv import (
     CPU_WINDOWS_EXECUTABLE_PATH,
     CPU_WINDOWS_SOURCE_PATH,
 )
-from compute_node.performance_metrics.gemv.backends._native_runner import (
+from compute_node.performance_metrics.gemv.backends._native_runner_launcher import (
     run_native_runner_with_streaming,
 )
 from compute_node.performance_metrics.gemv.models import (

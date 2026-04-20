@@ -172,6 +172,14 @@ message WorkerTiming {
   string slice = 3;
   uint64 wall_ms = 4;
   uint64 artifact_fetch_ms = 5;
+  // Self-reported by the worker: time spent inside native compute
+  // runners (sum across subprocess invocations for this slice).
+  uint64 computation_ms = 6;
+  // Self-reported by the worker: everything else on the compute node
+  // outside native computation (setup, weight I/O, output read,
+  // stats aggregation, payload build). Excludes artifact_fetch_ms
+  // which is measured on the main node.
+  uint64 peripheral_ms = 7;
 }
 
 message ResponseTiming {
@@ -257,6 +265,12 @@ message TaskResult {
     Conv2dResultPayload conv2d = 8;
   }
   ArtifactDescriptor result_artifact = 9;
+  // Worker-observed native compute time for this task (sum of
+  // subprocess invocations of the backend runner). 0 when unreported.
+  uint64 computation_ms = 10;
+  // Worker-observed non-compute overhead: validation, weight write,
+  // output read, stats summarization, payload build. 0 when unreported.
+  uint64 peripheral_ms = 11;
 }
 
 message ArtifactRelease {

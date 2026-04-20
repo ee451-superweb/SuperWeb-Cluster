@@ -609,6 +609,8 @@ class WorkerTaskExchange:
                     slice=slice_label,
                     wall_ms=wall_ms,
                     artifact_fetch_ms=artifact_fetch_ms,
+                    computation_ms=int(getattr(task_result, "computation_ms", 0) or 0),
+                    peripheral_ms=int(getattr(task_result, "peripheral_ms", 0) or 0),
                 )
                 return task_result, timing
         except (OSError, ValueError, ConnectionError, RuntimeError) as exc:

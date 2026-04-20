@@ -322,6 +322,8 @@ def _to_pb_worker_timing(payload) -> runtime_pb2.WorkerTiming:
         slice=payload.slice,
         wall_ms=payload.wall_ms,
         artifact_fetch_ms=payload.artifact_fetch_ms,
+        computation_ms=payload.computation_ms,
+        peripheral_ms=payload.peripheral_ms,
     )
 
 
@@ -334,6 +336,8 @@ def _from_pb_worker_timing(payload: runtime_pb2.WorkerTiming):
         slice=payload.slice,
         wall_ms=payload.wall_ms,
         artifact_fetch_ms=payload.artifact_fetch_ms,
+        computation_ms=payload.computation_ms,
+        peripheral_ms=payload.peripheral_ms,
     )
 
 
@@ -690,6 +694,8 @@ def encode_envelope(message) -> bytes:
         envelope.task_result.timestamp_ms = message.task_result.timestamp_ms
         envelope.task_result.status_code = message.task_result.status_code
         envelope.task_result.iteration_count = message.task_result.iteration_count
+        envelope.task_result.computation_ms = message.task_result.computation_ms
+        envelope.task_result.peripheral_ms = message.task_result.peripheral_ms
         if message.task_result.gemv_payload is not None:
             envelope.task_result.gemv.CopyFrom(
                 _to_pb_gemv_result_payload(
@@ -933,6 +939,8 @@ def parse_envelope(payload: bytes):
                 if envelope_pb.task_result.HasField("result_artifact")
                 else None
             ),
+            computation_ms=envelope_pb.task_result.computation_ms,
+            peripheral_ms=envelope_pb.task_result.peripheral_ms,
         )
     if envelope_pb.HasField("artifact_release"):
         artifact_release = runtime.ArtifactRelease(

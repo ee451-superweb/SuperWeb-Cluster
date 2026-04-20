@@ -274,6 +274,8 @@ class WorkerTiming:
     slice: str
     wall_ms: int
     artifact_fetch_ms: int = 0
+    computation_ms: int = 0
+    peripheral_ms: int = 0
 
 
 @dataclass(slots=True)

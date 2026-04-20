@@ -17,7 +17,7 @@ from compute_node.compute_methods.gemv import (
     METAL_EXECUTABLE_PATH,
     METAL_HOST_SOURCE_PATH,
 )
-from compute_node.performance_metrics.gemv.backends._native_runner import (
+from compute_node.performance_metrics.gemv.backends._native_runner_launcher import (
     run_native_runner_with_streaming,
 )
 from compute_node.performance_metrics.gemv.models import (

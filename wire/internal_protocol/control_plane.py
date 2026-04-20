@@ -378,6 +378,8 @@ class TaskResult:
     result_payload: GemvResultPayload | Conv2dResultPayload | None = None
     result_artifact: ArtifactDescriptor | None = None
     local_result_path: str = ""
+    computation_ms: int = 0
+    peripheral_ms: int = 0
     row_start: InitVar[int] = 0
     row_end: InitVar[int] = 0
     output_length: InitVar[int] = 0

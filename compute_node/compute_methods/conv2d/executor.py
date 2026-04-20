@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from app.constants import (
@@ -372,6 +373,8 @@ class Conv2dTaskExecutor:
         Returns:
             A ``TaskResult`` containing the output-channel slice bytes.
         """
+        task_started_at = time.monotonic()
+        computation_ms_total = 0
         spec, variant = _spec_for_task(task)
         _validate_task_against_spec(task, spec)
         _ensure_dataset_ready(self.dataset_root, variant)
@@ -484,6 +487,7 @@ class Conv2dTaskExecutor:
                         ]
                     )
 
+                subprocess_started_at = time.monotonic()
                 completed = subprocess.run(
                     cmd,
                     check=True,
@@ -493,6 +497,9 @@ class Conv2dTaskExecutor:
                     errors="replace",
                     cwd=METHOD_DIR,
                     timeout=900.0,
+                )
+                computation_ms_total += max(
+                    0, int((time.monotonic() - subprocess_started_at) * 1000)
                 )
                 if not output_path.exists():
                     raise RuntimeError(
@@ -555,6 +562,8 @@ class Conv2dTaskExecutor:
                 raise
 
         output_length = conv_spec.output_h * conv_spec.output_w * (task.end_oc - task.start_oc)
+        wall_ms = max(0, int((time.monotonic() - task_started_at) * 1000))
+        peripheral_ms = max(0, wall_ms - computation_ms_total)
         if stats_only:
             result_payload = Conv2dResultPayload(
                 start_oc=task.start_oc,
@@ -578,6 +587,8 @@ class Conv2dTaskExecutor:
                 iteration_count=task.iteration_count,
                 result_payload=result_payload,
                 local_result_path="",
+                computation_ms=computation_ms_total,
+                peripheral_ms=peripheral_ms,
             )
         return TaskResult(
             request_id=task.request_id,
@@ -595,4 +606,6 @@ class Conv2dTaskExecutor:
             end_oc=task.end_oc,
             output_h=conv_spec.output_h,
             output_w=conv_spec.output_w,
+            computation_ms=computation_ms_total,
+            peripheral_ms=peripheral_ms,
         )

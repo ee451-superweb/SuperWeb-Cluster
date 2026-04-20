@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -218,6 +219,7 @@ class GemvTaskExecutor:
             A ``TaskResult`` containing the merged GEMV output slice.
         """
 
+        task_started_at = time.monotonic()
         spec, dataset_layout = self._resolve_task_dataset(task)
         self._validate_task(task, spec=spec, dataset_layout=dataset_layout)
         processor_slices = self._build_local_processor_slices(task)
@@ -227,25 +229,27 @@ class GemvTaskExecutor:
             vector_path = temp_root / "x.bin"
             vector_path.write_bytes(task.vector_data)
 
-            with ThreadPoolExecutor(max_workers=len(processor_slices), thread_name_prefix="local-processor") as executor:
-                output_chunks = list(
-                    executor.map(
-                        lambda processor_slice: (
-                            processor_slice.row_start,
-                            self._run_processor_slice(
-                                processor_slice,
-                                task.iteration_count,
-                                vector_path,
-                                temp_root,
-                                spec=spec,
-                                dataset_layout=dataset_layout,
-                            ),
-                        ),
-                        processor_slices,
-                    )
+            def _run_and_time(processor_slice):
+                slice_started_at = time.monotonic()
+                chunk = self._run_processor_slice(
+                    processor_slice,
+                    task.iteration_count,
+                    vector_path,
+                    temp_root,
+                    spec=spec,
+                    dataset_layout=dataset_layout,
                 )
+                slice_ms = max(0, int((time.monotonic() - slice_started_at) * 1000))
+                return processor_slice.row_start, chunk, slice_ms
 
-        merged = b"".join(chunk for _, chunk in sorted(output_chunks, key=lambda item: item[0]))
+            with ThreadPoolExecutor(max_workers=len(processor_slices), thread_name_prefix="local-processor") as executor:
+                slice_results = list(executor.map(_run_and_time, processor_slices))
+
+        slice_results.sort(key=lambda item: item[0])
+        merged = b"".join(chunk for _, chunk, _ in slice_results)
+        wall_ms = max(0, int((time.monotonic() - task_started_at) * 1000))
+        computation_ms = max((slice_ms for _, _, slice_ms in slice_results), default=0)
+        peripheral_ms = max(0, wall_ms - computation_ms)
         return TaskResult(
             request_id=task.request_id,
             node_id=task.node_id,
@@ -257,6 +261,8 @@ class GemvTaskExecutor:
             output_length=task.row_end - task.row_start,
             output_vector=merged,
             iteration_count=task.iteration_count,
+            computation_ms=computation_ms,
+            peripheral_ms=peripheral_ms,
         )
 
     def _resolve_task_dataset(self, task: TaskAssign):
