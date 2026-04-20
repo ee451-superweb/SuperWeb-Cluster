@@ -347,6 +347,8 @@ class WorkerTaskRuntimeService:
                     iteration_count=task_result.iteration_count,
                     result_payload=outgoing_result_payload,
                     result_artifact=result_artifact,
+                    computation_ms=int(getattr(task_result, "computation_ms", 0) or 0),
+                    peripheral_ms=int(getattr(task_result, "peripheral_ms", 0) or 0),
                 )
             )
             result_scope = (

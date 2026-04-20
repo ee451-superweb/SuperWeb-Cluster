@@ -586,6 +586,8 @@ class WorkerTaskExchange:
                         output_h=task_result.output_h,
                         output_w=task_result.output_w,
                         result_artifact_id=task_result.result_artifact_id,
+                        computation_ms=task_result.computation_ms,
+                        peripheral_ms=task_result.peripheral_ms,
                     )
                 else:
                     write_audit_event(

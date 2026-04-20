@@ -556,6 +556,8 @@ def build_task_result(
     result_artifact_id: str = "",
     result_artifact: ArtifactDescriptor | None = None,
     result_payload: GemvResultPayload | Conv2dResultPayload | None = None,
+    computation_ms: int = 0,
+    peripheral_ms: int = 0,
 ) -> RuntimeEnvelope:
     """Use this when a worker completes one assigned task slice."""
     if timestamp_ms is None:
@@ -585,6 +587,8 @@ def build_task_result(
             output_h=output_h,
             output_w=output_w,
             result_artifact_id=result_artifact_id,
+            computation_ms=computation_ms,
+            peripheral_ms=peripheral_ms,
         ),
     )
 
