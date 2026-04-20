@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <iomanip>
@@ -16,6 +17,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 @interface Conv2DMPSChunkContext : NSObject
@@ -51,6 +53,7 @@ struct Options {
     int output_channel_batch = 0;
     int autotune_repeats = 1;
     int measurement_repeats = 1;
+    bool verbose = false;
 };
 
 struct PhaseMetrics {
@@ -64,6 +67,20 @@ struct TrialMetrics {
     std::string implementation = "mpsgraph";
     PhaseMetrics autotune;
     PhaseMetrics measurement;
+};
+
+struct TrialRecord {
+    std::string phase;
+    int candidate_index = 0;
+    int candidate_total = 0;
+    int trial_index_within_candidate = 0;
+    int repeats_for_candidate = 0;
+    int output_channel_batch = 0;
+    double host_prep_seconds = 0.0;
+    double host_compute_seconds = 0.0;
+    double device_to_host_seconds = 0.0;
+    double host_postproc_seconds = 0.0;
+    double total_wall_seconds = 0.0;
 };
 
 std::vector<int> parse_int_list(const std::string& text) {
@@ -94,13 +111,20 @@ bool parse_bool_flag(const std::string& text) {
 
 Options parse_args(int argc, char** argv) {
     Options options;
-    for (int index = 1; index < argc; index += 2) {
+    int index = 1;
+    while (index < argc) {
+        const std::string key = argv[index];
+        if (key == "--verbose") {
+            options.verbose = true;
+            index += 1;
+            continue;
+        }
         if (index + 1 >= argc) {
             throw std::runtime_error("missing value for command line flag");
         }
 
-        const std::string key = argv[index];
         const std::string value = argv[index + 1];
+        index += 2;
         if (key == "--library") {
             options.library_path = value;
         } else if (key == "--input") {
@@ -569,6 +593,29 @@ int main(int argc, char** argv) {
                     throw std::runtime_error("failed to create Metal command queue");
                 }
 
+                std::vector<TrialRecord> trial_records;
+                trial_records.reserve(2);
+
+                const double flops_per_run_plan =
+                    2.0 * static_cast<double>(out_h_int) * static_cast<double>(out_w_int) *
+                    static_cast<double>(options.c_out) * static_cast<double>(options.c_in) *
+                    static_cast<double>(options.k) * static_cast<double>(options.k);
+                const long long bytes_input_plan =
+                    static_cast<long long>(options.h) * options.w * options.c_in * 4;
+                const long long bytes_weight_plan =
+                    static_cast<long long>(options.c_out) * options.c_in * options.k * options.k * 4;
+                const long long bytes_output_plan =
+                    static_cast<long long>(out_h_int) * out_w_int * options.c_out * 4;
+                const long long bytes_kernel_compulsory_plan =
+                    bytes_input_plan + bytes_weight_plan + bytes_output_plan;
+
+                if (options.verbose) {
+                    std::fprintf(stderr,
+                        "[conv2d metal plan] phase=autotune autotune_repeats=%d output_channel_batch=%zu\n",
+                        options.autotune_repeats, output_channel_batch);
+                    std::fflush(stderr);
+                }
+
                 best_metrics.autotune = run_mpsgraph_conv2d(
                     command_queue,
                     options,
@@ -576,6 +623,36 @@ int main(int argc, char** argv) {
                     host_output,
                     options.autotune_repeats
                 );
+
+                {
+                    TrialRecord record;
+                    record.phase = "autotune";
+                    record.candidate_index = 0;
+                    record.candidate_total = 1;
+                    record.trial_index_within_candidate = 0;
+                    record.repeats_for_candidate = options.autotune_repeats;
+                    record.output_channel_batch = static_cast<int>(output_channel_batch);
+                    record.host_prep_seconds = 0.0;
+                    record.host_compute_seconds = best_metrics.autotune.wall_clock_latency_seconds;
+                    record.device_to_host_seconds = 0.0;
+                    record.host_postproc_seconds = 0.0;
+                    record.total_wall_seconds = best_metrics.autotune.wall_clock_latency_seconds;
+                    trial_records.push_back(std::move(record));
+                }
+
+                if (options.verbose) {
+                    std::fprintf(stderr,
+                        "[conv2d metal autotune 1/1] output_channel_batch=%zu repeats=%d "
+                        "per_run=%.6fs effective_gflops=%.3f\n",
+                        output_channel_batch, options.autotune_repeats,
+                        best_metrics.autotune.wall_clock_latency_seconds,
+                        best_metrics.autotune.effective_gflops);
+                    std::fprintf(stderr,
+                        "[conv2d metal plan] phase=measurement measurement_repeats=%d\n",
+                        options.measurement_repeats);
+                    std::fflush(stderr);
+                }
+
                 best_metrics.measurement = run_mpsgraph_conv2d(
                     command_queue,
                     options,
@@ -583,6 +660,33 @@ int main(int argc, char** argv) {
                     host_output,
                     options.measurement_repeats
                 );
+
+                {
+                    TrialRecord record;
+                    record.phase = "measurement";
+                    record.candidate_index = 0;
+                    record.candidate_total = 1;
+                    record.trial_index_within_candidate = 0;
+                    record.repeats_for_candidate = options.measurement_repeats;
+                    record.output_channel_batch = static_cast<int>(output_channel_batch);
+                    record.host_prep_seconds = 0.0;
+                    record.host_compute_seconds = best_metrics.measurement.wall_clock_latency_seconds;
+                    record.device_to_host_seconds = 0.0;
+                    record.host_postproc_seconds = 0.0;
+                    record.total_wall_seconds = best_metrics.measurement.wall_clock_latency_seconds;
+                    trial_records.push_back(std::move(record));
+                }
+
+                if (options.verbose) {
+                    std::fprintf(stderr,
+                        "[conv2d metal measurement 1/1] output_channel_batch=%zu repeats=%d "
+                        "per_run=%.6fs effective_gflops=%.3f\n",
+                        output_channel_batch, options.measurement_repeats,
+                        best_metrics.measurement.wall_clock_latency_seconds,
+                        best_metrics.measurement.effective_gflops);
+                    std::fflush(stderr);
+                }
+
                 best_output_values = host_output;
 
                 if (!options.output_path.empty()) {
@@ -608,8 +712,46 @@ int main(int argc, char** argv) {
                           << best_metrics.measurement.wall_clock_latency_seconds << ","
                           << "\"measurement_effective_gflops\":" << std::fixed << std::setprecision(9)
                           << best_metrics.measurement.effective_gflops << ","
-                          << "\"measurement_checksum\":\"" << best_metrics.measurement.checksum << "\""
-                          << "}" << std::endl;
+                          << "\"measurement_checksum\":\"" << best_metrics.measurement.checksum << "\","
+                          << "\"flops_per_run\":" << std::fixed << std::setprecision(1) << flops_per_run_plan << ","
+                          << "\"bytes_input\":" << bytes_input_plan << ","
+                          << "\"bytes_weight\":" << bytes_weight_plan << ","
+                          << "\"bytes_output\":" << bytes_output_plan << ","
+                          << "\"bytes_kernel_compulsory_memory_traffic\":" << bytes_kernel_compulsory_plan << ","
+                          << "\"notes_schema\":\"Metal backend (MPSGraph): host_prep/device_to_host/host_postproc are zero in this schema. host_compute_seconds is the amortized per-run wall clock over autotune_repeats (or measurement_repeats) MPSGraph submissions; H2D is done before the timing window and D2H + checksum happen after it. Per-phase GPU timing split is deferred pending MTLCounterSampleBuffer integration; memory_bandwidth model assumes perfect DRAM reuse (real traffic >= compulsory).\","
+                          << "\"trials\":[";
+                for (size_t i = 0; i < trial_records.size(); ++i) {
+                    const auto& tr = trial_records[i];
+                    const double compute_gflops = tr.host_compute_seconds > 0.0
+                        ? (flops_per_run_plan / tr.host_compute_seconds / 1e9) : 0.0;
+                    const double effective_gflops = tr.total_wall_seconds > 0.0
+                        ? (flops_per_run_plan / tr.total_wall_seconds / 1e9) : 0.0;
+                    const double kernel_bandwidth_gibps = tr.host_compute_seconds > 0.0
+                        ? (static_cast<double>(bytes_kernel_compulsory_plan) / tr.host_compute_seconds / (1024.0 * 1024.0 * 1024.0))
+                        : 0.0;
+                    std::cout << (i == 0 ? "" : ",")
+                              << "{"
+                              << "\"phase\":\"" << tr.phase << "\","
+                              << "\"candidate_index\":" << tr.candidate_index << ","
+                              << "\"candidate_total\":" << tr.candidate_total << ","
+                              << "\"trial_index_within_candidate\":" << tr.trial_index_within_candidate << ","
+                              << "\"repeats_for_candidate\":" << tr.repeats_for_candidate << ","
+                              << "\"output_channel_batch\":" << tr.output_channel_batch << ","
+                              << std::fixed << std::setprecision(9)
+                              << "\"host_prep_seconds\":" << tr.host_prep_seconds << ","
+                              << "\"host_compute_seconds\":" << tr.host_compute_seconds << ","
+                              << "\"device_to_host_seconds\":" << tr.device_to_host_seconds << ","
+                              << "\"host_postproc_seconds\":" << tr.host_postproc_seconds << ","
+                              << "\"total_wall_seconds\":" << tr.total_wall_seconds << ","
+                              << std::setprecision(6)
+                              << "\"compute_gflops\":" << compute_gflops << ","
+                              << "\"effective_gflops\":" << effective_gflops << ","
+                              << "\"pcie_h2d_bandwidth_gibps\":0.0,"
+                              << "\"pcie_d2h_bandwidth_gibps\":0.0,"
+                              << "\"kernel_memory_bandwidth_gibps_compulsory_lower_bound_model\":" << kernel_bandwidth_gibps
+                              << "}";
+                }
+                std::cout << "]}" << std::endl;
                 return 0;
             }
 

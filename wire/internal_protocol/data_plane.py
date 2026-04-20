@@ -13,18 +13,29 @@ from dataclasses import dataclass
 class DataPlaneMessageType(enum.IntEnum):
     """Supported low-level data-plane frame types."""
 
-    REQUEST = 1
+    DOWNLOAD_REQUEST = 1
     INIT = 2
     CHUNK = 3
     END = 4
     ERROR = 5
+    DELIVER = 6
 
 
 @dataclass(slots=True)
-class ArtifactRequestFrame:
-    """Typed request frame asking the sender for one artifact id."""
+class ArtifactDownloadRequestFrame:
+    """Typed download-request frame asking the sender for one artifact id."""
 
     artifact_id: str
+
+
+@dataclass(slots=True)
+class ArtifactDeliverFrame:
+    """Typed deliver frame announcing a client-initiated upload on this socket."""
+
+    upload_id: str
+    size_bytes: int
+    checksum: str
+    content_type: str
 
 
 @dataclass(slots=True)

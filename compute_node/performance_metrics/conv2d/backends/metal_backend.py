@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from app.compute_resource_policy import resolve_metal_headroom_policy
@@ -33,6 +34,21 @@ from compute_node.performance_metrics.conv2d.scoring import linear_time_score
 from compute_node.performance_metrics.path_utils import sanitize_text, to_relative_cli_path, to_relative_string
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+
+_RAW_REPORT_KEYS = (
+    "flops_per_run",
+    "bytes_input",
+    "bytes_weight",
+    "bytes_output",
+    "bytes_kernel_compulsory_memory_traffic",
+    "notes_schema",
+    "trials",
+)
+
+
+def _extract_raw_report(metrics: dict[str, object]) -> dict[str, object]:
+    """Pull the benchmark-only detail fields out of a native runner's JSON."""
+    return {key: metrics[key] for key in _RAW_REPORT_KEYS if key in metrics}
 
 
 def _relative_project_path(path: Path) -> str:
@@ -165,6 +181,7 @@ class MetalBackend:
         time_budget_seconds: float,
         force_rebuild: bool = False,
         phase_callback=None,
+        verbose: bool = False,
     ) -> BackendResult:
         """Run the Metal executable and return the best configuration it found."""
 
@@ -232,6 +249,7 @@ class MetalBackend:
                 autotune_repeats=DEFAULT_AUTOTUNE_REPEATS,
                 measurement_repeats=1,
                 timeout_seconds=max(time_budget_seconds, 30.0),
+                verbose=verbose,
             )
             selected_config = self._selected_config(
                 autotune_metrics,
@@ -276,6 +294,7 @@ class MetalBackend:
                 autotune_repeats=1,
                 measurement_repeats=final_measurement_repeats,
                 timeout_seconds=max(time_budget_seconds, 30.0),
+                verbose=verbose,
             )
         except subprocess.TimeoutExpired:
             notes.append("Metal benchmark timed out")
@@ -355,6 +374,10 @@ class MetalBackend:
             score=measurement_score,
             notes=trial_notes,
         )
+        raw_report = {
+            "autotune": _extract_raw_report(autotune_metrics),
+            "measurement": _extract_raw_report(metrics),
+        }
         return BackendResult(
             backend=self.name,
             available=True,
@@ -363,6 +386,7 @@ class MetalBackend:
             best_trial=trial,
             trials=[autotune_trial, trial],
             notes=notes,
+            raw_report=raw_report,
         )
 
     def _run_runner(
@@ -378,6 +402,7 @@ class MetalBackend:
         autotune_repeats: int,
         measurement_repeats: int,
         timeout_seconds: float,
+        verbose: bool = False,
     ) -> dict[str, object]:
         """Invoke the native Metal runner and parse its JSON metrics."""
 
@@ -416,6 +441,8 @@ class MetalBackend:
             "--measurement-repeats",
             str(measurement_repeats),
         ]
+        if verbose:
+            command.append("--verbose")
         emit_status(
             "method.conv2d.backend.native_runner.start",
             status="running",
@@ -426,16 +453,55 @@ class MetalBackend:
             autotune_repeats=autotune_repeats,
             measurement_repeats=measurement_repeats,
         )
-        completed = subprocess.run(
+
+        process = subprocess.Popen(
             command,
-            check=True,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=timeout_seconds,
             cwd=ROOT_DIR,
         )
+
+        stderr_chunks: list[str] = []
+        stdout_chunks: list[str] = []
+
+        def _pump_stderr() -> None:
+            for line in process.stderr:
+                stderr_chunks.append(line)
+                if verbose:
+                    sys.stderr.write(line)
+                    sys.stderr.flush()
+
+        def _pump_stdout() -> None:
+            for line in process.stdout:
+                stdout_chunks.append(line)
+
+        stderr_pump = threading.Thread(target=_pump_stderr, daemon=True)
+        stdout_pump = threading.Thread(target=_pump_stdout, daemon=True)
+        stderr_pump.start()
+        stdout_pump.start()
+
+        try:
+            return_code = process.wait(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            stderr_pump.join(timeout=5.0)
+            stdout_pump.join(timeout=5.0)
+            raise
+
+        stderr_pump.join(timeout=5.0)
+        stdout_pump.join(timeout=5.0)
+        stdout_data = "".join(stdout_chunks)
+        stderr_data = "".join(stderr_chunks)
+
+        if return_code != 0:
+            raise subprocess.CalledProcessError(
+                return_code, command, output=stdout_data, stderr=stderr_data
+            )
+
         emit_status(
             "method.conv2d.backend.native_runner.complete",
             status="running",
@@ -443,7 +509,7 @@ class MetalBackend:
             backend=self.name,
             command=command,
         )
-        return json.loads(completed.stdout)
+        return json.loads(stdout_data)
 
     def _compile_if_needed(self, *, force_rebuild: bool = False) -> tuple[Path, str]:
         """Build the self-contained Metal runner when sources changed."""

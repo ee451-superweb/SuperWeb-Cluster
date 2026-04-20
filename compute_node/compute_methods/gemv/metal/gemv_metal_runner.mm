@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <cstdint>
 #include <fstream>
@@ -14,6 +15,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -33,12 +35,14 @@ struct Options {
     int row_chunk_size = 0;
     int autotune_repeats = 1;
     int measurement_repeats = 1;
+    bool verbose = false;
 };
 
 struct PhaseMetrics {
     int repeats = 0;
     double wall_clock_latency_seconds = std::numeric_limits<double>::infinity();
     double effective_gflops = 0.0;
+    double device_to_host_seconds = 0.0;  // post-compute memcpy out of shared MTLBuffer
     std::string checksum;
 };
 
@@ -46,6 +50,24 @@ struct TrialMetrics {
     std::string implementation = "mps_matrix_vector_multiplication";
     PhaseMetrics autotune;
     PhaseMetrics measurement;
+};
+
+// One per-trial record for the raw_report.trials array. Schema mirrors the
+// conv2d CPU/GPU layout so downstream aggregators share a common shape.
+struct TrialRecord {
+    std::string phase;                  // "autotune" or "measurement"
+    int candidate_index = 0;
+    int candidate_total = 0;
+    int trial_index_within_candidate = 0;
+    int repeats_for_candidate = 0;
+    std::string implementation;
+    int row_chunk_size = 0;
+    double host_prep_seconds = 0.0;
+    double host_compute_seconds = 0.0;
+    double device_to_host_seconds = 0.0;
+    double host_postproc_seconds = 0.0;
+    double total_wall_seconds = 0.0;
+    std::string checksum;
 };
 
 std::vector<int> parse_int_list(const std::string& text) {
@@ -66,13 +88,20 @@ std::vector<int> parse_int_list(const std::string& text) {
 
 Options parse_args(int argc, char** argv) {
     Options options;
-    for (int index = 1; index < argc; index += 2) {
+    int index = 1;
+    while (index < argc) {
+        const std::string key = argv[index];
+        if (key == "--verbose") {
+            options.verbose = true;
+            index += 1;
+            continue;
+        }
+
         if (index + 1 >= argc) {
             throw std::runtime_error("missing value for command line flag");
         }
-
-        const std::string key = argv[index];
         const std::string value = argv[index + 1];
+
         if (key == "--library") {
             options.library_path = value;
         } else if (key == "--matrix") {
@@ -104,6 +133,7 @@ Options parse_args(int argc, char** argv) {
         } else {
             throw std::runtime_error("unknown flag: " + key);
         }
+        index += 2;
     }
 
     if (options.matrix_path.empty() || options.vector_path.empty()) {
@@ -346,12 +376,20 @@ PhaseMetrics run_mps_gemv(
             (2.0 * static_cast<double>(output_rows) * static_cast<double>(options.cols))
             / std::max(latency_seconds, 1e-12) / 1.0e9;
 
+        // Time the post-compute copy out of the shared MTLBuffer so the
+        // raw_report can surface it. On unified-memory Apple Silicon this is a
+        // local memcpy — not a PCIe transfer — and is typically negligible.
+        const auto d2h_started = std::chrono::steady_clock::now();
         std::memcpy(host_output.data(), [output_buffer contents], output_bytes);
+        const auto d2h_finished = std::chrono::steady_clock::now();
+        const double d2h_seconds =
+            std::chrono::duration<double>(d2h_finished - d2h_started).count();
 
         PhaseMetrics metrics;
         metrics.repeats = repeats;
         metrics.wall_clock_latency_seconds = latency_seconds;
         metrics.effective_gflops = effective_gflops;
+        metrics.device_to_host_seconds = d2h_seconds;
         metrics.checksum = fnv1a64_checksum(host_output);
         return metrics;
     }
@@ -378,20 +416,114 @@ int main(int argc, char** argv) {
                 throw std::runtime_error("failed to create Metal command queue");
             }
 
+            // Memory-traffic model (FC-layer analogy): A is "weights", x is
+            // "input activation", y is output. Compulsory traffic = one-touch
+            // lower bound. On unified-memory Apple Silicon, PCIe bandwidth does
+            // not apply; the D2H column captures the local memcpy out.
+            const double flops_per_run =
+                2.0 * static_cast<double>(output_rows) * static_cast<double>(options.cols);
+            const size_t bytes_input =
+                static_cast<size_t>(options.cols) * sizeof(float);
+            const size_t bytes_weight =
+                static_cast<size_t>(output_rows) * static_cast<size_t>(options.cols) * sizeof(float);
+            const size_t bytes_output =
+                output_rows * sizeof(float);
+            const size_t bytes_kernel_compulsory =
+                bytes_input + bytes_weight + bytes_output;
+
+            std::vector<TrialRecord> trials;
+
+            auto emit_verbose_trial = [&](const TrialRecord& tr, int global_index, int global_total) {
+                if (!options.verbose) return;
+                const double compute_gflops = tr.host_compute_seconds > 0.0
+                    ? (flops_per_run / tr.host_compute_seconds / 1e9) : 0.0;
+                const double effective_gflops = tr.total_wall_seconds > 0.0
+                    ? (flops_per_run / tr.total_wall_seconds / 1e9) : 0.0;
+                fprintf(stderr,
+                        "[gemv metal %s %d/%d] candidate=%d/%d (trial %d/%d) "
+                        "row_chunk_size=%d implementation=%s "
+                        "compute=%.6fs d2h=%.6fs total=%.6fs "
+                        "compute_gflops=%.3f effective_gflops=%.3f\n",
+                        tr.phase.c_str(), global_index, global_total,
+                        tr.candidate_index + 1, tr.candidate_total,
+                        tr.trial_index_within_candidate + 1, tr.repeats_for_candidate,
+                        tr.row_chunk_size, tr.implementation.c_str(),
+                        tr.host_compute_seconds, tr.device_to_host_seconds, tr.total_wall_seconds,
+                        compute_gflops, effective_gflops);
+                fflush(stderr);
+            };
+
             std::vector<float> best_output_values(output_rows, 0.0f);
             TrialMetrics metrics;
+
+            if (options.verbose) {
+                fprintf(stderr,
+                        "[gemv metal plan] phase=autotune autotune_repeats=%d "
+                        "row_chunk_size=%zu headroom_fraction=%.6f "
+                        "device=\"%s\"\n",
+                        options.autotune_repeats,
+                        row_chunk_size,
+                        options.headroom_fraction,
+                        [[device name] UTF8String]);
+                fflush(stderr);
+            }
+
             metrics.autotune = run_mps_gemv(
                 command_queue,
                 options,
                 best_output_values,
                 options.autotune_repeats
             );
+            {
+                TrialRecord tr;
+                tr.phase = "autotune";
+                tr.candidate_index = 0;
+                tr.candidate_total = 1;
+                tr.trial_index_within_candidate = 0;
+                tr.repeats_for_candidate = metrics.autotune.repeats;
+                tr.implementation = metrics.implementation;
+                tr.row_chunk_size = static_cast<int>(row_chunk_size);
+                tr.host_compute_seconds = metrics.autotune.wall_clock_latency_seconds;
+                tr.device_to_host_seconds = metrics.autotune.device_to_host_seconds;
+                tr.total_wall_seconds =
+                    metrics.autotune.wall_clock_latency_seconds
+                    + metrics.autotune.device_to_host_seconds;
+                tr.checksum = metrics.autotune.checksum;
+                emit_verbose_trial(tr, 1, 1);
+                trials.push_back(std::move(tr));
+            }
+
+            if (options.verbose) {
+                fprintf(stderr,
+                        "[gemv metal plan] phase=measurement measurement_repeats=%d\n",
+                        options.measurement_repeats);
+                fflush(stderr);
+            }
+
             metrics.measurement = run_mps_gemv(
                 command_queue,
                 options,
                 best_output_values,
                 options.measurement_repeats
             );
+            {
+                TrialRecord tr;
+                tr.phase = "measurement";
+                tr.candidate_index = 0;
+                tr.candidate_total = 1;
+                tr.trial_index_within_candidate = 0;
+                tr.repeats_for_candidate = metrics.measurement.repeats;
+                tr.implementation = metrics.implementation;
+                tr.row_chunk_size = static_cast<int>(row_chunk_size);
+                tr.host_compute_seconds = metrics.measurement.wall_clock_latency_seconds;
+                tr.device_to_host_seconds = metrics.measurement.device_to_host_seconds;
+                tr.total_wall_seconds =
+                    metrics.measurement.wall_clock_latency_seconds
+                    + metrics.measurement.device_to_host_seconds;
+                tr.checksum = metrics.measurement.checksum;
+                emit_verbose_trial(tr, 1, 1);
+                trials.push_back(std::move(tr));
+            }
 
             if (!options.output_path.empty()) {
                 write_float32_file(options.output_path, best_output_values);
@@ -416,7 +548,49 @@ int main(int argc, char** argv) {
                       << metrics.measurement.wall_clock_latency_seconds << ","
                       << "\"measurement_effective_gflops\":" << std::fixed << std::setprecision(9)
                       << metrics.measurement.effective_gflops << ","
-                      << "\"measurement_checksum\":\"" << metrics.measurement.checksum << "\""
+                      << "\"measurement_checksum\":\"" << metrics.measurement.checksum << "\","
+                      << "\"flops_per_run\":" << std::fixed << std::setprecision(1) << flops_per_run << ","
+                      << "\"bytes_input\":" << bytes_input << ","
+                      << "\"bytes_weight\":" << bytes_weight << ","
+                      << "\"bytes_output\":" << bytes_output << ","
+                      << "\"bytes_kernel_compulsory_memory_traffic\":" << bytes_kernel_compulsory << ","
+                      << "\"notes_schema\":\"gemv Metal backend (MPSMatrixVectorMultiplication): host_prep_seconds is zero because the MTLBuffer uses MTLResourceStorageModeShared on unified-memory Apple Silicon (no separate H2D copy needed after read_exact_file fills the shared buffer); host_compute_seconds prefers [MTLCommandBuffer GPUStartTime/GPUEndTime] over chrono and includes the cooldown budget controlled by headroom_fraction; device_to_host_seconds is the chrono-timed post-compute local memcpy out of the shared buffer (not a PCIe transfer); host_postproc_seconds excludes checksum cost; pcie_h2d/d2h bandwidth fields are zero because Apple Silicon is unified-memory; memory_bandwidth model treats matrix A as weights, vector x as input activation, vector y as output, and uses compulsory one-touch DRAM traffic as a lower bound (real traffic >= compulsory).\","
+                      << "\"trials\":[";
+            for (size_t i = 0; i < trials.size(); ++i) {
+                const TrialRecord& tr = trials[i];
+                const double compute_gflops = tr.host_compute_seconds > 0.0
+                    ? (flops_per_run / tr.host_compute_seconds / 1e9) : 0.0;
+                const double effective_gflops = tr.total_wall_seconds > 0.0
+                    ? (flops_per_run / tr.total_wall_seconds / 1e9) : 0.0;
+                const double kernel_bandwidth_gibps = tr.host_compute_seconds > 0.0
+                    ? (static_cast<double>(bytes_kernel_compulsory) / tr.host_compute_seconds
+                       / (1024.0 * 1024.0 * 1024.0))
+                    : 0.0;
+                std::cout << "{"
+                          << "\"phase\":\"" << tr.phase << "\","
+                          << "\"candidate_index\":" << tr.candidate_index << ","
+                          << "\"candidate_total\":" << tr.candidate_total << ","
+                          << "\"trial_index_within_candidate\":" << tr.trial_index_within_candidate << ","
+                          << "\"repeats_for_candidate\":" << tr.repeats_for_candidate << ","
+                          << "\"implementation\":\"" << tr.implementation << "\","
+                          << "\"row_chunk_size\":" << tr.row_chunk_size << ","
+                          << std::fixed << std::setprecision(9)
+                          << "\"host_prep_seconds\":" << tr.host_prep_seconds << ","
+                          << "\"host_compute_seconds\":" << tr.host_compute_seconds << ","
+                          << "\"device_to_host_seconds\":" << tr.device_to_host_seconds << ","
+                          << "\"host_postproc_seconds\":" << tr.host_postproc_seconds << ","
+                          << "\"total_wall_seconds\":" << tr.total_wall_seconds << ","
+                          << std::setprecision(6)
+                          << "\"compute_gflops\":" << compute_gflops << ","
+                          << "\"effective_gflops\":" << effective_gflops << ","
+                          << "\"pcie_h2d_bandwidth_gibps\":0.0,"
+                          << "\"pcie_d2h_bandwidth_gibps\":0.0,"
+                          << "\"kernel_memory_bandwidth_gibps_compulsory_lower_bound_model\":" << kernel_bandwidth_gibps << ","
+                          << "\"checksum\":\"" << tr.checksum << "\""
+                          << "}";
+                if (i + 1 < trials.size()) std::cout << ",";
+            }
+            std::cout << "]"
                       << "}" << std::endl;
             return 0;
         } catch (const std::exception& exc) {

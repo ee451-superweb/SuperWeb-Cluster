@@ -21,6 +21,7 @@ from app.constants import (
     DEFAULT_RUNTIME_SOCKET_TIMEOUT,
     DEFAULT_TCP_CONNECT_TIMEOUT,
     DEFAULT_TCP_PORT,
+    DEFAULT_DATA_PLANE_PORT,
 )
 
 
@@ -33,6 +34,7 @@ class AppConfig:
     multicast_group: str = DEFAULT_MULTICAST_GROUP
     udp_port: int = DEFAULT_DISCOVERY_PORT
     tcp_port: int = DEFAULT_TCP_PORT
+    data_plane_port: int = DEFAULT_DATA_PLANE_PORT
     discovery_timeout: float = DEFAULT_DISCOVERY_TIMEOUT
     discovery_attempts: int = DEFAULT_DISCOVERY_ATTEMPTS
     discovery_retry_delay: float = DEFAULT_DISCOVERY_RETRY_DELAY

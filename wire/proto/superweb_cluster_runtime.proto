@@ -156,6 +156,14 @@ message ClientRequestOk {
   string size = 6;
   string object_id = 4;
   uint64 accepted_timestamp_ms = 5;
+  // Data-plane handshake assigned by the main node. Non-empty upload_id means
+  // the client must open a TCP connection to data_endpoint and push its bytes
+  // via a DELIVER frame before main can start compute. Non-empty download_id
+  // means the client should pull the result artifact by REQUEST(download_id).
+  string upload_id = 7;
+  string download_id = 8;
+  string data_endpoint_host = 9;
+  uint32 data_endpoint_port = 10;
 }
 
 message WorkerTiming {
@@ -282,6 +290,14 @@ message Conv2dRequestPayload {
   // Current implementation reads the first N float32 values per worker slice;
   // future revisions may swap in a real downsampling strategy without protocol churn.
   uint32 stats_max_samples = 9;
+  // Size in bytes of the weight payload the client will push over the data
+  // plane after receiving ClientRequestOk.upload_id. Zero means no client-
+  // supplied weights (main uses its own dataset).
+  uint64 upload_size_bytes = 10;
+  // SHA-256 of the declared upload. Cross-checked against the DELIVER frame
+  // and re-validated after all CHUNK bytes are received. Empty disables the
+  // cross-check.
+  string upload_checksum = 11;
 }
 
 message GemvResponsePayload {
@@ -320,6 +336,11 @@ message Conv2dTaskPayload {
   bytes weight_data = 10;
   Conv2dClientResponseMode client_response_mode = 11;
   uint32 stats_max_samples = 12;
+  // Per-worker weight slice published by the main node on the data plane.
+  // When set, the worker fetches weight bytes over TCP instead of reading
+  // inline weight_data. This replaces the inline-transport path and lets the
+  // main node fan out slices that exceed max_message_size.
+  ArtifactDescriptor weight_artifact = 13;
 }
 
 message GemvResultPayload {

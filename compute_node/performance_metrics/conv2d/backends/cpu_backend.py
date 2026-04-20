@@ -11,6 +11,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -191,6 +192,22 @@ def _measurement_repeats(_spec: BenchmarkSpec | None = None) -> int:
     return DEFAULT_MEASUREMENT_REPEATS
 
 
+_RAW_REPORT_KEYS = (
+    "flops_per_run",
+    "bytes_input",
+    "bytes_weight",
+    "bytes_output",
+    "bytes_kernel_compulsory_memory_traffic",
+    "notes_schema",
+    "trials",
+)
+
+
+def _extract_raw_report(metrics: dict[str, object]) -> dict[str, object]:
+    """Copy analysis-only fields out of the runner JSON for the benchmark report."""
+    return {key: metrics[key] for key in _RAW_REPORT_KEYS if key in metrics}
+
+
 def _default_worker_candidates(logical_cpu_count: int | None = None) -> list[int]:
     """Return worker-count candidates under the shared CPU resource cap.
 
@@ -290,6 +307,7 @@ class CpuBackend:
         time_budget_seconds: float,
         force_rebuild: bool = False,
         phase_callback=None,
+        verbose: bool = False,
     ) -> BackendResult:
         """Run autotune plus final measurement for the CPU backend.
 
@@ -337,6 +355,7 @@ class CpuBackend:
                 autotune_repeats=_autotune_repeats(spec),
                 measurement_repeats=1,
                 timeout_seconds=max(time_budget_seconds, 30.0),
+                verbose=verbose,
             )
         except Exception as exc:
             notes.append(_sanitize_note(f"CPU autotune failed: {exc}"))
@@ -364,6 +383,7 @@ class CpuBackend:
                 autotune_repeats=1,
                 measurement_repeats=final_measurement_repeats,
                 timeout_seconds=max(time_budget_seconds, 30.0),
+                verbose=verbose,
             )
         except Exception as exc:
             notes.append(_sanitize_note(f"CPU runtime measurement failed: {exc}"))
@@ -395,7 +415,11 @@ class CpuBackend:
         }
         autotune_trial = TrialRecord(self.name, autotune_config, float(autotune_metrics["autotune_wall_clock_latency_seconds"]), float(autotune_metrics["autotune_effective_gflops"]), str(autotune_metrics["autotune_checksum"]), autotune_score, [])
         trial = TrialRecord(self.name, measurement_config, float(measurement_metrics["measurement_wall_clock_latency_seconds"]), float(measurement_metrics["measurement_effective_gflops"]), str(measurement_metrics["measurement_checksum"]), measurement_score, [])
-        return BackendResult(self.name, True, dict(measurement_config), autotune_trial, trial, [autotune_trial, trial], notes)
+        raw_report = {
+            "autotune": _extract_raw_report(autotune_metrics),
+            "measurement": _extract_raw_report(measurement_metrics),
+        }
+        return BackendResult(self.name, True, dict(measurement_config), autotune_trial, trial, [autotune_trial, trial], notes, raw_report)
 
     def _run_runner(
         self,
@@ -408,6 +432,7 @@ class CpuBackend:
         autotune_repeats: int,
         measurement_repeats: int,
         timeout_seconds: float,
+        verbose: bool = False,
     ) -> dict[str, object]:
         """Invoke the native CPU runner and parse its JSON metrics.
 
@@ -420,6 +445,7 @@ class CpuBackend:
             autotune_repeats: Repeat count for autotune trials.
             measurement_repeats: Repeat count for the selected configuration.
             timeout_seconds: Subprocess timeout for the native runner.
+            verbose: Request per-trial progress on the runner's stderr channel.
 
         Returns:
             The parsed JSON metrics emitted by the native runner.
@@ -437,6 +463,8 @@ class CpuBackend:
             "--autotune-repeats", str(autotune_repeats),
             "--measurement-repeats", str(measurement_repeats),
         ]
+        if verbose:
+            command.append("--verbose")
         emit_status(
             "method.conv2d.backend.native_runner.start",
             status="running",
@@ -447,16 +475,58 @@ class CpuBackend:
             autotune_repeats=autotune_repeats,
             measurement_repeats=measurement_repeats,
         )
-        completed = subprocess.run(
+        # Stream stderr line-by-line so verbose progress reaches the parent
+        # terminal (and any bootstrap log tee) as it happens, while stdout is
+        # read in a separate thread and parsed as JSON after the process exits.
+        # We cannot use ``process.communicate()`` here: it spawns its own
+        # drain thread that would race our stderr pump for the same pipe and
+        # silently swallow per-trial progress lines.
+        process = subprocess.Popen(
             command,
-            check=True,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=timeout_seconds,
             cwd=ROOT_DIR,
         )
+        stderr_chunks: list[str] = []
+        stdout_chunks: list[str] = []
+
+        def _pump_stderr() -> None:
+            assert process.stderr is not None
+            for line in process.stderr:
+                stderr_chunks.append(line)
+                sys.stderr.write(line)
+                sys.stderr.flush()
+
+        def _pump_stdout() -> None:
+            assert process.stdout is not None
+            for line in process.stdout:
+                stdout_chunks.append(line)
+
+        stderr_pump = threading.Thread(target=_pump_stderr, daemon=True)
+        stdout_pump = threading.Thread(target=_pump_stdout, daemon=True)
+        stderr_pump.start()
+        stdout_pump.start()
+        try:
+            return_code = process.wait(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            stderr_pump.join(timeout=1.0)
+            stdout_pump.join(timeout=1.0)
+            raise
+        stderr_pump.join(timeout=5.0)
+        stdout_pump.join(timeout=5.0)
+        stdout_data = "".join(stdout_chunks)
+        if return_code != 0:
+            raise subprocess.CalledProcessError(
+                return_code,
+                command,
+                output=stdout_data,
+                stderr="".join(stderr_chunks),
+            )
         emit_status(
             "method.conv2d.backend.native_runner.complete",
             status="running",
@@ -464,7 +534,7 @@ class CpuBackend:
             backend=self.name,
             command=command,
         )
-        return json.loads(completed.stdout)
+        return json.loads(stdout_data)
 
     def _compile_if_needed(self, *, force_rebuild: bool = False) -> Path:
         """Ensure the native CPU runner exists and return its path.

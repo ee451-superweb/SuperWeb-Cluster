@@ -11,6 +11,8 @@ import json
 import math
 import os
 import subprocess
+import sys
+import threading
 from pathlib import Path
 
 from compute_node.compute_methods.conv2d import (
@@ -44,6 +46,21 @@ WINDOWS_DX12_RUNTIME_NOTE = (
     "Windows DX12 runner uses the system Direct3D 12 runtime and the installed graphics driver."
 )
 _MAX_LOG_TAIL_CHARS = 1200
+
+_RAW_REPORT_KEYS = (
+    "flops_per_run",
+    "bytes_input",
+    "bytes_weight",
+    "bytes_output",
+    "bytes_kernel_compulsory_memory_traffic",
+    "notes_schema",
+    "trials",
+)
+
+
+def _extract_raw_report(metrics: dict[str, object]) -> dict[str, object]:
+    """Pull the benchmark-only detail fields out of a native runner's JSON."""
+    return {key: metrics[key] for key in _RAW_REPORT_KEYS if key in metrics}
 
 
 def _relative_project_path(path: Path) -> str:
@@ -183,6 +200,8 @@ class Dx12Backend:
         measurement_dataset: DatasetLayout | None = None,
         time_budget_seconds: float,
         force_rebuild: bool = False,
+        phase_callback=None,
+        verbose: bool = False,
     ) -> BackendResult:
         """Run autotune plus final measurement for the DX12 backend."""
         available, message = self.probe()
@@ -243,6 +262,7 @@ class Dx12Backend:
                 autotune_repeats=autotune_repeats,
                 measurement_repeats=1,
                 timeout_seconds=max(time_budget_seconds, 30.0),
+                verbose=verbose,
             )
         except subprocess.TimeoutExpired:
             notes.append("DX12 benchmark timed out")
@@ -271,6 +291,7 @@ class Dx12Backend:
                 autotune_repeats=1,
                 measurement_repeats=final_measurement_repeats,
                 timeout_seconds=max(time_budget_seconds, 30.0),
+                verbose=verbose,
             )
         except subprocess.TimeoutExpired:
             notes.append("DX12 benchmark timed out")
@@ -358,6 +379,10 @@ class Dx12Backend:
             score=measurement_score,
             notes=list(trial_notes),
         )
+        raw_report = {
+            "autotune": _extract_raw_report(autotune_metrics),
+            "measurement": _extract_raw_report(metrics),
+        }
         return BackendResult(
             backend=self.name,
             available=True,
@@ -366,6 +391,7 @@ class Dx12Backend:
             best_trial=trial,
             trials=[autotune_trial, trial],
             notes=notes,
+            raw_report=raw_report,
         )
 
     def _run_runner(
@@ -380,6 +406,7 @@ class Dx12Backend:
         autotune_repeats: int,
         measurement_repeats: int,
         timeout_seconds: float,
+        verbose: bool = False,
     ) -> dict[str, object]:
         """Invoke the native DX12 runner and parse its JSON metrics.
 
@@ -426,6 +453,8 @@ class Dx12Backend:
             "--measurement-repeats",
             str(measurement_repeats),
         ]
+        if verbose:
+            command.append("--verbose")
         emit_status(
             "method.conv2d.backend.native_runner.start",
             status="running",
@@ -440,17 +469,52 @@ class Dx12Backend:
             candidate_tile_sizes=tile_sizes,
         )
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 command,
-                check=True,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=timeout_seconds,
                 cwd=ROOT_DIR,
             )
-        except subprocess.TimeoutExpired as exc:
+        except OSError:
+            emit_status(
+                "method.conv2d.backend.native_runner.error",
+                status="failed",
+                method="conv2d",
+                backend=self.name,
+                phase=phase,
+                command=command,
+            )
+            raise
+
+        stderr_chunks: list[str] = []
+        stdout_chunks: list[str] = []
+
+        def _pump_stderr() -> None:
+            for line in process.stderr:
+                stderr_chunks.append(line)
+                if verbose:
+                    sys.stderr.write(line)
+                    sys.stderr.flush()
+
+        def _pump_stdout() -> None:
+            for line in process.stdout:
+                stdout_chunks.append(line)
+
+        stderr_pump = threading.Thread(target=_pump_stderr, daemon=True)
+        stdout_pump = threading.Thread(target=_pump_stdout, daemon=True)
+        stderr_pump.start()
+        stdout_pump.start()
+
+        try:
+            return_code = process.wait(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            stderr_pump.join(timeout=5.0)
+            stdout_pump.join(timeout=5.0)
             emit_status(
                 "method.conv2d.backend.native_runner.timeout",
                 status="failed",
@@ -461,7 +525,13 @@ class Dx12Backend:
                 timeout_seconds=timeout_seconds,
             )
             raise
-        except subprocess.CalledProcessError as exc:
+
+        stderr_pump.join(timeout=5.0)
+        stdout_pump.join(timeout=5.0)
+        stdout_data = "".join(stdout_chunks)
+        stderr_data = "".join(stderr_chunks)
+
+        if return_code != 0:
             emit_status(
                 "method.conv2d.backend.native_runner.error",
                 status="failed",
@@ -469,11 +539,14 @@ class Dx12Backend:
                 backend=self.name,
                 phase=phase,
                 command=command,
-                returncode=exc.returncode,
-                stderr_tail=_tail_text(exc.stderr),
-                stdout_tail=_tail_text(exc.stdout),
+                returncode=return_code,
+                stderr_tail=_tail_text(stderr_data),
+                stdout_tail=_tail_text(stdout_data),
             )
-            raise
+            raise subprocess.CalledProcessError(
+                return_code, command, output=stdout_data, stderr=stderr_data
+            )
+
         emit_status(
             "method.conv2d.backend.native_runner.complete",
             status="running",
@@ -482,7 +555,7 @@ class Dx12Backend:
             phase=phase,
             command=command,
         )
-        return json.loads(completed.stdout)
+        return json.loads(stdout_data)
 
     def _validate_metrics(self, metrics: dict[str, object]) -> str | None:
         """Validate the required numeric fields returned by the DX12 runner."""

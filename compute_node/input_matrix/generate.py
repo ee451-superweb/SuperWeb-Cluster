@@ -79,6 +79,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stride", type=int, help="Conv2d stride override.")
     parser.add_argument("--include-large-weight", action="store_true", help="Generate large weights for compute-role conv2d datasets.")
     parser.add_argument("--include-runtime-weight", action="store_true", help="Alias for --include-large-weight.")
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Emit extra per-method forwarded-argument details to stdout.",
+    )
     return parser
 
 
@@ -197,11 +202,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.output_dir is not None and len(methods) > 1:
         raise SystemExit("--output-dir can only be used when generating one method at a time")
 
+    verbose = bool(getattr(args, "verbose", False))
     for method_name in methods:
         if method_name == METHOD_GEMV:
-            generate_gemv_main(_build_gemv_args(args))
+            forwarded = _build_gemv_args(args)
+            if verbose:
+                print(f"[input_matrix verbose] gemv forwarded_args={forwarded}", flush=True)
+            generate_gemv_main(forwarded)
         elif method_name == METHOD_CONV2D:
-            generate_conv2d_main(_build_conv2d_args(args))
+            forwarded = _build_conv2d_args(args)
+            if verbose:
+                print(f"[input_matrix verbose] conv2d forwarded_args={forwarded}", flush=True)
+            generate_conv2d_main(forwarded)
         else:
             raise ValueError(f"unsupported input-matrix method: {method_name}")
     return 0

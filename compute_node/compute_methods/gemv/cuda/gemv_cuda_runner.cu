@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -10,6 +11,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -32,12 +34,33 @@ struct Options {
     int measurement_repeats = 1;
     std::string accumulation_precision = "fp32";
     bool task_mode = false;
+    bool verbose = false;
 };
 
 struct PhaseMetrics {
     int repeats = 0;
     double wall_clock_latency_seconds = std::numeric_limits<double>::infinity();
     double effective_gflops = 0.0;
+    double device_to_host_seconds = 0.0;  // single post-kernel D2H memcpy
+    std::string checksum;
+};
+
+// One per-trial record for the raw_report.trials array. Schema mirrors the
+// conv2d CPU/GPU layout so downstream aggregators share a common shape.
+struct TrialRecord {
+    std::string phase;                  // "autotune" or "measurement"
+    int candidate_index = 0;
+    int candidate_total = 0;
+    int trial_index_within_candidate = 0;
+    int repeats_for_candidate = 0;
+    int transpose = 0;
+    int block_size = 0;
+    int tile_size = 0;
+    double host_prep_seconds = 0.0;       // 0 per-trial (H2D is upfront)
+    double host_compute_seconds = 0.0;    // averaged kernel time (cudaEvent)
+    double device_to_host_seconds = 0.0;  // single D2H memcpy time (chrono)
+    double host_postproc_seconds = 0.0;   // 0 (checksum not timed)
+    double total_wall_seconds = 0.0;      // host_compute + device_to_host
     std::string checksum;
 };
 
@@ -79,12 +102,20 @@ std::vector<int> parse_int_list(const std::string& text) {
 
 Options parse_args(int argc, char** argv) {
     Options options;
-    for (int index = 1; index < argc; index += 2) {
+    int index = 1;
+    while (index < argc) {
+        const std::string key = argv[index];
+        if (key == "--verbose") {
+            options.verbose = true;
+            index += 1;
+            continue;
+        }
+
         if (index + 1 >= argc) {
             throw std::runtime_error("missing value for command line flag");
         }
-        const std::string key = argv[index];
         const std::string value = argv[index + 1];
+
         if (key == "--matrix") {
             options.matrix_path = value;
         } else if (key == "--vector") {
@@ -122,6 +153,7 @@ Options parse_args(int argc, char** argv) {
         } else {
             throw std::runtime_error("unknown flag: " + key);
         }
+        index += 2;
     }
 
     if (options.matrix_path.empty() || options.vector_path.empty()) {
@@ -475,6 +507,10 @@ int main(int argc, char** argv) {
         cuda_check(cudaMalloc(&device_vector, vector_values.size() * sizeof(float)), "cudaMalloc vector");
         cuda_check(cudaMalloc(&device_output, static_cast<size_t>(row_count) * sizeof(float)), "cudaMalloc output");
 
+        // Time the one-time upfront H2D uploads so the raw_report can surface
+        // this fixed cost. Per-trial timing keeps H2D at zero for CUDA because
+        // the matrix and vector are only uploaded once for the entire run.
+        const auto h2d_started = std::chrono::steady_clock::now();
         cuda_check(
             cudaMemcpy(device_row_major, matrix_values.data(), matrix_values.size() * sizeof(float), cudaMemcpyHostToDevice),
             "cudaMemcpy row-major"
@@ -483,6 +519,9 @@ int main(int argc, char** argv) {
             cudaMemcpy(device_vector, vector_values.data(), vector_values.size() * sizeof(float), cudaMemcpyHostToDevice),
             "cudaMemcpy vector"
         );
+        const auto h2d_finished = std::chrono::steady_clock::now();
+        const double one_time_h2d_seconds =
+            std::chrono::duration<double>(h2d_finished - h2d_started).count();
 
         auto ensure_transposed_matrix = [&]() {
             if (device_transposed != nullptr) {
@@ -603,6 +642,9 @@ int main(int argc, char** argv) {
                 (2.0 * static_cast<double>(row_count) * static_cast<double>(options.cols))
                 / std::max(latency_seconds, 1e-12) / 1.0e9;
 
+            // Time the single post-kernel D2H memcpy separately so the raw_report
+            // can distinguish compute from the transfer back to host memory.
+            const auto d2h_started = std::chrono::steady_clock::now();
             cuda_check(
                 cudaMemcpy(
                     host_output.data(),
@@ -612,16 +654,75 @@ int main(int argc, char** argv) {
                 ),
                 "cudaMemcpy output"
             );
+            const auto d2h_finished = std::chrono::steady_clock::now();
+            const double d2h_seconds =
+                std::chrono::duration<double>(d2h_finished - d2h_started).count();
 
             PhaseMetrics metrics;
             metrics.repeats = repeats;
             metrics.wall_clock_latency_seconds = latency_seconds;
             metrics.effective_gflops = effective_gflops;
+            metrics.device_to_host_seconds = d2h_seconds;
             metrics.checksum = fnv1a64_checksum(host_output);
             return metrics;
         };
 
+        // Memory-traffic model (FC-layer analogy): A is "weights", x is "input
+        // activation", y is output. Compulsory traffic = one-touch lower bound.
+        const double flops_per_run =
+            2.0 * static_cast<double>(row_count) * static_cast<double>(options.cols);
+        const size_t bytes_input =
+            static_cast<size_t>(options.cols) * sizeof(float);
+        const size_t bytes_weight =
+            static_cast<size_t>(row_count) * static_cast<size_t>(options.cols) * sizeof(float);
+        const size_t bytes_output =
+            static_cast<size_t>(row_count) * sizeof(float);
+        const size_t bytes_kernel_compulsory =
+            bytes_input + bytes_weight + bytes_output;
+
+        std::vector<TrialRecord> trials;
+
+        auto emit_verbose_trial = [&](const TrialRecord& tr, int global_index, int global_total) {
+            if (!options.verbose) return;
+            const double compute_gflops = tr.host_compute_seconds > 0.0
+                ? (flops_per_run / tr.host_compute_seconds / 1e9) : 0.0;
+            const double effective_gflops = tr.total_wall_seconds > 0.0
+                ? (flops_per_run / tr.total_wall_seconds / 1e9) : 0.0;
+            fprintf(stderr,
+                    "[gemv cuda %s %d/%d] candidate=%d/%d (trial %d/%d) "
+                    "transpose=%d block_size=%d tile_size=%d "
+                    "compute=%.6fs d2h=%.6fs total=%.6fs "
+                    "compute_gflops=%.3f effective_gflops=%.3f\n",
+                    tr.phase.c_str(), global_index, global_total,
+                    tr.candidate_index + 1, tr.candidate_total,
+                    tr.trial_index_within_candidate + 1, tr.repeats_for_candidate,
+                    tr.transpose, tr.block_size, tr.tile_size,
+                    tr.host_compute_seconds, tr.device_to_host_seconds, tr.total_wall_seconds,
+                    compute_gflops, effective_gflops);
+            fflush(stderr);
+        };
+
         if (options.task_mode) {
+            if (options.verbose) {
+                fprintf(stderr,
+                        "[gemv cuda plan] phase=task_execution "
+                        "iteration_count=%d fixed_transpose=%d fixed_block_size=%d "
+                        "fixed_tile_size=%d accumulation_precision=%s row_start=%d row_end=%d "
+                        "device=\"%s\" compute_capability=%d.%d one_time_h2d=%.6fs\n",
+                        options.measurement_repeats,
+                        options.fixed_transpose,
+                        options.fixed_block_size,
+                        options.fixed_tile_size,
+                        options.accumulation_precision.c_str(),
+                        options.row_start,
+                        options.row_end,
+                        device_props.name,
+                        device_props.major,
+                        device_props.minor,
+                        one_time_h2d_seconds);
+                fflush(stderr);
+            }
+
             const float* matrix_pointer = device_row_major;
             if (options.fixed_transpose != 0) {
                 ensure_transposed_matrix();
@@ -636,6 +737,22 @@ int main(int argc, char** argv) {
                 options.measurement_repeats
             );
             best_output_values = host_output;
+
+            TrialRecord tr;
+            tr.phase = "measurement";
+            tr.candidate_index = 0;
+            tr.candidate_total = 1;
+            tr.trial_index_within_candidate = 0;
+            tr.repeats_for_candidate = metrics.repeats;
+            tr.transpose = options.fixed_transpose;
+            tr.block_size = options.fixed_block_size;
+            tr.tile_size = options.fixed_tile_size;
+            tr.host_compute_seconds = metrics.wall_clock_latency_seconds;
+            tr.device_to_host_seconds = metrics.device_to_host_seconds;
+            tr.total_wall_seconds =
+                metrics.wall_clock_latency_seconds + metrics.device_to_host_seconds;
+            tr.checksum = metrics.checksum;
+            emit_verbose_trial(tr, 1, 1);
 
             if (!options.output_path.empty()) {
                 write_float32_file(options.output_path, best_output_values);
@@ -674,6 +791,34 @@ int main(int argc, char** argv) {
         bool have_best_trial = false;
         int trials_run = 0;
 
+        const int autotune_total =
+            static_cast<int>(options.transpose_modes.size()
+                * options.block_sizes.size()
+                * options.tile_sizes.size());
+        int emitted_autotune = 0;
+        int candidate_index = 0;
+        if (options.verbose) {
+            fprintf(stderr,
+                    "[gemv cuda plan] phase=autotune transpose_candidates=%zu "
+                    "block_size_candidates=%zu tile_size_candidates=%zu "
+                    "autotune_repeats=%d total_candidates=%d "
+                    "accumulation_precision=%s row_start=%d row_end=%d "
+                    "device=\"%s\" compute_capability=%d.%d one_time_h2d=%.6fs\n",
+                    options.transpose_modes.size(),
+                    options.block_sizes.size(),
+                    options.tile_sizes.size(),
+                    options.autotune_repeats,
+                    autotune_total,
+                    options.accumulation_precision.c_str(),
+                    options.row_start,
+                    options.row_end,
+                    device_props.name,
+                    device_props.major,
+                    device_props.minor,
+                    one_time_h2d_seconds);
+            fflush(stderr);
+        }
+
         for (const int transpose_mode : options.transpose_modes) {
             const float* matrix_pointer = device_row_major;
             if (transpose_mode != 0) {
@@ -683,6 +828,9 @@ int main(int argc, char** argv) {
 
             for (const int block_size : options.block_sizes) {
                 if (block_size <= 0 || block_size > 1024) {
+                    // Skipped candidates still consume an index so downstream
+                    // consumers can align index numbers across runs.
+                    ++candidate_index;
                     continue;
                 }
 
@@ -697,6 +845,25 @@ int main(int argc, char** argv) {
                         options.autotune_repeats
                     );
 
+                    TrialRecord tr;
+                    tr.phase = "autotune";
+                    tr.candidate_index = candidate_index;
+                    tr.candidate_total = autotune_total;
+                    tr.trial_index_within_candidate = 0;
+                    tr.repeats_for_candidate = autotune_metrics.repeats;
+                    tr.transpose = transpose_mode;
+                    tr.block_size = block_size;
+                    tr.tile_size = tile_size;
+                    tr.host_compute_seconds = autotune_metrics.wall_clock_latency_seconds;
+                    tr.device_to_host_seconds = autotune_metrics.device_to_host_seconds;
+                    tr.total_wall_seconds =
+                        autotune_metrics.wall_clock_latency_seconds
+                        + autotune_metrics.device_to_host_seconds;
+                    tr.checksum = autotune_metrics.checksum;
+                    ++emitted_autotune;
+                    emit_verbose_trial(tr, emitted_autotune, autotune_total);
+                    trials.push_back(std::move(tr));
+
                     if (
                         !have_best_trial ||
                         autotune_metrics.wall_clock_latency_seconds < best_metrics.autotune.wall_clock_latency_seconds
@@ -707,12 +874,25 @@ int main(int argc, char** argv) {
                         best_metrics.tile_size = tile_size;
                         best_metrics.autotune = autotune_metrics;
                     }
+                    ++candidate_index;
                 }
             }
         }
 
         if (!have_best_trial) {
             throw std::runtime_error("CUDA benchmark ran zero valid trials");
+        }
+
+        if (options.verbose) {
+            fprintf(stderr,
+                    "[gemv cuda plan] phase=measurement "
+                    "selected_transpose=%d selected_block_size=%d selected_tile_size=%d "
+                    "measurement_repeats=%d\n",
+                    best_metrics.transpose,
+                    best_metrics.block_size,
+                    best_metrics.tile_size,
+                    options.measurement_repeats);
+            fflush(stderr);
         }
 
         const float* best_matrix_pointer = device_row_major;
@@ -728,6 +908,26 @@ int main(int argc, char** argv) {
             options.measurement_repeats
         );
         best_output_values = host_output;
+
+        {
+            TrialRecord tr;
+            tr.phase = "measurement";
+            tr.candidate_index = 0;
+            tr.candidate_total = 1;
+            tr.trial_index_within_candidate = 0;
+            tr.repeats_for_candidate = best_metrics.measurement.repeats;
+            tr.transpose = best_metrics.transpose;
+            tr.block_size = best_metrics.block_size;
+            tr.tile_size = best_metrics.tile_size;
+            tr.host_compute_seconds = best_metrics.measurement.wall_clock_latency_seconds;
+            tr.device_to_host_seconds = best_metrics.measurement.device_to_host_seconds;
+            tr.total_wall_seconds =
+                best_metrics.measurement.wall_clock_latency_seconds
+                + best_metrics.measurement.device_to_host_seconds;
+            tr.checksum = best_metrics.measurement.checksum;
+            emit_verbose_trial(tr, 1, 1);
+            trials.push_back(std::move(tr));
+        }
 
         if (!options.output_path.empty()) {
             write_float32_file(options.output_path, best_output_values);
@@ -760,7 +960,55 @@ int main(int argc, char** argv) {
                   << best_metrics.measurement.wall_clock_latency_seconds << ","
                   << "\"measurement_effective_gflops\":" << std::fixed << std::setprecision(9)
                   << best_metrics.measurement.effective_gflops << ","
-                  << "\"measurement_checksum\":\"" << best_metrics.measurement.checksum << "\""
+                  << "\"measurement_checksum\":\"" << best_metrics.measurement.checksum << "\","
+                  << "\"flops_per_run\":" << std::fixed << std::setprecision(1) << flops_per_run << ","
+                  << "\"bytes_input\":" << bytes_input << ","
+                  << "\"bytes_weight\":" << bytes_weight << ","
+                  << "\"bytes_output\":" << bytes_output << ","
+                  << "\"bytes_kernel_compulsory_memory_traffic\":" << bytes_kernel_compulsory << ","
+                  << "\"one_time_host_to_device_seconds\":" << std::fixed << std::setprecision(9) << one_time_h2d_seconds << ","
+                  << "\"notes_schema\":\"gemv CUDA backend: host_prep_seconds is zero per-trial because matrix A and vector x are uploaded exactly once upfront (see one_time_host_to_device_seconds); host_compute_seconds equals the per-repeat averaged cudaEventElapsedTime of the kernel launch; device_to_host_seconds is a single chrono-timed D2H memcpy performed after the repeat loop; host_postproc_seconds excludes checksum cost; memory_bandwidth model treats matrix A as weights, vector x as input activation, vector y as output, and uses compulsory one-touch DRAM traffic as a lower bound (real traffic >= compulsory).\","
+                  << "\"trials\":[";
+        for (size_t i = 0; i < trials.size(); ++i) {
+            const TrialRecord& tr = trials[i];
+            const double compute_gflops = tr.host_compute_seconds > 0.0
+                ? (flops_per_run / tr.host_compute_seconds / 1e9) : 0.0;
+            const double effective_gflops = tr.total_wall_seconds > 0.0
+                ? (flops_per_run / tr.total_wall_seconds / 1e9) : 0.0;
+            const double kernel_bandwidth_gibps = tr.host_compute_seconds > 0.0
+                ? (static_cast<double>(bytes_kernel_compulsory) / tr.host_compute_seconds
+                   / (1024.0 * 1024.0 * 1024.0))
+                : 0.0;
+            const double pcie_d2h_bandwidth_gibps = tr.device_to_host_seconds > 0.0
+                ? (static_cast<double>(bytes_output) / tr.device_to_host_seconds
+                   / (1024.0 * 1024.0 * 1024.0))
+                : 0.0;
+            std::cout << "{"
+                      << "\"phase\":\"" << tr.phase << "\","
+                      << "\"candidate_index\":" << tr.candidate_index << ","
+                      << "\"candidate_total\":" << tr.candidate_total << ","
+                      << "\"trial_index_within_candidate\":" << tr.trial_index_within_candidate << ","
+                      << "\"repeats_for_candidate\":" << tr.repeats_for_candidate << ","
+                      << "\"transpose\":" << tr.transpose << ","
+                      << "\"block_size\":" << tr.block_size << ","
+                      << "\"tile_size\":" << tr.tile_size << ","
+                      << std::fixed << std::setprecision(9)
+                      << "\"host_prep_seconds\":" << tr.host_prep_seconds << ","
+                      << "\"host_compute_seconds\":" << tr.host_compute_seconds << ","
+                      << "\"device_to_host_seconds\":" << tr.device_to_host_seconds << ","
+                      << "\"host_postproc_seconds\":" << tr.host_postproc_seconds << ","
+                      << "\"total_wall_seconds\":" << tr.total_wall_seconds << ","
+                      << std::setprecision(6)
+                      << "\"compute_gflops\":" << compute_gflops << ","
+                      << "\"effective_gflops\":" << effective_gflops << ","
+                      << "\"pcie_h2d_bandwidth_gibps\":0.0,"
+                      << "\"pcie_d2h_bandwidth_gibps\":" << pcie_d2h_bandwidth_gibps << ","
+                      << "\"kernel_memory_bandwidth_gibps_compulsory_lower_bound_model\":" << kernel_bandwidth_gibps << ","
+                      << "\"checksum\":\"" << tr.checksum << "\""
+                      << "}";
+            if (i + 1 < trials.size()) std::cout << ",";
+        }
+        std::cout << "]"
                   << "}" << std::endl;
         return 0;
     } catch (const std::exception& exc) {

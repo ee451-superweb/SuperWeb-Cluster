@@ -12,7 +12,7 @@ import time
 from contextlib import nullcontext
 
 from adapters.audit_log import write_audit_event
-from app.constants import METHOD_CONV2D, RUNTIME_MSG_CLIENT_REQUEST, RUNTIME_MSG_CLIENT_RESPONSE
+from app.constants import METHOD_CONV2D, RUNTIME_MSG_CLIENT_REQUEST, RUNTIME_MSG_CLIENT_RESPONSE, STATUS_OK
 from app.trace_utils import trace_function
 from compute_node.compute_methods.conv2d.executor import load_named_workload_spec
 from main_node.runtime_mailbox import RuntimeConnectionMailbox
@@ -49,6 +49,7 @@ class ClientSessionService:
         config,
         registry,
         build_client_response_for_request,
+        allocate_data_plane_endpoints,
         remove_client_connection,
         logger=None,
     ) -> None:
@@ -57,13 +58,17 @@ class ClientSessionService:
         Args:
             config: Main-node runtime configuration with message-size limits.
             registry: Registry used to track per-client request state.
-            build_client_response_for_request: Handler that executes one request.
+            build_client_response_for_request: Handler that executes one request
+                given a pre-registered ``DataPlaneAllocation``.
+            allocate_data_plane_endpoints: Callable that pre-registers upload
+                and download IDs on the artifact manager before REQUEST_OK.
             remove_client_connection: Callback that removes broken client sockets.
             logger: Logger used for audit events and unexpected-message warnings.
         """
         self.config = config
         self.registry = registry
         self.build_client_response_for_request = build_client_response_for_request
+        self.allocate_data_plane_endpoints = allocate_data_plane_endpoints
         self.remove_client_connection = remove_client_connection
         self.logger = logger
 
@@ -112,6 +117,8 @@ class ClientSessionService:
         if payload is None:
             return ""
         parts = [f"task_id={payload.task_id or '<unassigned>'}"]
+        if payload.status_code != STATUS_OK and payload.error_message:
+            parts.append(f"error={payload.error_message!r}")
         if payload.elapsed_ms > 0:
             parts.append(f"elapsed_ms={payload.elapsed_ms}")
         if payload.timing is not None:
@@ -192,6 +199,7 @@ class ClientSessionService:
             )
             try:
                 accepted_timestamp_ms = int(time.time() * 1000)
+                allocation = self.allocate_data_plane_endpoints(request)
                 with _resolve_connection_lock(getattr(connection, "io_lock", None)):
                     send_message(
                         connection.sock,
@@ -202,9 +210,16 @@ class ClientSessionService:
                             size=request.size,
                             object_id=request.object_id,
                             accepted_timestamp_ms=accepted_timestamp_ms,
+                            upload_id=allocation.upload_id,
+                            download_id=allocation.download_id,
+                            data_endpoint_host=allocation.data_endpoint_host,
+                            data_endpoint_port=allocation.data_endpoint_port,
                         ),
                     )
-                response = self.build_client_response_for_request(request)
+                response = self.build_client_response_for_request(
+                    request,
+                    allocation=allocation,
+                )
                 if response.client_response is not None:
                     response.client_response.client_id = connection.runtime_id
                     if not response.client_response.task_id:

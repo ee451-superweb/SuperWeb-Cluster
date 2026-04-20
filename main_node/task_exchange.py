@@ -20,6 +20,7 @@ from pathlib import Path
 from adapters.audit_log import write_audit_event
 from adapters.process import python_utf8_command
 from app.constants import (
+    CONV2D_CLIENT_RESPONSE_STATS_ONLY,
     MAIN_NODE_NAME,
     RUNTIME_MSG_ARTIFACT_RELEASE,
     METHOD_CONV2D,
@@ -75,6 +76,18 @@ class WorkerTaskExchange:
         self.logger = logger
         self._artifact_workers: dict[str, tuple[str, str]] = {}
         self._artifact_workers_lock = threading.Lock()
+        self._client_weight_paths: dict[str, Path] = {}
+        self._client_weight_paths_lock = threading.Lock()
+
+    def register_client_weight_path(self, request_id: str, weight_path: Path) -> None:
+        """Record a client-uploaded weight file so task-assign slicing can read it."""
+        with self._client_weight_paths_lock:
+            self._client_weight_paths[request_id] = weight_path
+
+    def unregister_client_weight_path(self, request_id: str) -> Path | None:
+        """Drop the weight-path override for one request and return the path if any."""
+        with self._client_weight_paths_lock:
+            return self._client_weight_paths.pop(request_id, None)
 
     def ensure_conv2d_dataset_ready(self) -> None:
         """Generate the shared conv2d dataset if the main node is missing it.
@@ -118,7 +131,15 @@ class WorkerTaskExchange:
             timeout=1800.0,
         )
 
-    def conv2d_weight_slice(self, *, variant: str, spec, start_oc: int, end_oc: int) -> bytes:
+    def conv2d_weight_slice(
+        self,
+        *,
+        variant: str,
+        spec,
+        start_oc: int,
+        end_oc: int,
+        weight_path: Path | None = None,
+    ) -> bytes:
         """Read the requested output-channel slice from a conv2d weight file.
 
         Use this while building ``TASK_ASSIGN`` for conv2d so each
@@ -129,37 +150,23 @@ class WorkerTaskExchange:
             spec: Workload specification describing tensor dimensions.
             start_oc: Inclusive starting output-channel index.
             end_oc: Exclusive ending output-channel index.
+            weight_path: Optional explicit weight file, for example one fetched
+                from a client-published artifact. Bypasses variant-based lookup
+                when provided.
 
         Returns:
             The raw bytes covering the requested weight-channel slice.
         """
-        weight_path = self.conv2d_dataset_dir / f"{variant}_weight.bin"
-        if not weight_path.exists():
-            legacy_variant = {"small": "test", "mid": "medium", "large": "runtime"}.get(variant, variant)
-            weight_path = self.conv2d_dataset_dir / f"{legacy_variant}_weight.bin"
+        if weight_path is None:
+            weight_path = self.conv2d_dataset_dir / f"{variant}_weight.bin"
+            if not weight_path.exists():
+                legacy_variant = {"small": "test", "mid": "medium", "large": "runtime"}.get(variant, variant)
+                weight_path = self.conv2d_dataset_dir / f"{legacy_variant}_weight.bin"
         if not weight_path.exists():
             raise FileNotFoundError(f"missing conv2d weight file at {weight_path}")
         weight_data = weight_path.read_bytes()
         bytes_per_output_channel = spec.k * spec.k * spec.c_in * 4
         return weight_data[start_oc * bytes_per_output_channel:end_oc * bytes_per_output_channel]
-
-    def max_conv2d_channels_per_task(self, spec) -> int:
-        """Estimate how many output channels fit in one inline task payload.
-
-        Use this when partitioning conv2d work for control-plane delivery so the
-        sliced weight bytes stay under the runtime message-size budget.
-
-        Args:
-            spec: Workload specification describing kernel and channel counts.
-
-        Returns:
-            The maximum number of output channels that fit in one task payload.
-        """
-        bytes_per_channel = spec.k * spec.k * spec.c_in * 4
-        if bytes_per_channel <= 0:
-            raise ValueError("conv2d weight slice size must be positive")
-        payload_budget = max(self.config.max_message_size - 4096, 1)
-        return max(1, payload_budget // bytes_per_channel)
 
     def _wait_for_task_message(self, connection, task_id: str):
         """Wait for the next task-scoped message from one worker.
@@ -320,19 +327,16 @@ class WorkerTaskExchange:
         digest = hashlib.sha256(artifact_id.encode("utf-8")).hexdigest()[:12]
         return self.artifact_manager.root_dir / f"fetch-{normalized[:80]}-{digest}.bin"
 
-    def _select_transfer_mode(self, method: str) -> TransferMode:
+    def _select_transfer_mode(self, method: str, *, stats_only: bool = False) -> TransferMode:
         """Choose the preferred result-transfer mode for one method.
 
         Use this while building ``TASK_ASSIGN`` so large conv2d workloads bias
         toward artifact transfer while small GEMV tasks stay inline by default.
-
-        Args:
-            method: Logical compute method name.
-
-        Returns:
-            The transfer-mode enum to place in the task assignment.
+        Conv2d requests that only need aggregated stats bypass the artifact
+        plane since the worker returns a tiny inline summary instead of a full
+        output tensor.
         """
-        if method == METHOD_CONV2D:
+        if method == METHOD_CONV2D and not stats_only:
             return TransferMode.ARTIFACT_REQUIRED
         return TransferMode.INLINE_PREFERRED
 
@@ -361,6 +365,16 @@ class WorkerTaskExchange:
         io_lock = self._resolve_connection_lock(getattr(assignment.connection, "io_lock", None))
         send_lock = nullcontext() if io_lock is task_lock else io_lock
         artifact_timeout_ms = int(max(self.config.compute_artifact_ttl_seconds, 0.0) * 1000)
+        conv2d_request_payload = (
+            request.conv2d_payload if request.method == METHOD_CONV2D else None
+        )
+        client_response_mode = (
+            int(conv2d_request_payload.client_response_mode) if conv2d_request_payload is not None else 0
+        )
+        stats_max_samples = (
+            int(conv2d_request_payload.stats_max_samples) if conv2d_request_payload is not None else 0
+        )
+        stats_only = client_response_mode == CONV2D_CLIENT_RESPONSE_STATS_ONLY
         build_kwargs = dict(
             request_id=request.request_id,
             node_id=assignment.connection.runtime_id,
@@ -370,18 +384,28 @@ class WorkerTaskExchange:
             size=request.size,
             stream_id=request.stream_id,
             iteration_count=request.iteration_count,
-            transfer_mode=self._select_transfer_mode(request.method),
+            transfer_mode=self._select_transfer_mode(request.method, stats_only=stats_only),
             artifact_id=assignment.artifact_id,
             artifact_timeout_ms=artifact_timeout_ms,
         )
+        weight_artifact_id: str | None = None
         if request.method == METHOD_CONV2D:
+            if self.artifact_manager is None:
+                raise RuntimeError("artifact manager is required to publish conv2d weight slices")
             conv2d_spec, variant = load_named_workload_spec(request.object_id, size=request.size)
-            conv2d_request_payload = request.conv2d_payload
-            client_response_mode = (
-                int(conv2d_request_payload.client_response_mode) if conv2d_request_payload is not None else 0
+            weight_bytes = self.conv2d_weight_slice(
+                variant=variant,
+                spec=conv2d_spec,
+                start_oc=assignment.start_oc,
+                end_oc=assignment.end_oc,
+                weight_path=self._client_weight_paths.get(request.request_id),
             )
-            stats_max_samples = (
-                int(conv2d_request_payload.stats_max_samples) if conv2d_request_payload is not None else 0
+            weight_artifact_id = f"{assignment.task_id}-weight"
+            weight_artifact_descriptor = self.artifact_manager.publish_bytes(
+                weight_bytes,
+                producer_node_id=MAIN_NODE_NAME,
+                content_type="application/x-superweb-conv2d-weight",
+                artifact_id=weight_artifact_id,
             )
             build_kwargs.update(
                 task_payload=Conv2dTaskPayload(
@@ -394,12 +418,8 @@ class WorkerTaskExchange:
                     kernel_size=conv2d_spec.k,
                     padding=conv2d_spec.pad,
                     stride=conv2d_spec.stride,
-                    weight_data=self.conv2d_weight_slice(
-                        variant=variant,
-                        spec=conv2d_spec,
-                        start_oc=assignment.start_oc,
-                        end_oc=assignment.end_oc,
-                    ),
+                    weight_data=b"",
+                    weight_artifact=weight_artifact_descriptor,
                     client_response_mode=client_response_mode,
                     stats_max_samples=stats_max_samples,
                 ),
@@ -596,3 +616,8 @@ class WorkerTaskExchange:
             raise
         finally:
             self._pop_artifact_owner(assignment.artifact_id)
+            if weight_artifact_id is not None and self.artifact_manager is not None:
+                try:
+                    self.artifact_manager.remove_artifact(weight_artifact_id)
+                except OSError:
+                    pass

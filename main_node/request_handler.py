@@ -7,10 +7,13 @@ artifact decisions, and final response construction.
 
 from __future__ import annotations
 
+import concurrent.futures
 import os
 import subprocess
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 
 from adapters.audit_log import write_audit_event
 from app.constants import (
@@ -34,6 +37,26 @@ from wire.internal_protocol.runtime_transport import (
     ResponseTiming,
     build_client_response,
 )
+
+
+@dataclass(slots=True)
+class DataPlaneAllocation:
+    """Pre-registered upload/download IDs handed to the client in REQUEST_OK.
+
+    Populated by ``ClientRequestHandler.allocate_data_plane_endpoints`` after
+    request validation and before the main node replies with CLIENT_REQUEST_OK.
+    Carries identifiers that the client echoes back on its pre-opened data
+    socket: ``upload_id`` as the capability token on the DELIVER frame, and
+    ``download_id`` as the artifact id the client will pull after the result
+    is produced. ``upload_future`` resolves to the local weight path once the
+    upload completes, or raises when the upload is rejected.
+    """
+
+    upload_id: str = ""
+    download_id: str = ""
+    data_endpoint_host: str = ""
+    data_endpoint_port: int = 0
+    upload_future: concurrent.futures.Future | None = None
 
 
 class ClientRequestHandler:
@@ -101,6 +124,53 @@ class ClientRequestHandler:
             )
         )
 
+    def allocate_data_plane_endpoints(self, request) -> DataPlaneAllocation:
+        """Pre-register upload and download IDs for one accepted client request.
+
+        Use this after the session service has assigned a ``task_id`` on the
+        request but before sending ``CLIENT_REQUEST_OK``. Decides deterministically
+        whether the client needs an upload slot (``upload_size_bytes > 0`` in the
+        conv2d payload) and whether the main-node result will be delivered over
+        the data plane (conv2d with ``client_response_mode != STATS_ONLY``). The
+        client is told these ids up front so it can pre-open its data socket.
+
+        Args:
+            request: Decoded ``CLIENT_REQUEST`` envelope with task_id already
+                assigned and method-specific payload populated.
+
+        Returns:
+            A ``DataPlaneAllocation`` describing the upload slot (if any) and
+            the reserved download id. Empty fields mean the client does not
+            need to open a data socket for that direction.
+        """
+        allocation = DataPlaneAllocation(
+            data_endpoint_host=self.artifact_manager.public_host,
+            data_endpoint_port=self.artifact_manager.port,
+        )
+        if request.method != METHOD_CONV2D:
+            return allocation
+
+        conv2d_payload = request.conv2d_payload
+        upload_size_bytes = int(getattr(conv2d_payload, "upload_size_bytes", 0) or 0) if conv2d_payload is not None else 0
+        upload_checksum = str(getattr(conv2d_payload, "upload_checksum", "") or "") if conv2d_payload is not None else ""
+        client_response_mode = int(getattr(conv2d_payload, "client_response_mode", 0) or 0) if conv2d_payload is not None else 0
+        stats_only = client_response_mode == CONV2D_CLIENT_RESPONSE_STATS_ONLY
+
+        if upload_size_bytes > 0:
+            allocation.upload_id = f"{request.request_id}-upload-{uuid.uuid4().hex[:8]}"
+            allocation.upload_future = self.artifact_manager.register_upload_slot(
+                upload_id=allocation.upload_id,
+                expected_size=upload_size_bytes,
+                expected_checksum=upload_checksum,
+                expected_content_type="application/x-superweb-conv2d-weight",
+                destination_suffix=".weight.bin",
+            )
+
+        if not stats_only:
+            allocation.download_id = f"{request.request_id}-download-{uuid.uuid4().hex[:8]}"
+
+        return allocation
+
     def _cleanup_local_task_results(self, task_results) -> None:
         """Delete any temporary local result files attached to worker task results.
 
@@ -121,14 +191,36 @@ class ClientRequestHandler:
                     pass
 
     @trace_function
-    def build_client_response_for_request(self, request):
+    def build_client_response_for_request(
+        self,
+        request,
+        *,
+        allocation: DataPlaneAllocation | None = None,
+    ):
         """Use this after receiving a validated CLIENT_REQUEST from one client session.
 
-        Args: request decoded client request envelope with method-specific payload.
+        Args: request decoded client request envelope with method-specific payload,
+            allocation optional data-plane allocation previously registered by
+            ``allocate_data_plane_endpoints`` and announced in ``CLIENT_REQUEST_OK``.
         Returns: A ready-to-send ClientResponse envelope, including inline bytes or an artifact descriptor.
         """
         task_id = request.request_id
         started_at = time.monotonic()
+        if allocation is None:
+            allocation = DataPlaneAllocation()
+        try:
+            return self._build_client_response_body(request, allocation, task_id, started_at)
+        finally:
+            if allocation.upload_id and allocation.upload_future is not None:
+                self.artifact_manager.cancel_upload_slot(allocation.upload_id)
+
+    def _build_client_response_body(self, request, allocation, task_id, started_at):
+        """Render the response for one validated client request.
+
+        Split out from ``build_client_response_for_request`` so the outer call
+        site can reliably cancel any orphan upload slot in a single finally,
+        regardless of which early-return path below fires.
+        """
 
         def build_response(*, status_code: int, **kwargs):
             kwargs.setdefault("size", request.size)
@@ -171,6 +263,7 @@ class ClientRequestHandler:
             )
 
         gemv_spec = build_gemv_input_matrix_spec(default_variant=request.size or "large")
+        client_weight_path = None
 
         if request.method == METHOD_GEMV and request.vector_length != gemv_spec.cols:
             return build_response(
@@ -237,43 +330,67 @@ class ClientRequestHandler:
                     iteration_count=request.iteration_count,
                 )
 
-            max_channels_per_task = self.task_exchange.max_conv2d_channels_per_task(spec)
-            if max_channels_per_task <= 0:
-                return build_response(
-                    status_code=STATUS_BAD_REQUEST,
-                    method=request.method,
-                    object_id=request.object_id,
-                    stream_id=request.stream_id,
-                    error_message="conv2d workload is too large for in-band task transport",
-                    worker_count=worker_count,
-                    client_count=client_count,
-                    client_id="",
-                    iteration_count=request.iteration_count,
-                )
-
-            try:
-                self.task_exchange.ensure_conv2d_dataset_ready()
-            except (OSError, subprocess.CalledProcessError) as exc:
-                return build_response(
-                    status_code=STATUS_INTERNAL_ERROR,
-                    method=request.method,
-                    object_id=request.object_id,
-                    stream_id=request.stream_id,
-                    error_message=f"failed to prepare conv2d dataset: {exc}",
-                    worker_count=worker_count,
-                    client_count=client_count,
-                    client_id="",
-                    iteration_count=request.iteration_count,
-                )
+            if allocation.upload_future is not None:
+                try:
+                    weight_path = allocation.upload_future.result(
+                        timeout=float(self.config.compute_artifact_ttl_seconds),
+                    )
+                except concurrent.futures.TimeoutError as exc:
+                    self.artifact_manager.cancel_upload_slot(allocation.upload_id)
+                    return build_response(
+                        status_code=STATUS_INTERNAL_ERROR,
+                        method=request.method,
+                        object_id=request.object_id,
+                        stream_id=request.stream_id,
+                        error_message=f"timed out waiting for client weight upload: {exc}",
+                        worker_count=worker_count,
+                        client_count=client_count,
+                        client_id="",
+                        iteration_count=request.iteration_count,
+                    )
+                except (OSError, RuntimeError, ValueError, concurrent.futures.CancelledError) as exc:
+                    return build_response(
+                        status_code=STATUS_INTERNAL_ERROR,
+                        method=request.method,
+                        object_id=request.object_id,
+                        stream_id=request.stream_id,
+                        error_message=f"failed to receive client weight upload: {exc}",
+                        worker_count=worker_count,
+                        client_count=client_count,
+                        client_id="",
+                        iteration_count=request.iteration_count,
+                    )
+                client_weight_path = weight_path
+                self.task_exchange.register_client_weight_path(request.request_id, weight_path)
+            else:
+                try:
+                    self.task_exchange.ensure_conv2d_dataset_ready()
+                except (OSError, subprocess.CalledProcessError) as exc:
+                    return build_response(
+                        status_code=STATUS_INTERNAL_ERROR,
+                        method=request.method,
+                        object_id=request.object_id,
+                        stream_id=request.stream_id,
+                        error_message=f"failed to prepare conv2d dataset: {exc}",
+                        worker_count=worker_count,
+                        client_count=client_count,
+                        client_id="",
+                        iteration_count=request.iteration_count,
+                    )
 
             assignments = self.dispatcher.dispatch_conv2d(
                 request_id=request.request_id,
                 output_channels=spec.c_out,
                 workers=workers,
                 worker_hardware=self.registry.list_worker_hardware(METHOD_CONV2D),
-                max_channels_per_task=max_channels_per_task,
             )
         if not assignments:
+            if client_weight_path is not None:
+                self.task_exchange.unregister_client_weight_path(request.request_id)
+                try:
+                    client_weight_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
             return build_response(
                 status_code=STATUS_NOT_FOUND,
                 method=request.method,
@@ -398,7 +515,7 @@ class ClientRequestHandler:
                         artifact_path,
                         producer_node_id=MAIN_NODE_NAME,
                         content_type="application/octet-stream",
-                        artifact_id=request.request_id,
+                        artifact_id=allocation.download_id or request.request_id,
                     )
                     response_payload = Conv2dResponsePayload(
                         output_length=output_length,
@@ -464,3 +581,10 @@ class ClientRequestHandler:
                 client_id="",
                 iteration_count=request.iteration_count,
             )
+        finally:
+            if client_weight_path is not None:
+                self.task_exchange.unregister_client_weight_path(request.request_id)
+                try:
+                    client_weight_path.unlink(missing_ok=True)
+                except OSError:
+                    pass

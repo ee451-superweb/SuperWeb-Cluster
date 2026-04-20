@@ -97,6 +97,27 @@ from app.compute_resource_policy import resolve_metal_headroom_policy
 from tests.support import require_integration
 
 
+class _FakeNativeRunnerProcess:
+    """Minimal duck-type of ``subprocess.Popen`` for backend unit tests.
+
+    The conv2d Python backends spawn the native runner via ``subprocess.Popen``
+    and drain ``.stdout`` / ``.stderr`` on dedicated pump threads before
+    calling ``.wait(timeout=...)``. This stub yields a single empty-JSON line
+    on stdout so ``json.loads`` succeeds, no stderr, and returns 0 from wait.
+    """
+
+    def __init__(self, stdout_text: str = "{}\n", stderr_text: str = "", return_code: int = 0) -> None:
+        self.stdout = iter([stdout_text]) if stdout_text else iter([])
+        self.stderr = iter([stderr_text]) if stderr_text else iter([])
+        self._return_code = return_code
+
+    def wait(self, timeout: float | None = None) -> int:  # noqa: ARG002
+        return self._return_code
+
+    def kill(self) -> None:
+        pass
+
+
 class PerformanceMatricsTests(unittest.TestCase):
     def test_metal_headroom_policy_translates_fraction_into_chunk_and_cooldown(self) -> None:
         policy = resolve_metal_headroom_policy(8, fraction=0.9)
@@ -572,8 +593,9 @@ class PerformanceMatricsTests(unittest.TestCase):
                 time_budget_seconds,
                 force_rebuild=False,
                 phase_callback=None,
+                verbose=False,
             ):
-                del spec, dataset, measurement_spec, measurement_dataset, time_budget_seconds, force_rebuild
+                del spec, dataset, measurement_spec, measurement_dataset, time_budget_seconds, force_rebuild, verbose
                 if callable(phase_callback):
                     phase_callback("final_measurement", {"block_size": 256, "tile_size": 16})
                 return {
@@ -1102,9 +1124,9 @@ class PerformanceMatricsTests(unittest.TestCase):
         layout = build_conv_dataset_layout(Path("C:/tmp/generated"), prefix="test_")
         captured: dict[str, list[str]] = {}
 
-        def fake_run(command, **kwargs):
+        def fake_popen(command, **kwargs):
             captured["command"] = list(command)
-            return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+            return _FakeNativeRunnerProcess()
 
         with (
             mock.patch(
@@ -1116,8 +1138,8 @@ class PerformanceMatricsTests(unittest.TestCase):
                 2.5,
             ),
             mock.patch(
-                "compute_node.performance_metrics.conv2d.backends.cuda_backend.subprocess.run",
-                side_effect=fake_run,
+                "compute_node.performance_metrics.conv2d.backends.cuda_backend.subprocess.Popen",
+                side_effect=fake_popen,
             ),
         ):
             backend._run_runner(
@@ -1156,13 +1178,13 @@ class PerformanceMatricsTests(unittest.TestCase):
         layout = build_conv_dataset_layout(Path("/tmp/generated"), prefix="test_")
         captured: dict[str, list[str]] = {}
 
-        def fake_run(command, **kwargs):
+        def fake_popen(command, **kwargs):
             captured["command"] = list(command)
-            return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+            return _FakeNativeRunnerProcess()
 
         with mock.patch(
-            "compute_node.performance_metrics.conv2d.backends.metal_backend.subprocess.run",
-            side_effect=fake_run,
+            "compute_node.performance_metrics.conv2d.backends.metal_backend.subprocess.Popen",
+            side_effect=fake_popen,
         ):
             backend._run_runner(
                 Path("/tmp/fake_runner"),

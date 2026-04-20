@@ -15,7 +15,6 @@ backends:
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 from pathlib import Path
@@ -24,6 +23,9 @@ from compute_node.compute_methods.gemv import (
     DX12_BUILD_DIR,
     DX12_EXECUTABLE_PATH,
     DX12_SOURCE_PATH,
+)
+from compute_node.performance_metrics.gemv.backends._native_runner import (
+    run_native_runner_with_streaming,
 )
 from compute_node.performance_metrics.gemv.models import (
     DEFAULT_AUTOTUNE_REPEATS,
@@ -109,6 +111,23 @@ def _measurement_repeats(_spec: BenchmarkSpec | None = None) -> int:
     return DEFAULT_MEASUREMENT_REPEATS
 
 
+_RAW_REPORT_KEYS = (
+    "flops_per_run",
+    "bytes_input",
+    "bytes_weight",
+    "bytes_output",
+    "bytes_kernel_compulsory_memory_traffic",
+    "notes_schema",
+    "trials",
+)
+
+
+def _extract_raw_report(metrics: dict[str, object]) -> dict[str, object]:
+    """Copy analysis-only fields out of the runner JSON for the benchmark report."""
+
+    return {key: metrics[key] for key in _RAW_REPORT_KEYS if key in metrics}
+
+
 def _binary_is_stale(binary_path: Path, inputs: list[Path]) -> bool:
     """Return whether a built artifact predates any source or build-recipe input."""
 
@@ -188,8 +207,11 @@ class Dx12Backend:
         measurement_dataset: DatasetLayout | None = None,
         time_budget_seconds: float,
         force_rebuild: bool = False,
+        phase_callback=None,
+        verbose: bool = False,
     ) -> BackendResult:
         """Run the DX12 executable once and return the best configuration it found."""
+        _ = phase_callback
 
         if spec.accumulation_precision != "fp32":
             return BackendResult(
@@ -261,6 +283,7 @@ class Dx12Backend:
                 autotune_repeats=autotune_repeats,
                 measurement_repeats=1,
                 timeout_seconds=max(time_budget_seconds, 30.0),
+                verbose=verbose,
             )
         except subprocess.TimeoutExpired:
             notes.append("DX12 benchmark timed out")
@@ -297,6 +320,7 @@ class Dx12Backend:
                 autotune_repeats=1,
                 measurement_repeats=final_measurement_repeats,
                 timeout_seconds=max(time_budget_seconds, 30.0),
+                verbose=verbose,
             )
         except subprocess.TimeoutExpired:
             notes.append("DX12 benchmark timed out")
@@ -408,6 +432,10 @@ class Dx12Backend:
             score=measurement_score,
             notes=trial_notes,
         )
+        raw_report = {
+            "autotune": _extract_raw_report(autotune_metrics),
+            "measurement": _extract_raw_report(metrics),
+        }
         return BackendResult(
             backend=self.name,
             available=True,
@@ -416,6 +444,7 @@ class Dx12Backend:
             best_trial=trial,
             trials=[autotune_trial, trial],
             notes=notes,
+            raw_report=raw_report,
         )
 
     def _run_runner(
@@ -429,6 +458,7 @@ class Dx12Backend:
         autotune_repeats: int,
         measurement_repeats: int,
         timeout_seconds: float,
+        verbose: bool = False,
     ) -> dict[str, object]:
         """Invoke the native DX12 runner and parse its JSON metrics.
 
@@ -464,17 +494,13 @@ class Dx12Backend:
             "--measurement-repeats",
             str(measurement_repeats),
         ]
-        completed = subprocess.run(
+        if verbose:
+            command.append("--verbose")
+        return run_native_runner_with_streaming(
             command,
-            check=True,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout_seconds,
+            timeout_seconds=timeout_seconds,
             cwd=ROOT_DIR,
         )
-        return json.loads(completed.stdout)
 
     def _compile_if_needed(self, *, force_rebuild: bool = False) -> Path:
         """Return the DX12 runner path, compiling only when needed."""

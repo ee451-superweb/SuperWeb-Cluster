@@ -83,12 +83,11 @@ class TaskDispatcher:
         output_channels: int,
         workers: list[RuntimePeerConnection],
         worker_hardware: list[WorkerHardwareCapability],
-        max_channels_per_task: int | None = None,
     ) -> list[WorkerTaskSlice]:
         """Use this when one convolution request needs output-channel slices across workers.
 
-        Args: request_id logical task id, output_channels total channels, workers live workers, worker_hardware spatial performance entries, max_channels_per_task optional chunk cap.
-        Returns: Weighted channel slices, chunked further when one worker slice exceeds the per-task channel cap.
+        Args: request_id logical task id, output_channels total channels, workers live workers, worker_hardware spatial performance entries.
+        Returns: One weighted channel slice per schedulable worker.
         """
         worker_gflops: dict[str, float] = {worker.peer_id: 0.0 for worker in workers}
         for hardware in worker_hardware:
@@ -108,22 +107,17 @@ class TaskDispatcher:
         for partition, worker in zip(partitions, schedulable_workers):
             if partition.end <= partition.start:
                 continue
-            chunk_size = max_channels_per_task or (partition.end - partition.start)
-            chunk_index = 0
-            for start_oc in range(partition.start, partition.end, chunk_size):
-                end_oc = min(start_oc + chunk_size, partition.end)
-                assignments.append(
-                    WorkerTaskSlice(
-                        connection=worker,
-                        task_id=request_id,
-                        artifact_id=f"{request_id}:{worker.runtime_id}:{chunk_index}",
-                        method=METHOD_CONV2D,
-                        row_start=0,
-                        row_end=0,
-                        start_oc=start_oc,
-                        end_oc=end_oc,
-                        effective_gflops=worker_gflops[worker.peer_id],
-                    )
+            assignments.append(
+                WorkerTaskSlice(
+                    connection=worker,
+                    task_id=request_id,
+                    artifact_id=f"{request_id}:{worker.runtime_id}:0",
+                    method=METHOD_CONV2D,
+                    row_start=0,
+                    row_end=0,
+                    start_oc=partition.start,
+                    end_oc=partition.end,
+                    effective_gflops=worker_gflops[worker.peer_id],
                 )
-                chunk_index += 1
+            )
         return assignments

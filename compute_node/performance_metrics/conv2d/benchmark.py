@@ -98,6 +98,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-channel-batch-scale", type=float)
     parser.add_argument("--cooldown-ms", type=float)
     parser.add_argument("--rebuild", action="store_true")
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Ask each native runner to stream per-trial timing progress to stderr, "
+        "and record the full per-trial breakdown in the benchmark report's raw_report section.",
+    )
     return parser
 
 
@@ -552,11 +558,26 @@ def run_benchmark(args: argparse.Namespace) -> dict:
     backend_results = {}
     hardware_inventory = {}
 
+    backend_time_budget_seconds = _backend_timeout_seconds(
+        autotune_dataset_variant,
+        measurement_dataset_variant,
+        measurement_spec,
+    )
+
     print("\n=== Benchmarking conv2d Backends ===", flush=True)
     print(
         f"    Autotune stage: {_phase_label(autotune_dataset_variant, spec)}",
         flush=True,
     )
+    if bool(getattr(args, "verbose", False)):
+        print(
+            f"[conv2d verbose] workload_mode={workload_mode} "
+            f"autotune_variant={autotune_dataset_variant} "
+            f"measurement_variant={measurement_dataset_variant} "
+            f"force_rebuild={bool(args.rebuild)} "
+            f"backend_time_budget_seconds={backend_time_budget_seconds}",
+            flush=True,
+        )
     small_layout = build_dataset_layout(dataset_dir, prefix=dataset_prefix_for_size("small"))
     mid_layout = build_dataset_layout(dataset_dir, prefix=dataset_prefix_for_size("mid"))
     large_layout = build_dataset_layout(dataset_dir, prefix=dataset_prefix_for_size("large"))
@@ -572,11 +593,6 @@ def run_benchmark(args: argparse.Namespace) -> dict:
         measurement_layout = mid_layout
     else:
         measurement_layout = autotune_layout
-    backend_time_budget_seconds = _backend_timeout_seconds(
-        autotune_dataset_variant,
-        measurement_dataset_variant,
-        measurement_spec,
-    )
 
     for b in backends:
         diagnostic_context = _backend_diagnostic_context(b, spec)
@@ -661,6 +677,7 @@ def run_benchmark(args: argparse.Namespace) -> dict:
             time_budget_seconds=backend_time_budget_seconds,
             force_rebuild=args.rebuild,
             phase_callback=_announce_phase,
+            verbose=bool(getattr(args, "verbose", False)),
         )
         res = result.to_dict() if hasattr(result, 'to_dict') else result
         backend_results[b.name] = res

@@ -32,6 +32,7 @@ from wire.internal_protocol.runtime_transport import (
     RuntimeEnvelope,
     Conv2dResultPayload,
     TaskAccept,
+    TaskFail,
     TaskResult,
     TransferMode,
     build_client_join,
@@ -87,6 +88,8 @@ class MainNodeRuntimeTests(unittest.TestCase):
             logger=mock.Mock(),
             should_stop=lambda: next(stop_values),
         )
+        runtime.artifact_manager = mock.Mock()
+        runtime.artifact_manager.port = 52021
 
         result = runtime.run()
 
@@ -635,6 +638,99 @@ class MainNodeRuntimeTests(unittest.TestCase):
         self.assertEqual(assign_message.task_assign.transfer_mode, TransferMode.ARTIFACT_REQUIRED)
         self.assertEqual(release_message.kind, MessageKind.ARTIFACT_RELEASE)
         self.assertEqual(release_message.artifact_release.artifact_id, "artifact-1")
+        weight_artifact = assign_message.task_assign.task_payload.weight_artifact
+        self.assertIsNotNone(weight_artifact)
+        self.assertEqual(weight_artifact.artifact_id, "req-spatial-weight")
+        self.assertEqual(
+            weight_artifact.content_type, "application/x-superweb-conv2d-weight"
+        )
+        self.assertEqual(assign_message.task_assign.task_payload.weight_data, b"")
+        self.assertNotIn(weight_artifact.artifact_id, runtime.artifact_manager._artifacts)
+
+    @mock.patch("builtins.print")
+    @mock.patch("main_node.task_exchange.recv_message")
+    @mock.patch("main_node.task_exchange.send_message")
+    def test_run_worker_task_slice_cleans_up_weight_artifact_on_task_fail(
+        self,
+        send_message_mock: mock.Mock,
+        recv_message_mock: mock.Mock,
+        print_mock: mock.Mock,
+    ) -> None:
+        del send_message_mock, print_mock
+        runtime = MainNodeRuntime(
+            config=AppConfig(node_name=MAIN_NODE_NAME),
+            logger=mock.Mock(),
+        )
+        runtime.task_exchange._remove_worker_connection = mock.Mock()
+
+        worker_connection = mock.Mock()
+        worker_connection.node_name = COMPUTE_NODE_NAME
+        worker_connection.runtime_id = "worker-1"
+        worker_connection.peer_id = "worker:compute node@10.0.0.2:5000"
+        worker_connection.peer_address = "10.0.0.2"
+        worker_connection.peer_port = 5000
+        worker_connection.sock = mock.Mock()
+        worker_connection.sock.gettimeout.return_value = 1.0
+        worker_connection.io_lock = threading.Lock()
+
+        request = build_client_request(
+            SUPERWEB_CLIENT_NAME,
+            "req-fail",
+            METHOD_CONV2D,
+            b"",
+            size="small",
+            object_id="conv2d/small",
+            stream_id="stream-fail",
+            iteration_count=1,
+        ).client_request
+        assert request is not None
+
+        recv_message_mock.side_effect = [
+            RuntimeEnvelope(
+                kind=MessageKind.TASK_ACCEPT,
+                task_accept=TaskAccept(
+                    request_id="req-fail",
+                    node_id="worker-1",
+                    task_id="req-fail",
+                    timestamp_ms=123456,
+                    status_code=STATUS_ACCEPTED,
+                ),
+            ),
+            RuntimeEnvelope(
+                kind=MessageKind.TASK_FAIL,
+                task_fail=TaskFail(
+                    request_id="req-fail",
+                    node_id="worker-1",
+                    task_id="req-fail",
+                    timestamp_ms=123457,
+                    status_code=STATUS_OK,
+                    error_message="worker boom",
+                ),
+            ),
+        ]
+
+        assignment = WorkerTaskSlice(
+            connection=worker_connection,
+            task_id="req-fail",
+            artifact_id="req-fail:worker-1:0",
+            row_start=0,
+            row_end=0,
+            effective_gflops=125.0,
+            method="conv2d",
+            start_oc=0,
+            end_oc=2,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime.artifact_manager.root_dir = Path(temp_dir)
+            with self.assertRaises(RuntimeError) as ctx:
+                runtime._run_worker_task_slice(request, assignment)
+
+            self.assertIn("worker boom", str(ctx.exception))
+            self.assertNotIn(
+                "req-fail:worker-1:0-weight", runtime.artifact_manager._artifacts
+            )
+        runtime.task_exchange._remove_worker_connection.assert_called_once()
 
     @mock.patch("builtins.print")
     @mock.patch("main_node.task_exchange.send_message")

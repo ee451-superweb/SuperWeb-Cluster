@@ -84,6 +84,7 @@ class Conv2dTaskPayload:
     weight_data: bytes = b""
     client_response_mode: int = 0
     stats_max_samples: int = 0
+    weight_artifact: ArtifactDescriptor | None = None
 
 
 @dataclass(slots=True)

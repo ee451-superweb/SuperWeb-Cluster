@@ -12,6 +12,8 @@ import math
 import os
 import shutil
 import subprocess
+import sys
+import threading
 import time
 from functools import lru_cache
 from pathlib import Path
@@ -63,6 +65,21 @@ PTX_FALLBACK_PREFERENCE = ("120", "110", "100", "90", "89", "86", "80", "75", "7
 CONV2D_CUDA_OUTPUT_CHANNEL_BATCH_OVERRIDE: tuple[int, ...] | None = None
 CONV2D_CUDA_OUTPUT_CHANNEL_BATCH_SCALE = DEFAULT_CONV2D_CUDA_OUTPUT_CHANNEL_BATCH_SCALE
 CONV2D_CUDA_COOLDOWN_MS = DEFAULT_CONV2D_CUDA_COOLDOWN_MS
+
+_RAW_REPORT_KEYS = (
+    "flops_per_run",
+    "bytes_input",
+    "bytes_weight",
+    "bytes_output",
+    "bytes_kernel_compulsory_memory_traffic",
+    "notes_schema",
+    "trials",
+)
+
+
+def _extract_raw_report(metrics: dict[str, object]) -> dict[str, object]:
+    """Pull the benchmark-only detail fields out of a native runner's JSON."""
+    return {key: metrics[key] for key in _RAW_REPORT_KEYS if key in metrics}
 
 
 def _relative_project_path(path: Path) -> str:
@@ -378,6 +395,7 @@ class CudaBackend:
         time_budget_seconds: float,
         force_rebuild: bool = False,
         phase_callback=None,
+        verbose: bool = False,
     ) -> BackendResult:
         """Run autotune plus final measurement for the CUDA backend.
 
@@ -440,6 +458,7 @@ class CudaBackend:
                 autotune_repeats=_autotune_repeats(spec),
                 measurement_repeats=1,
                 timeout_seconds=max(time_budget_seconds, 30.0),
+                verbose=verbose,
             )
             autotune_subprocess_wall_s = time.perf_counter() - autotune_subprocess_started
         except Exception as exc:
@@ -503,6 +522,7 @@ class CudaBackend:
                 autotune_repeats=1,
                 measurement_repeats=final_measurement_repeats,
                 timeout_seconds=max(time_budget_seconds, 30.0),
+                verbose=verbose,
             )
             measurement_subprocess_wall_s = time.perf_counter() - measurement_subprocess_started
         except Exception as exc:
@@ -603,7 +623,20 @@ class CudaBackend:
             f"measurement_pass={measurement_subprocess_wall_s:.6f}, "
             f"sum={autotune_subprocess_wall_s + measurement_subprocess_wall_s:.6f}"
         )
-        return BackendResult(self.name, True, dict(measurement_config), autotune_trial, trial, [autotune_trial, trial], notes)
+        raw_report = {
+            "autotune": _extract_raw_report(autotune_metrics),
+            "measurement": _extract_raw_report(measurement_metrics),
+        }
+        return BackendResult(
+            self.name,
+            True,
+            dict(measurement_config),
+            autotune_trial,
+            trial,
+            [autotune_trial, trial],
+            notes,
+            raw_report=raw_report,
+        )
 
     def _run_runner(
         self,
@@ -618,6 +651,7 @@ class CudaBackend:
         autotune_repeats: int,
         measurement_repeats: int,
         timeout_seconds: float,
+        verbose: bool = False,
     ) -> dict[str, object]:
         """Invoke the native CUDA runner and parse its JSON metrics.
 
@@ -671,6 +705,8 @@ class CudaBackend:
             "--cooldown-ms",
             str(CONV2D_CUDA_COOLDOWN_MS),
         ]
+        if verbose:
+            command.append("--verbose")
         emit_status(
             "method.conv2d.backend.native_runner.start",
             status="running",
@@ -683,27 +719,63 @@ class CudaBackend:
         )
 
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 command,
-                check=True,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=timeout_seconds,
                 cwd=ROOT_DIR,
             )
-            emit_status(
-                "method.conv2d.backend.native_runner.complete",
-                status="running",
-                method="conv2d",
-                backend=self.name,
-                command=command,
-            )
-            return json.loads(completed.stdout)
-        except subprocess.CalledProcessError as exc:
-            details = (exc.stderr or exc.stdout or "").strip()
-            raise RuntimeError(details if details else str(exc)) from exc
+        except OSError as exc:
+            raise RuntimeError(str(exc)) from exc
+
+        stderr_chunks: list[str] = []
+        stdout_chunks: list[str] = []
+
+        def _pump_stderr() -> None:
+            for line in process.stderr:
+                stderr_chunks.append(line)
+                if verbose:
+                    sys.stderr.write(line)
+                    sys.stderr.flush()
+
+        def _pump_stdout() -> None:
+            for line in process.stdout:
+                stdout_chunks.append(line)
+
+        stderr_pump = threading.Thread(target=_pump_stderr, daemon=True)
+        stdout_pump = threading.Thread(target=_pump_stdout, daemon=True)
+        stderr_pump.start()
+        stdout_pump.start()
+
+        try:
+            return_code = process.wait(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired as exc:
+            process.kill()
+            process.wait()
+            stderr_pump.join(timeout=5.0)
+            stdout_pump.join(timeout=5.0)
+            raise RuntimeError(f"CUDA runner timed out after {timeout_seconds:.1f}s") from exc
+
+        stderr_pump.join(timeout=5.0)
+        stdout_pump.join(timeout=5.0)
+        stdout_data = "".join(stdout_chunks)
+        stderr_data = "".join(stderr_chunks)
+
+        if return_code != 0:
+            details = (stderr_data or stdout_data).strip()
+            raise RuntimeError(details if details else f"CUDA runner exited with code {return_code}")
+
+        emit_status(
+            "method.conv2d.backend.native_runner.complete",
+            status="running",
+            method="conv2d",
+            backend=self.name,
+            command=command,
+        )
+        return json.loads(stdout_data)
 
     def _validate_metrics(self, metrics: dict[str, object]) -> str | None:
         """Validate the required numeric fields returned by the CUDA runner.

@@ -7,7 +7,6 @@ MetalPerformanceShaders GEMV path.
 
 from __future__ import annotations
 
-import json
 import subprocess
 import sys
 from pathlib import Path
@@ -17,6 +16,9 @@ from compute_node.compute_methods.gemv import (
     METAL_BUILD_DIR,
     METAL_EXECUTABLE_PATH,
     METAL_HOST_SOURCE_PATH,
+)
+from compute_node.performance_metrics.gemv.backends._native_runner import (
+    run_native_runner_with_streaming,
 )
 from compute_node.performance_metrics.gemv.models import (
     DEFAULT_AUTOTUNE_REPEATS,
@@ -72,6 +74,23 @@ def _measurement_repeats(_spec: BenchmarkSpec | None = None) -> int:
     """Return the fixed sustained-measurement repeat count for every Metal benchmark."""
 
     return DEFAULT_MEASUREMENT_REPEATS
+
+
+_RAW_REPORT_KEYS = (
+    "flops_per_run",
+    "bytes_input",
+    "bytes_weight",
+    "bytes_output",
+    "bytes_kernel_compulsory_memory_traffic",
+    "notes_schema",
+    "trials",
+)
+
+
+def _extract_raw_report(metrics: dict[str, object]) -> dict[str, object]:
+    """Copy analysis-only fields out of the runner JSON for the benchmark report."""
+
+    return {key: metrics[key] for key in _RAW_REPORT_KEYS if key in metrics}
 
 
 def _find_xcrun_tool(tool_name: str) -> str | None:
@@ -174,6 +193,7 @@ class MetalBackend:
         time_budget_seconds: float,
         force_rebuild: bool = False,
         phase_callback=None,
+        verbose: bool = False,
     ) -> BackendResult:
         """Run the Metal executable once and return the best configuration it found."""
 
@@ -257,6 +277,7 @@ class MetalBackend:
                 autotune_repeats=autotune_repeats,
                 measurement_repeats=1,
                 timeout_seconds=max(time_budget_seconds, 30.0),
+                verbose=verbose,
             )
             selected_config = self._selected_config(
                 autotune_metrics,
@@ -301,6 +322,7 @@ class MetalBackend:
                 autotune_repeats=1,
                 measurement_repeats=final_measurement_repeats,
                 timeout_seconds=max(time_budget_seconds, 30.0),
+                verbose=verbose,
             )
         except subprocess.TimeoutExpired:
             notes.append("Metal benchmark timed out")
@@ -380,6 +402,10 @@ class MetalBackend:
             score=measurement_score,
             notes=trial_notes,
         )
+        raw_report = {
+            "autotune": _extract_raw_report(autotune_metrics),
+            "measurement": _extract_raw_report(metrics),
+        }
         return BackendResult(
             backend=self.name,
             available=True,
@@ -388,6 +414,7 @@ class MetalBackend:
             best_trial=trial,
             trials=[autotune_trial, trial],
             notes=notes,
+            raw_report=raw_report,
         )
 
     def _run_runner(
@@ -403,6 +430,7 @@ class MetalBackend:
         autotune_repeats: int,
         measurement_repeats: int,
         timeout_seconds: float,
+        verbose: bool = False,
     ) -> dict[str, object]:
         """Invoke the native Metal runner and parse its JSON metrics.
 
@@ -442,17 +470,13 @@ class MetalBackend:
             "--measurement-repeats",
             str(measurement_repeats),
         ]
-        completed = subprocess.run(
+        if verbose:
+            command.append("--verbose")
+        return run_native_runner_with_streaming(
             command,
-            check=True,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout_seconds,
+            timeout_seconds=timeout_seconds,
             cwd=ROOT_DIR,
         )
-        return json.loads(completed.stdout)
 
     def _compile_if_needed(self, *, force_rebuild: bool = False) -> tuple[Path, str]:
         """Build the self-contained Metal runner when sources changed."""

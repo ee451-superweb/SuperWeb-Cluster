@@ -329,6 +329,10 @@ def build_client_request_ok(
     size: str = "",
     object_id: str,
     accepted_timestamp_ms: int | None = None,
+    upload_id: str = "",
+    download_id: str = "",
+    data_endpoint_host: str = "",
+    data_endpoint_port: int = 0,
 ) -> RuntimeEnvelope:
     """Use this when the main node assigns a task id for one client request."""
     if accepted_timestamp_ms is None:
@@ -342,6 +346,10 @@ def build_client_request_ok(
             size=size,
             object_id=object_id,
             accepted_timestamp_ms=accepted_timestamp_ms,
+            upload_id=upload_id,
+            download_id=download_id,
+            data_endpoint_host=data_endpoint_host,
+            data_endpoint_port=data_endpoint_port,
         ),
     )
 

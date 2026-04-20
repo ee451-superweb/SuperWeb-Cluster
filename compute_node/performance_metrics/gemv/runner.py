@@ -99,6 +99,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Force backend executables to rebuild instead of reusing checked-in or cached binaries.",
     )
     parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Stream additional per-backend configuration and selection details to stdout.",
+    )
+    parser.add_argument(
         "--accumulation-precision",
         choices=("fp32", "fp64_accumulate"),
         default="fp32",
@@ -303,6 +308,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
     )
     backends = build_backends(args.backend)
     force_rebuild = bool(getattr(args, "rebuild", False))
+    verbose = bool(getattr(args, "verbose", False))
     hardware_inventory = probe_backends(backends)
     detected_backends = [
         backend.name
@@ -376,6 +382,16 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
             f"    Autotune stage: {_phase_label(autotune_dataset_variant, spec)}",
             flush=True,
         )
+        if verbose:
+            print(
+                f"[gemv verbose] workload_mode={workload_mode} "
+                f"autotune_variant={autotune_dataset_variant} "
+                f"measurement_variant={measurement_dataset_variant} "
+                f"force_rebuild={force_rebuild} "
+                f"detected_backends={detected_backends} "
+                f"accumulation_precision={accumulation_precision}",
+                flush=True,
+            )
     for backend in backends:
         probe_message = str((hardware_inventory.get(backend.name) or {}).get("probe_message") or "")
         hardware_name = _hardware_label_for_backend(backend.name, probe_message)
@@ -402,6 +418,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
                     measurement_dataset=measurement_dataset,
                     time_budget_seconds=1.0,
                     force_rebuild=force_rebuild,
+                    verbose=verbose,
                 )
             )
             continue
@@ -472,6 +489,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
             time_budget_seconds=per_backend_budget,
             force_rebuild=force_rebuild,
             phase_callback=_announce_phase,
+            verbose=verbose,
         )
         emit_status(
             "method.gemv.backend.complete",

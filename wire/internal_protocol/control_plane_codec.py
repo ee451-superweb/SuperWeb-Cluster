@@ -227,6 +227,8 @@ def _to_pb_conv2d_request_payload(payload) -> runtime_pb2.Conv2dRequestPayload:
         stride=payload.stride,
         client_response_mode=payload.client_response_mode,
         stats_max_samples=payload.stats_max_samples,
+        upload_size_bytes=getattr(payload, "upload_size_bytes", 0),
+        upload_checksum=getattr(payload, "upload_checksum", ""),
     )
 
 
@@ -247,6 +249,8 @@ def _from_pb_conv2d_request_payload(payload: runtime_pb2.Conv2dRequestPayload):
         stride=payload.stride,
         client_response_mode=payload.client_response_mode,
         stats_max_samples=payload.stats_max_samples,
+        upload_size_bytes=payload.upload_size_bytes,
+        upload_checksum=payload.upload_checksum,
     )
 
 
@@ -390,7 +394,7 @@ def _to_pb_conv2d_task_payload(payload) -> runtime_pb2.Conv2dTaskPayload:
     Args: payload internal Conv2dTaskPayload object.
     Returns: The generated protobuf task payload message.
     """
-    return runtime_pb2.Conv2dTaskPayload(
+    message = runtime_pb2.Conv2dTaskPayload(
         start_oc=payload.start_oc,
         end_oc=payload.end_oc,
         tensor_h=payload.tensor_h,
@@ -404,6 +408,9 @@ def _to_pb_conv2d_task_payload(payload) -> runtime_pb2.Conv2dTaskPayload:
         client_response_mode=payload.client_response_mode,
         stats_max_samples=payload.stats_max_samples,
     )
+    if getattr(payload, "weight_artifact", None) is not None:
+        message.weight_artifact.CopyFrom(_to_pb_artifact_descriptor(payload.weight_artifact))
+    return message
 
 
 def _from_pb_conv2d_task_payload(payload: runtime_pb2.Conv2dTaskPayload):
@@ -426,6 +433,11 @@ def _from_pb_conv2d_task_payload(payload: runtime_pb2.Conv2dTaskPayload):
         weight_data=payload.weight_data,
         client_response_mode=payload.client_response_mode,
         stats_max_samples=payload.stats_max_samples,
+        weight_artifact=(
+            _from_pb_artifact_descriptor(payload.weight_artifact)
+            if payload.HasField("weight_artifact")
+            else None
+        ),
     )
 
 
@@ -567,6 +579,10 @@ def encode_envelope(message) -> bytes:
         envelope.client_request_ok.size = message.client_request_ok.size
         envelope.client_request_ok.object_id = message.client_request_ok.object_id
         envelope.client_request_ok.accepted_timestamp_ms = message.client_request_ok.accepted_timestamp_ms
+        envelope.client_request_ok.upload_id = message.client_request_ok.upload_id
+        envelope.client_request_ok.download_id = message.client_request_ok.download_id
+        envelope.client_request_ok.data_endpoint_host = message.client_request_ok.data_endpoint_host
+        envelope.client_request_ok.data_endpoint_port = message.client_request_ok.data_endpoint_port
     elif message.kind == runtime.MessageKind.CLIENT_REQUEST:
         if message.client_request is None:
             raise ValueError("CLIENT_REQUEST envelope missing payload")
@@ -789,6 +805,10 @@ def parse_envelope(payload: bytes):
             size=envelope_pb.client_request_ok.size,
             object_id=envelope_pb.client_request_ok.object_id,
             accepted_timestamp_ms=envelope_pb.client_request_ok.accepted_timestamp_ms,
+            upload_id=envelope_pb.client_request_ok.upload_id,
+            download_id=envelope_pb.client_request_ok.download_id,
+            data_endpoint_host=envelope_pb.client_request_ok.data_endpoint_host,
+            data_endpoint_port=envelope_pb.client_request_ok.data_endpoint_port,
         )
     if envelope_pb.HasField("client_request"):
         request_payload = None

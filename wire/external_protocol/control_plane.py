@@ -64,6 +64,13 @@ class Conv2dRequestPayload:
     client_response_mode: int = 0
     # Cap on stats_samples returned when client_response_mode == STATS_ONLY. 0 means cluster default.
     stats_max_samples: int = 0
+    # Byte count of the weight payload that the client will push over the data plane.
+    # Zero means the request carries no client-supplied weights and main should use
+    # its own weight dataset.
+    upload_size_bytes: int = 0
+    # SHA-256 of the declared upload, validated when the bytes arrive on the DELIVER
+    # channel. Empty means no pre-validation.
+    upload_checksum: str = ""
 
 
 @dataclass(slots=True)
@@ -248,6 +255,14 @@ class ClientRequestOk:
     size: str
     object_id: str
     accepted_timestamp_ms: int
+    # Data-plane handshake fields. Non-empty upload_id means the client must open a
+    # data-plane socket and push its bytes via DELIVER before main can start compute.
+    # Non-empty download_id means the client should issue REQUEST(download_id) on the
+    # same socket (or a fresh one) to pull the result artifact.
+    upload_id: str = ""
+    download_id: str = ""
+    data_endpoint_host: str = ""
+    data_endpoint_port: int = 0
 
 
 @dataclass(slots=True)
