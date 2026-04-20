@@ -8,10 +8,16 @@ response buffer.
 from __future__ import annotations
 
 import array
+import logging
+import time
 from pathlib import Path
+
+import numpy as np
 
 from app.constants import CONV2D_STATS_MAX_SAMPLES
 from wire.internal_protocol.runtime_transport import TaskResult
+
+logger = logging.getLogger("superweb_cluster")
 
 
 def summarize_conv2d_output_file(
@@ -289,8 +295,20 @@ class ResultAggregator:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         seen_ranges: list[tuple[int, int]] = []
 
-        with output_path.open("w+b") as handle:
-            handle.truncate(spatial_size * total_cout * bytes_per_float)
+        total_started_ns = time.perf_counter_ns()
+        assign_ns = 0
+        flush_ns = 0
+        file_backed_slices = 0
+        inline_slices = 0
+        total_bytes_written = 0
+
+        dst = np.memmap(
+            output_path,
+            dtype=np.float32,
+            mode="w+",
+            shape=(spatial_size, total_cout),
+        )
+        try:
             for result in results:
                 expected_channels = self._validate_conv2d_result(
                     result=result,
@@ -299,26 +317,50 @@ class ResultAggregator:
                     spatial_size=spatial_size,
                 )
                 seen_ranges.append((result.start_oc, result.end_oc))
-                per_pixel_bytes = expected_channels * bytes_per_float
                 if result.local_result_path:
-                    with Path(result.local_result_path).open("rb") as source:
-                        for pixel in range(spatial_size):
-                            payload = source.read(per_pixel_bytes)
-                            if len(payload) != per_pixel_bytes:
-                                raise ValueError(
-                                    f"task result file ended early for oc {result.start_oc}:{result.end_oc}"
-                                )
-                            dst_offset = ((pixel * total_cout) + result.start_oc) * bytes_per_float
-                            handle.seek(dst_offset)
-                            handle.write(payload)
+                    file_backed_slices += 1
+                    src = np.memmap(
+                        result.local_result_path,
+                        dtype=np.float32,
+                        mode="r",
+                        shape=(spatial_size, expected_channels),
+                    )
+                    try:
+                        t0 = time.perf_counter_ns()
+                        dst[:, result.start_oc:result.end_oc] = src
+                        assign_ns += time.perf_counter_ns() - t0
+                    finally:
+                        del src
                 else:
-                    src = memoryview(result.output_vector)
-                    for pixel in range(spatial_size):
-                        src_start = pixel * per_pixel_bytes
-                        src_end = src_start + per_pixel_bytes
-                        dst_offset = ((pixel * total_cout) + result.start_oc) * bytes_per_float
-                        handle.seek(dst_offset)
-                        handle.write(src[src_start:src_end])
+                    inline_slices += 1
+                    src = np.frombuffer(result.output_vector, dtype=np.float32).reshape(
+                        spatial_size, expected_channels
+                    )
+                    t0 = time.perf_counter_ns()
+                    dst[:, result.start_oc:result.end_oc] = src
+                    assign_ns += time.perf_counter_ns() - t0
+                total_bytes_written += spatial_size * expected_channels * bytes_per_float
+            flush_started_ns = time.perf_counter_ns()
+            dst.flush()
+            flush_ns = time.perf_counter_ns() - flush_started_ns
+        finally:
+            del dst
+
+        total_ns = time.perf_counter_ns() - total_started_ns
+        other_ns = max(0, total_ns - assign_ns - flush_ns)
+        total_ms = total_ns // 1_000_000
+        logger.info(
+            "conv2d aggregate timing: total=%dms assign=%dms flush=%dms other=%dms "
+            "file_slices=%d inline_slices=%d bytes=%d throughput=%.1fMB/s",
+            total_ms,
+            assign_ns // 1_000_000,
+            flush_ns // 1_000_000,
+            other_ns // 1_000_000,
+            file_backed_slices,
+            inline_slices,
+            total_bytes_written,
+            (total_bytes_written / (1024 * 1024)) / (total_ms / 1000) if total_ms > 0 else 0.0,
+        )
 
         next_oc = 0
         for start_oc, end_oc in sorted(seen_ranges):
