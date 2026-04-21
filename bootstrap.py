@@ -13,7 +13,12 @@ from adapters.process import enable_utf8_mode, python_utf8_command
 enable_utf8_mode()
 
 from adapters.firewall import ensure_rules
-from adapters.platform import detect_os, relaunch_as_admin
+from adapters.platform import (
+    detach_from_current_console,
+    detect_os,
+    has_attached_console,
+    relaunch_as_admin,
+)
 from adapters.audit_log import write_audit_event
 from app.config import AppConfig
 from app.constants import (
@@ -397,6 +402,16 @@ def build_parser() -> argparse.ArgumentParser:
             "spawns a peer compute-node for the complementary backend."
         ),
     )
+    parser.add_argument(
+        "--no-cli",
+        action="store_true",
+        help=(
+            "Run headless: detach the current process from its console on startup and spawn "
+            "any peer compute-node subprocess detached as well (no new console window). "
+            "Only Task Manager / taskkill can stop a --no-cli process. When this flag is off, "
+            "peers get their own visible console window for easier demo / live debugging."
+        ),
+    )
     return parser
 
 
@@ -423,6 +438,7 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         enable_manual_fallback=args.manual_fallback,
         dual_purpose=bool(getattr(args, "dual_purpose", False)),
         pinned_backend=getattr(args, "backend", None),
+        no_cli=bool(getattr(args, "no_cli", False)),
     )
 @trace_function
 def ensure_compute_node_benchmark_ready(
@@ -556,9 +572,24 @@ def main(argv: list[str] | None = None) -> int:
 
         # Windows elevation is attempted when explicitly requested, and the
         # self-relaunched venv process opts into the same check by default.
-        if args.elevate_if_needed and platform_info.can_elevate and relaunch_as_admin():
+        # --no-cli is merged into this handoff: when elevating, hide the
+        # elevated console; when only detaching, skip UAC and Popen a
+        # DETACHED copy of ourselves. Both paths are one-way — the parent
+        # exits immediately so we never end up with a third self-relaunch.
+        if args.elevate_if_needed and platform_info.can_elevate and relaunch_as_admin(
+            hidden=bool(getattr(args, "no_cli", False))
+        ):
             logger.info("Relaunched with administrator privileges.")
             return 0
+
+        if getattr(args, "no_cli", False) and has_attached_console():
+            if detach_from_current_console(effective_argv):
+                logger.info("Relaunched in detached (--no-cli) mode; console parent exiting.")
+                return 0
+            logger.warning(
+                "--no-cli was requested but detach_from_current_console failed; "
+                "continuing in the current console.",
+            )
 
         if not ensure_compute_node_benchmark_ready(
             logger,

@@ -1,6 +1,7 @@
 ﻿"""Supervisor lifecycle tests."""
 
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -348,6 +349,78 @@ class SupervisorCapacityPlanningTests(unittest.TestCase):
         fake_process.terminate.assert_called_once()
         fake_process.wait.assert_called_once()
         self.assertIsNone(supervisor._peer_process)
+
+    def test_peer_command_appends_no_cli_flag_when_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result_path = Path(temp_dir) / "result.json"
+            _write_result_json(
+                result_path,
+                usable_backends_by_method={"gemv": ["cpu", "cuda"]},
+            )
+            supervisor = self._build_supervisor(
+                config=AppConfig(no_cli=True),
+                result_path=result_path,
+                bootstrap_script_path=Path("/tmp/bootstrap.py"),
+            )
+        command = supervisor._peer_command("cuda")
+        self.assertIn("--no-cli", command)
+
+    def test_peer_command_omits_no_cli_flag_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result_path = Path(temp_dir) / "result.json"
+            _write_result_json(
+                result_path,
+                usable_backends_by_method={"gemv": ["cpu", "cuda"]},
+            )
+            supervisor = self._build_supervisor(
+                config=AppConfig(),
+                result_path=result_path,
+                bootstrap_script_path=Path("/tmp/bootstrap.py"),
+            )
+        command = supervisor._peer_command("cuda")
+        self.assertNotIn("--no-cli", command)
+
+    def test_spawn_peer_uses_devnull_and_detached_flags_when_no_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result_path = Path(temp_dir) / "result.json"
+            _write_result_json(
+                result_path,
+                usable_backends_by_method={"gemv": ["cpu", "cuda"]},
+            )
+            supervisor = self._build_supervisor(
+                config=AppConfig(no_cli=True),
+                result_path=result_path,
+                bootstrap_script_path=Path("/tmp/bootstrap.py"),
+            )
+        with mock.patch("app.supervisor.subprocess.Popen", return_value=mock.Mock(pid=1)) as popen_mock, \
+             mock.patch("app.supervisor.sys.platform", "win32"):
+            supervisor._spawn_peer("cuda")
+        kwargs = popen_mock.call_args.kwargs
+        self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
+        self.assertEqual(kwargs["stdout"], subprocess.DEVNULL)
+        self.assertEqual(kwargs["stderr"], subprocess.DEVNULL)
+        self.assertIn("creationflags", kwargs)
+        self.assertTrue(kwargs["creationflags"] & 0x00000008)  # DETACHED_PROCESS
+
+    def test_spawn_peer_uses_create_new_console_by_default_on_windows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result_path = Path(temp_dir) / "result.json"
+            _write_result_json(
+                result_path,
+                usable_backends_by_method={"gemv": ["cpu", "cuda"]},
+            )
+            supervisor = self._build_supervisor(
+                config=AppConfig(),
+                result_path=result_path,
+                bootstrap_script_path=Path("/tmp/bootstrap.py"),
+            )
+        with mock.patch("app.supervisor.subprocess.Popen", return_value=mock.Mock(pid=1)) as popen_mock, \
+             mock.patch("app.supervisor.sys.platform", "win32"):
+            supervisor._spawn_peer("cuda")
+        kwargs = popen_mock.call_args.kwargs
+        self.assertNotIn("stdout", kwargs)
+        self.assertNotIn("stderr", kwargs)
+        self.assertEqual(kwargs.get("creationflags"), 0x00000010)  # CREATE_NEW_CONSOLE
 
 
 if __name__ == "__main__":

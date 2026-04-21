@@ -51,3 +51,4 @@ class AppConfig:
     compute_artifact_ttl_seconds: float = DEFAULT_COMPUTE_ARTIFACT_TTL_SECONDS
     dual_purpose: bool = False
     pinned_backend: str | None = None
+    no_cli: bool = False

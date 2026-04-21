@@ -461,9 +461,17 @@ With no flags, `bootstrap.py` defaults to `--role discover`. That triggers
 this sequence:
 
 1. Verify the project `.venv` and `requirements.txt` stamp are current; run
-   `setup.py` and self-relaunch into `.venv` if not.
+   `setup.py` and self-relaunch into `.venv` if not. **This relaunch is
+   synchronous** — the parent blocks on the child with `subprocess.run`,
+   then forwards its exit code. Parent and child share the same console.
 2. Detect the platform; on Windows, optionally elevate to admin (only when
-   `--elevate-if-needed` is also set).
+   `--elevate-if-needed` is also set). **This relaunch is asynchronous and
+   detached** — `ShellExecuteW` hands off to a new elevated process with
+   its own console, and the parent exits immediately. This is a one-way
+   handoff: any future "relaunch under a different identity" flag
+   (headless / dashboard mode, alternate user, etc.) should merge into
+   this same decision point rather than introduce a third self-relaunch,
+   otherwise order and detach semantics stop composing cleanly.
 3. Make sure `compute_node/performance_metrics/result.json` exists; if it
    does not (or `--retest` / `--rebuild` was passed), run the local
    benchmark first.
@@ -507,6 +515,7 @@ python bootstrap.py --role announce --udp-port 5353 --tcp-port 52020
 | `--retry-delay SECONDS` | `0.3` | Pause between discovery attempts. |
 | `--manual-fallback / --no-manual-fallback` | `--manual-fallback` (on) | When discovery fails, prompt the operator for a manual main-node address instead of immediately promoting self. Pass `--no-manual-fallback` for non-interactive runs that should hard-fail when discovery does not find a main node. |
 | `--elevate-if-needed` | off | On Windows, relaunch the process with administrator privileges. Required when firewall rule installation needs elevation. The bootstrap auto-injects this flag into its own `.venv` self-relaunch so behavior is consistent. |
+| `--no-cli` | off | Run headless — no console window for the main process, and spawned peers (dual-purpose compute-node) also detach instead of opening their own console. Merges with `--elevate-if-needed` at step 2: when both are set, the UAC handoff uses `SW_HIDE` so the elevated child has no console; when `--no-cli` is set alone, the bootstrap detaches via `DETACHED_PROCESS` after UAC. Only Task Manager / `kill` can stop the process; logs still land in the role-specific log file. Intended for dashboard / service deployments. |
 | `--retest` | off | Regenerate the deterministic input matrices and rerun the local benchmark before startup. Use after changing dataset shapes or after replacing hardware. |
 | `--rebuild` | off | Rerun the local benchmark and force the native runner binaries to rebuild, but do **not** regenerate input matrices. Use after editing a backend's CUDA / Metal / CPU source. |
 | `--log-start-mode {normal,clean,cleanse}` | `normal` | `normal` keeps prior session logs untouched. `clean` archives previous loose log files into a dated archive directory. `cleanse` permanently removes them. |

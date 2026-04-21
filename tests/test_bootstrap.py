@@ -428,5 +428,116 @@ class BootstrapTests(unittest.TestCase):
         benchmark_ready_mock.assert_called_once_with(logger, force_retest=True, force_rebuild=True, verbose=False)
 
 
+class BootstrapNoCliTests(unittest.TestCase):
+    """Validate the ``--no-cli`` detach handoff and config propagation."""
+
+    def test_build_parser_accepts_no_cli_flag(self) -> None:
+        args = bootstrap.build_parser().parse_args(["--no-cli"])
+        self.assertTrue(args.no_cli)
+
+    def test_build_config_propagates_no_cli(self) -> None:
+        args = bootstrap.build_parser().parse_args(["--no-cli"])
+        config = bootstrap.build_config(args)
+        self.assertTrue(config.no_cli)
+
+    def test_build_config_defaults_no_cli_false(self) -> None:
+        args = bootstrap.build_parser().parse_args([])
+        config = bootstrap.build_config(args)
+        self.assertFalse(config.no_cli)
+
+    @mock.patch("bootstrap.detach_from_current_console", return_value=True)
+    @mock.patch("bootstrap.has_attached_console", return_value=True)
+    @mock.patch("bootstrap.ensure_compute_node_benchmark_ready", return_value=False)
+    @mock.patch("bootstrap.detect_os")
+    @mock.patch("bootstrap.configure_logging")
+    @mock.patch("bootstrap.ensure_bootstrap_runtime_environment", return_value=None)
+    def test_main_detaches_and_exits_zero_when_no_cli_with_console(
+        self,
+        runtime_environment_mock: mock.Mock,
+        configure_logging_mock: mock.Mock,
+        detect_os_mock: mock.Mock,
+        benchmark_ready_mock: mock.Mock,
+        has_console_mock: mock.Mock,
+        detach_mock: mock.Mock,
+    ) -> None:
+        configure_logging_mock.return_value = mock.Mock()
+        detect_os_mock.return_value = PlatformInfo(
+            platform_name="windows",
+            system="Windows",
+            release="11",
+            machine="AMD64",
+            hostname="host",
+            is_wsl=False,
+            is_admin=True,
+            can_elevate=False,
+        )
+
+        result = bootstrap.main(["--no-cli"])
+
+        self.assertEqual(result, 0)
+        detach_mock.assert_called_once()
+        benchmark_ready_mock.assert_not_called()
+
+    @mock.patch("bootstrap.detach_from_current_console")
+    @mock.patch("bootstrap.has_attached_console", return_value=False)
+    @mock.patch("bootstrap.ensure_compute_node_benchmark_ready", return_value=False)
+    @mock.patch("bootstrap.detect_os")
+    @mock.patch("bootstrap.configure_logging")
+    @mock.patch("bootstrap.ensure_bootstrap_runtime_environment", return_value=None)
+    def test_main_skips_detach_when_console_already_absent(
+        self,
+        runtime_environment_mock: mock.Mock,
+        configure_logging_mock: mock.Mock,
+        detect_os_mock: mock.Mock,
+        benchmark_ready_mock: mock.Mock,
+        has_console_mock: mock.Mock,
+        detach_mock: mock.Mock,
+    ) -> None:
+        configure_logging_mock.return_value = mock.Mock()
+        detect_os_mock.return_value = PlatformInfo(
+            platform_name="windows",
+            system="Windows",
+            release="11",
+            machine="AMD64",
+            hostname="host",
+            is_wsl=False,
+            is_admin=True,
+            can_elevate=False,
+        )
+
+        bootstrap.main(["--no-cli"])
+
+        detach_mock.assert_not_called()
+        benchmark_ready_mock.assert_called_once()
+
+    @mock.patch("bootstrap.relaunch_as_admin", return_value=True)
+    @mock.patch("bootstrap.detect_os")
+    @mock.patch("bootstrap.configure_logging")
+    @mock.patch("bootstrap.ensure_bootstrap_runtime_environment", return_value=None)
+    def test_main_passes_hidden_true_to_relaunch_when_no_cli_and_elevating(
+        self,
+        runtime_environment_mock: mock.Mock,
+        configure_logging_mock: mock.Mock,
+        detect_os_mock: mock.Mock,
+        relaunch_mock: mock.Mock,
+    ) -> None:
+        configure_logging_mock.return_value = mock.Mock()
+        detect_os_mock.return_value = PlatformInfo(
+            platform_name="windows",
+            system="Windows",
+            release="11",
+            machine="AMD64",
+            hostname="host",
+            is_wsl=False,
+            is_admin=False,
+            can_elevate=True,
+        )
+
+        result = bootstrap.main(["--no-cli", "--elevate-if-needed"])
+
+        self.assertEqual(result, 0)
+        relaunch_mock.assert_called_once_with(hidden=True)
+
+
 if __name__ == "__main__":
     unittest.main()

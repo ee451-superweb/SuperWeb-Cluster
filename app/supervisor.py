@@ -170,7 +170,7 @@ class Supervisor:
                 "cannot spawn a peer compute-node subprocess."
             )
         base_name = self.config.node_name or "node"
-        command = python_utf8_command(
+        arguments: list[str] = [
             sys.executable,
             self.bootstrap_script_path,
             "--role",
@@ -188,8 +188,39 @@ class Supervisor:
             "--data-plane-port",
             str(self.config.data_plane_port),
             "--no-manual-fallback",
-        )
-        return command
+        ]
+        if self.config.no_cli:
+            arguments.append("--no-cli")
+        return python_utf8_command(*arguments)
+
+    def _peer_popen_kwargs(self) -> dict:
+        """Return the ``Popen`` kwargs that shape the peer's console / IO state.
+
+        Default mode gives the peer its own visible console window on Windows
+        so operators and demos can see the peer's audit output directly
+        (previously peers shared the parent's console and their lines got
+        interleaved with the main-node's TRACE stream). ``--no-cli`` mode
+        instead spawns the peer fully detached with ``DEVNULL`` IO, matching
+        the parent's headless contract.
+        """
+        kwargs: dict = {}
+        if self.config.no_cli:
+            kwargs["stdin"] = subprocess.DEVNULL
+            kwargs["stdout"] = subprocess.DEVNULL
+            kwargs["stderr"] = subprocess.DEVNULL
+            if sys.platform == "win32":
+                detached = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+                no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                new_group = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+                kwargs["creationflags"] = detached | no_window | new_group
+            else:
+                kwargs["start_new_session"] = True
+            return kwargs
+
+        if sys.platform == "win32":
+            new_console = getattr(subprocess, "CREATE_NEW_CONSOLE", 0x00000010)
+            kwargs["creationflags"] = new_console
+        return kwargs
 
     def _spawn_peer(self, peer_backend: str) -> None:
         """Start the peer compute-node subprocess and record its handle.
@@ -203,8 +234,9 @@ class Supervisor:
             peer_backend,
             " ".join(command),
         )
+        popen_kwargs = self._peer_popen_kwargs()
         try:
-            self._peer_process = subprocess.Popen(command)
+            self._peer_process = subprocess.Popen(command, **popen_kwargs)
         except OSError as exc:
             self.logger.error(
                 "Failed to spawn peer compute-node for backend=%s: %s",
