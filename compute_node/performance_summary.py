@@ -205,8 +205,23 @@ def _filter_weak_processors(processors: list[RuntimeProcessorProfile]) -> list[R
     ]
 
 
-def _build_inventory_from_method_payload(payload: dict[str, Any]) -> RuntimeProcessorInventory:
-    """Build a runtime inventory from one method section of the benchmark report."""
+def _build_inventory_from_method_payload(
+    payload: dict[str, Any],
+    *,
+    pinned_backend: str | None = None,
+) -> RuntimeProcessorInventory:
+    """Build a runtime inventory from one method section of the benchmark report.
+
+    Args:
+        payload: Method-local benchmark-report payload.
+        pinned_backend: When set, retain only the ranked entry matching this
+            backend name so the runtime advertises exactly one backend's capacity.
+    """
+    ranked_entries = _iter_ranked_backend_entries(payload)
+    if pinned_backend is not None:
+        ranked_entries = [
+            (name, entry) for name, entry in ranked_entries if name == pinned_backend
+        ]
     discovered_processors = [
         RuntimeProcessorProfile(
             hardware_type=str(entry["hardware_type"]),
@@ -214,7 +229,7 @@ def _build_inventory_from_method_payload(payload: dict[str, Any]) -> RuntimeProc
             rank=int(entry["rank"]),
             best_config=dict(entry["best_config"]),
         )
-        for _, entry in _iter_ranked_backend_entries(payload)
+        for _, entry in ranked_entries
     ]
     filtered_processors = _filter_weak_processors(discovered_processors)
     return RuntimeProcessorInventory(processors=tuple(filtered_processors))
@@ -242,18 +257,26 @@ def _iter_method_payloads(payload: dict[str, Any]) -> list[tuple[str, dict[str, 
     return [(method, payload)]
 
 
-def load_runtime_method_catalog(result_path: Path | None = None) -> RuntimeMethodCatalog:
+def load_runtime_method_catalog(
+    result_path: Path | None = None,
+    *,
+    pinned_backend: str | None = None,
+) -> RuntimeMethodCatalog:
     """Load the method-indexed runtime inventory catalog from benchmark output.
 
     Args:
         result_path: Optional benchmark-result path override.
+        pinned_backend: When set, restrict every method's inventory to only the
+            named backend so dual-purpose peers advertise one backend's capacity.
 
     Returns:
         The runtime method catalog derived from the report.
     """
     payload = _read_result_payload(result_path)
     inventories = {
-        method: _build_inventory_from_method_payload(method_payload)
+        method: _build_inventory_from_method_payload(
+            method_payload, pinned_backend=pinned_backend
+        )
         for method, method_payload in _iter_method_payloads(payload)
     }
     return RuntimeMethodCatalog(method_inventories=inventories)
@@ -263,28 +286,41 @@ def load_runtime_processor_inventory(
     result_path: Path | None = None,
     *,
     method: str = METHOD_GEMV,
+    pinned_backend: str | None = None,
 ) -> RuntimeProcessorInventory:
     """Load local processor configs for one method and filter out weak processors.
 
     Args:
         result_path: Optional benchmark-result path override.
         method: Logical method name whose processors should be loaded.
+        pinned_backend: Optional backend name restricting the inventory to a
+            single backend; passed through to the method catalog loader.
 
     Returns:
         The filtered runtime processor inventory for the selected method.
     """
 
-    return load_runtime_method_catalog(result_path).inventory_for(method)
+    return load_runtime_method_catalog(
+        result_path, pinned_backend=pinned_backend
+    ).inventory_for(method)
 
 
-def load_compute_performance_summary(result_path: Path | None = None) -> ComputePerformanceSummary:
+def load_compute_performance_summary(
+    result_path: Path | None = None,
+    *,
+    pinned_backend: str | None = None,
+) -> ComputePerformanceSummary:
     """Load the filtered runtime summary that compute-node registration should advertise.
 
     Args:
         result_path: Optional benchmark-result path override.
+        pinned_backend: Optional backend name restricting the summary to one
+            backend so the main node sees just that backend's capacity.
 
     Returns:
         The compute-performance summary advertised during worker registration.
     """
 
-    return load_runtime_method_catalog(result_path).to_summary()
+    return load_runtime_method_catalog(
+        result_path, pinned_backend=pinned_backend
+    ).to_summary()

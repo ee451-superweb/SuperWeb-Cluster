@@ -41,8 +41,15 @@ class MethodHandlerRegistry:
                 close()
 
 
-def build_default_method_handlers() -> MethodHandlerRegistry:
+def build_default_method_handlers(
+    *,
+    pinned_backend: str | None = None,
+) -> MethodHandlerRegistry:
     """Create the default compute-node method handlers.
+
+    Args:
+        pinned_backend: Optional backend name restricting every handler's
+            inventory so a dual-purpose peer only executes its pinned backend.
 
     Returns:
         A method-handler registry populated with the built-in handlers.
@@ -50,7 +57,7 @@ def build_default_method_handlers() -> MethodHandlerRegistry:
 
     return MethodHandlerRegistry(
         handlers={
-            METHOD_GEMV: GemvMethodHandler(),
-            METHOD_CONV2D: Conv2dMethodHandler(),
+            METHOD_GEMV: GemvMethodHandler(pinned_backend=pinned_backend),
+            METHOD_CONV2D: Conv2dMethodHandler(pinned_backend=pinned_backend),
         }
     )

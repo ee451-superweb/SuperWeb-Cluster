@@ -80,11 +80,17 @@ DISABLED_CONV2D_BACKENDS = frozenset({"dx12"})
 CONV2D_CUDA_COOLDOWN_MS = DEFAULT_CONV2D_CUDA_COOLDOWN_MS
 
 
-def _best_backend_profile(result_path: Path) -> RuntimeProcessorProfile | None:
+def _best_backend_profile(
+    result_path: Path,
+    *,
+    pinned_backend: str | None = None,
+) -> RuntimeProcessorProfile | None:
     """Return the best usable processor profile from a method result file.
 
     Args:
         result_path: Conv2d benchmark result path for this compute node.
+        pinned_backend: Optional backend name that restricts the inventory so
+            only that backend's profile can be returned.
 
     Returns:
         The best non-disabled processor profile, or ``None``.
@@ -93,6 +99,7 @@ def _best_backend_profile(result_path: Path) -> RuntimeProcessorProfile | None:
         inventory = load_runtime_processor_inventory(
             result_path=result_path,
             method=METHOD_CONV2D,
+            pinned_backend=pinned_backend,
         )
     except (OSError, ValueError, json.JSONDecodeError):
         return None
@@ -103,15 +110,23 @@ def _best_backend_profile(result_path: Path) -> RuntimeProcessorProfile | None:
     return None
 
 
-def _best_backend_name(result_path: Path) -> str:
+def _best_backend_name(
+    result_path: Path,
+    *,
+    pinned_backend: str | None = None,
+) -> str:
     """Return the best usable backend name from the method result file.
 
     Args:
         result_path: Conv2d benchmark result path for this compute node.
+        pinned_backend: Optional backend name to prefer; when set and valid,
+            it is returned directly.
 
     Returns:
         The preferred backend name, falling back to ``cpu`` when unknown.
     """
+    if pinned_backend is not None and pinned_backend not in DISABLED_CONV2D_BACKENDS:
+        return pinned_backend
     profile = _best_backend_profile(result_path)
     if profile is not None:
         return profile.hardware_type
@@ -354,15 +369,19 @@ class Conv2dTaskExecutor:
         *,
         result_path: Path | None = None,
         dataset_root: Path | None = None,
+        pinned_backend: str | None = None,
     ) -> None:
         """Store the benchmark result path and dataset root used at runtime.
 
         Args:
             result_path: Optional conv2d benchmark result path override.
             dataset_root: Optional conv2d dataset directory override.
+            pinned_backend: Optional backend name restricting backend selection
+                at task-dispatch time for dual-purpose peers.
         """
         self.result_path = DEFAULT_CONV_RESULT_PATH if result_path is None else Path(result_path)
         self.dataset_root = DEFAULT_DATASET_DIR if dataset_root is None else Path(dataset_root)
+        self.pinned_backend = pinned_backend
 
     def execute_task(self, task: TaskAssign) -> TaskResult:
         """Execute one conv2d task and return its result payload.
@@ -378,8 +397,14 @@ class Conv2dTaskExecutor:
         spec, variant = _spec_for_task(task)
         _validate_task_against_spec(task, spec)
         _ensure_dataset_ready(self.dataset_root, variant)
-        backend_profile = _best_backend_profile(self.result_path)
-        backend_name = backend_profile.hardware_type if backend_profile is not None else _best_backend_name(self.result_path)
+        backend_profile = _best_backend_profile(
+            self.result_path, pinned_backend=self.pinned_backend
+        )
+        backend_name = (
+            backend_profile.hardware_type
+            if backend_profile is not None
+            else _best_backend_name(self.result_path, pinned_backend=self.pinned_backend)
+        )
         best_config = {} if backend_profile is None else dict(backend_profile.best_config)
         executable_path = _prepare_runner_path(backend_name)
         if not executable_path.exists():

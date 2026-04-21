@@ -73,6 +73,87 @@ class ComputeNodePerformanceSummaryTests(unittest.TestCase):
         self.assertEqual(summary.hardware_count, 1)
         self.assertEqual(summary.ranked_hardware[0].hardware_type, "cpu")
 
+    def test_pinned_backend_keeps_only_named_backend(self) -> None:
+        payload = {
+            "methods": {
+                "gemv": {
+                    "backend_results": {
+                        "cuda": {
+                            "available": True,
+                            "rank": 1,
+                            "best_config": {"block_size": 256, "tile_size": 1, "transpose": False},
+                            "best_result": {"effective_gflops": 100.0},
+                        },
+                        "cpu": {
+                            "available": True,
+                            "rank": 2,
+                            "best_config": {"workers": 8, "tile_size": 512},
+                            "best_result": {"effective_gflops": 60.0},
+                        },
+                    },
+                    "ranking": ["cuda", "cpu"],
+                },
+                "conv2d": {
+                    "backend_results": {
+                        "cuda": {
+                            "available": True,
+                            "rank": 1,
+                            "best_config": {"tile": 16},
+                            "best_result": {"effective_gflops": 200.0},
+                        },
+                        "cpu": {
+                            "available": True,
+                            "rank": 2,
+                            "best_config": {"workers": 8},
+                            "best_result": {"effective_gflops": 120.0},
+                        },
+                    },
+                    "ranking": ["cuda", "cpu"],
+                },
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result_path = Path(temp_dir) / "result.json"
+            result_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            inventory = load_runtime_processor_inventory(result_path, pinned_backend="cpu")
+            summary = load_compute_performance_summary(result_path, pinned_backend="cpu")
+
+        self.assertEqual(len(inventory.processors), 1)
+        self.assertEqual(inventory.processors[0].hardware_type, "cpu")
+        self.assertEqual(
+            {method.method for method in summary.method_summaries},
+            {"gemv", "conv2d"},
+        )
+        for method_summary in summary.method_summaries:
+            self.assertEqual(
+                [ranked.hardware_type for ranked in method_summary.ranked_hardware],
+                ["cpu"],
+                msg=f"method={method_summary.method} should only report cpu",
+            )
+
+    def test_pinned_backend_returns_empty_when_backend_absent(self) -> None:
+        payload = {
+            "backend_results": {
+                "cuda": {
+                    "available": True,
+                    "rank": 1,
+                    "best_config": {"block_size": 256},
+                    "best_result": {"effective_gflops": 100.0},
+                },
+            },
+            "ranking": ["cuda"],
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result_path = Path(temp_dir) / "result.json"
+            result_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            inventory = load_runtime_processor_inventory(result_path, pinned_backend="metal")
+
+        self.assertEqual(inventory.processors, ())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -191,14 +191,19 @@ class GemvTaskExecutor:
         inventory: RuntimeProcessorInventory | None = None,
         *,
         dataset_root: Path | None = None,
+        pinned_backend: str | None = None,
     ) -> None:
         """Load the local processor inventory and runtime dataset paths.
 
         Args:
             inventory: Optional local processor inventory override.
             dataset_root: Optional runtime dataset directory override.
+            pinned_backend: Optional backend name restricting the inventory
+                when one is not supplied directly.
         """
-        self.inventory = inventory or load_runtime_processor_inventory()
+        self.inventory = inventory or load_runtime_processor_inventory(
+            pinned_backend=pinned_backend
+        )
         self.dataset_root = INPUT_MATRIX_GENERATED_DIR if dataset_root is None else Path(dataset_root)
         self._dx12_runner = self._build_dx12_resident_runner()
         self._resolved_executable_paths: dict[str, Path] = {}

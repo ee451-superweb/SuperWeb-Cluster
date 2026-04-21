@@ -12,6 +12,7 @@ import signal
 import socket
 from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
 
 from adapters.audit_log import write_audit_event
@@ -79,14 +80,18 @@ def _shutdown_task_process_pool(task_process_pool, *, has_in_flight_tasks: bool)
             join(timeout=1.0)
 
 
-def _execute_task_in_subprocess(task):
+def _execute_task_in_subprocess(task, pinned_backend: str | None = None):
     """Use this helper when one task should run in its own worker process.
 
     Args: task decoded TaskAssign payload routed to the task executor.
+        pinned_backend Optional backend the task runtime must restrict itself
+        to so a dual-purpose peer only executes its assigned backend.
     Returns: The task-execution result produced by the method handler.
     """
 
-    task_executor = TaskExecutionRouter(build_default_method_handlers())
+    task_executor = TaskExecutionRouter(
+        build_default_method_handlers(pinned_backend=pinned_backend)
+    )
     try:
         return task_executor.execute_task(task)
     finally:
@@ -151,9 +156,10 @@ class ComputeNodeRuntime:
             A ``(hardware, performance)`` tuple ready for ``REGISTER_WORKER``.
         """
         hardware = collect_hardware_profile(self.main_node_host, self.main_node_port)
-        legacy_inventory = load_runtime_processor_inventory()
+        pinned_backend = self.config.pinned_backend
+        legacy_inventory = load_runtime_processor_inventory(pinned_backend=pinned_backend)
         performance = legacy_inventory.to_legacy_summary()
-        multi_method_summary = load_compute_performance_summary()
+        multi_method_summary = load_compute_performance_summary(pinned_backend=pinned_backend)
         if multi_method_summary.method_summaries:
             performance = multi_method_summary
         return hardware, performance
@@ -321,7 +327,10 @@ class ComputeNodeRuntime:
                     process_pool=task_process_pool,
                     thread_pool=task_thread_pool,
                     task_executor=task_executor,
-                    subprocess_entrypoint=_execute_task_in_subprocess,
+                    subprocess_entrypoint=partial(
+                        _execute_task_in_subprocess,
+                        pinned_backend=self.config.pinned_backend,
+                    ),
                     artifact_manager=artifact_manager,
                 ):
                     continue
