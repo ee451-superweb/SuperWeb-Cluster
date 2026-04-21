@@ -18,6 +18,7 @@ from adapters.audit_log import write_audit_event
 from app.config import AppConfig
 from app.constants import (
     APP_NAME,
+    BACKEND_CHOICES,
     COMPUTE_NODE_NAME,
     DEFAULT_NODE_NAME,
     DEFAULT_DISCOVERY_ATTEMPTS,
@@ -376,6 +377,26 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable verbose logging, including DEBUG-level bootstrap output.",
     )
+    parser.add_argument(
+        "--dual-purpose",
+        action="store_true",
+        help=(
+            "Main-node also participates in compute by spawning a peer compute-node process "
+            "pinned to the best available GPU backend. Ignored when this process resolves to "
+            "a compute-node role."
+        ),
+    )
+    parser.add_argument(
+        "--backend",
+        choices=BACKEND_CHOICES,
+        default=None,
+        help=(
+            "Pin this compute-node to a specific backend. Ignored when this process resolves "
+            "to the main-node role. When omitted and this process resolves to a compute-node, "
+            "the supervisor picks the best available GPU (or cpu if no GPU is present) and "
+            "spawns a peer compute-node for the complementary backend."
+        ),
+    )
     return parser
 
 
@@ -400,6 +421,8 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         discovery_attempts=args.discover_attempts,
         discovery_retry_delay=args.retry_delay,
         enable_manual_fallback=args.manual_fallback,
+        dual_purpose=bool(getattr(args, "dual_purpose", False)),
+        pinned_backend=getattr(args, "backend", None),
     )
 @trace_function
 def ensure_compute_node_benchmark_ready(
@@ -560,6 +583,8 @@ def main(argv: list[str] | None = None) -> int:
             platform_info=platform_info,
             firewall_status=firewall_status,
             logger=logger,
+            benchmark_result_path=BENCHMARK_RESULT_PATH,
+            bootstrap_script_path=PROJECT_ROOT / "bootstrap.py",
         )
 
         # The supervisor owns the rest of the kickoff lifecycle, including

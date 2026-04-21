@@ -49,3 +49,5 @@ class AppConfig:
     artifact_chunk_size: int = DEFAULT_ARTIFACT_CHUNK_SIZE
     artifact_transfer_timeout: float = DEFAULT_ARTIFACT_TRANSFER_TIMEOUT
     compute_artifact_ttl_seconds: float = DEFAULT_COMPUTE_ARTIFACT_TTL_SECONDS
+    dual_purpose: bool = False
+    pinned_backend: str | None = None

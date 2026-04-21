@@ -1,11 +1,26 @@
 ﻿"""Supervisor lifecycle tests."""
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from common.types import DiscoveryResult, FirewallStatus, PlatformInfo
 from app.config import AppConfig
 from app.supervisor import Supervisor
+
+
+def _write_result_json(path: Path, *, usable_backends_by_method: dict[str, list[str]]) -> None:
+    """Create a minimal result.json with the requested per-method backend lists."""
+    payload = {
+        "schema_version": 5,
+        "methods": {
+            method_name: {"usable_backends": list(backends)}
+            for method_name, backends in usable_backends_by_method.items()
+        },
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
 
 
 class SupervisorTests(unittest.TestCase):
@@ -118,6 +133,221 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(random_uniform_mock.call_count, 2)
         random_uniform_mock.assert_any_call(1.0, 3.0)
         self.assertEqual(sleep_mock.call_args_list, [mock.call(1.75), mock.call(1.75)])
+
+
+class SupervisorCapacityPlanningTests(unittest.TestCase):
+    """Validate flag validation and peer-spawn planning against result.json."""
+
+    def _build_supervisor(
+        self,
+        *,
+        config: AppConfig,
+        result_path: Path | None = None,
+        bootstrap_script_path: Path | None = None,
+    ) -> Supervisor:
+        return Supervisor(
+            config=config,
+            platform_info=PlatformInfo(
+                platform_name="windows",
+                system="Windows",
+                release="11",
+                machine="AMD64",
+                hostname="mdong-zephy14",
+                is_wsl=False,
+                is_admin=False,
+                can_elevate=True,
+            ),
+            firewall_status=FirewallStatus(
+                supported=True,
+                applied=False,
+                needs_admin=False,
+                backend="windows",
+                message="ok",
+            ),
+            logger=mock.Mock(),
+            benchmark_result_path=result_path,
+            bootstrap_script_path=bootstrap_script_path,
+        )
+
+    def test_init_rejects_pinned_backend_absent_from_result_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result_path = Path(temp_dir) / "result.json"
+            _write_result_json(result_path, usable_backends_by_method={"gemv": ["cpu"]})
+            with self.assertRaises(RuntimeError) as ctx:
+                self._build_supervisor(
+                    config=AppConfig(pinned_backend="cuda"),
+                    result_path=result_path,
+                )
+        self.assertIn("cuda", str(ctx.exception))
+        self.assertIn("cpu", str(ctx.exception))
+
+    def test_init_rejects_pinned_backend_when_result_json_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            missing = Path(temp_dir) / "absent.json"
+            with self.assertRaises(RuntimeError) as ctx:
+                self._build_supervisor(
+                    config=AppConfig(pinned_backend="cpu"),
+                    result_path=missing,
+                )
+        self.assertIn("re-run the local benchmark", str(ctx.exception))
+
+    def test_init_accepts_pinned_backend_when_available(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result_path = Path(temp_dir) / "result.json"
+            _write_result_json(
+                result_path,
+                usable_backends_by_method={"gemv": ["cpu", "cuda"], "conv2d": ["cpu", "cuda"]},
+            )
+            supervisor = self._build_supervisor(
+                config=AppConfig(pinned_backend="cuda"),
+                result_path=result_path,
+            )
+        self.assertEqual(supervisor.available_backends, frozenset({"cpu", "cuda"}))
+
+    def test_plan_capacity_main_with_dual_purpose_picks_best_gpu(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result_path = Path(temp_dir) / "result.json"
+            _write_result_json(
+                result_path,
+                usable_backends_by_method={"gemv": ["cpu", "cuda"]},
+            )
+            supervisor = self._build_supervisor(
+                config=AppConfig(dual_purpose=True),
+                result_path=result_path,
+            )
+        self.assertEqual(supervisor._plan_capacity("main"), (None, "cuda"))
+
+    def test_plan_capacity_main_with_dual_purpose_warns_when_no_gpu(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result_path = Path(temp_dir) / "result.json"
+            _write_result_json(result_path, usable_backends_by_method={"gemv": ["cpu"]})
+            supervisor = self._build_supervisor(
+                config=AppConfig(dual_purpose=True),
+                result_path=result_path,
+            )
+            self.assertEqual(supervisor._plan_capacity("main"), (None, None))
+        supervisor.logger.warning.assert_called_once()
+
+    def test_plan_capacity_main_without_dual_purpose_no_peer(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result_path = Path(temp_dir) / "result.json"
+            _write_result_json(
+                result_path,
+                usable_backends_by_method={"gemv": ["cpu", "cuda"]},
+            )
+            supervisor = self._build_supervisor(
+                config=AppConfig(dual_purpose=False),
+                result_path=result_path,
+            )
+        self.assertEqual(supervisor._plan_capacity("main"), (None, None))
+
+    def test_plan_capacity_compute_default_pins_gpu_and_spawns_cpu_peer(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result_path = Path(temp_dir) / "result.json"
+            _write_result_json(
+                result_path,
+                usable_backends_by_method={"gemv": ["cpu", "cuda"]},
+            )
+            supervisor = self._build_supervisor(
+                config=AppConfig(),
+                result_path=result_path,
+            )
+        self.assertEqual(supervisor._plan_capacity("compute"), ("cuda", "cpu"))
+
+    def test_plan_capacity_compute_default_no_gpu_pins_cpu_no_peer(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result_path = Path(temp_dir) / "result.json"
+            _write_result_json(result_path, usable_backends_by_method={"gemv": ["cpu"]})
+            supervisor = self._build_supervisor(
+                config=AppConfig(),
+                result_path=result_path,
+            )
+        self.assertEqual(supervisor._plan_capacity("compute"), ("cpu", None))
+
+    def test_plan_capacity_compute_explicit_pin_no_peer(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result_path = Path(temp_dir) / "result.json"
+            _write_result_json(
+                result_path,
+                usable_backends_by_method={"gemv": ["cpu", "cuda"]},
+            )
+            supervisor = self._build_supervisor(
+                config=AppConfig(pinned_backend="cpu"),
+                result_path=result_path,
+            )
+        self.assertEqual(supervisor._plan_capacity("compute"), ("cpu", None))
+
+    def test_peer_command_forwards_network_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result_path = Path(temp_dir) / "result.json"
+            _write_result_json(
+                result_path,
+                usable_backends_by_method={"gemv": ["cpu", "cuda"]},
+            )
+            supervisor = self._build_supervisor(
+                config=AppConfig(
+                    node_name="main-node",
+                    multicast_group="239.1.2.3",
+                    udp_port=5454,
+                    tcp_port=52100,
+                    data_plane_port=52101,
+                ),
+                result_path=result_path,
+                bootstrap_script_path=Path("/tmp/bootstrap.py"),
+            )
+        command = supervisor._peer_command("cuda")
+        self.assertIn("--role", command)
+        self.assertEqual(command[command.index("--role") + 1], "discover")
+        self.assertEqual(command[command.index("--backend") + 1], "cuda")
+        self.assertEqual(command[command.index("--node-name") + 1], "main-node-peer-cuda")
+        self.assertEqual(command[command.index("--multicast-group") + 1], "239.1.2.3")
+        self.assertEqual(command[command.index("--udp-port") + 1], "5454")
+        self.assertEqual(command[command.index("--tcp-port") + 1], "52100")
+        self.assertEqual(command[command.index("--data-plane-port") + 1], "52101")
+        self.assertIn("--no-manual-fallback", command)
+
+    def test_spawn_peer_records_process_handle(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result_path = Path(temp_dir) / "result.json"
+            _write_result_json(
+                result_path,
+                usable_backends_by_method={"gemv": ["cpu", "cuda"]},
+            )
+            supervisor = self._build_supervisor(
+                config=AppConfig(),
+                result_path=result_path,
+                bootstrap_script_path=Path("/tmp/bootstrap.py"),
+            )
+        fake_process = mock.Mock(pid=4242)
+        with mock.patch("app.supervisor.subprocess.Popen", return_value=fake_process) as popen_mock:
+            supervisor._spawn_peer("cpu")
+        popen_mock.assert_called_once()
+        self.assertIs(supervisor._peer_process, fake_process)
+        self.assertEqual(supervisor._peer_backend, "cpu")
+
+    def test_terminate_peer_sends_terminate_then_waits(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result_path = Path(temp_dir) / "result.json"
+            _write_result_json(
+                result_path,
+                usable_backends_by_method={"gemv": ["cpu", "cuda"]},
+            )
+            supervisor = self._build_supervisor(
+                config=AppConfig(),
+                result_path=result_path,
+                bootstrap_script_path=Path("/tmp/bootstrap.py"),
+            )
+        fake_process = mock.Mock(pid=4242)
+        fake_process.poll.return_value = None
+        fake_process.wait.return_value = 0
+        supervisor._peer_process = fake_process
+        supervisor._peer_backend = "cpu"
+
+        supervisor._terminate_peer()
+
+        fake_process.terminate.assert_called_once()
+        fake_process.wait.assert_called_once()
+        self.assertIsNone(supervisor._peer_process)
 
 
 if __name__ == "__main__":
