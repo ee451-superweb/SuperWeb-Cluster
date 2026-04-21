@@ -187,5 +187,80 @@ class LargeDataTransferTests(unittest.TestCase):
                 manager.close()
 
 
+class TransferTimingInstrumentationTests(unittest.TestCase):
+    """Use this to pin the per-stage timing fields in transport log lines.
+
+    The fields let operators split the fetch/upload wall clock across
+    recv (pure socket), write (disk) and digest (SHA256) so that gaps
+    between business-level throughput and raw iperf3 numbers are
+    attributable.
+    """
+
+    def test_fetch_log_reports_recv_write_digest_ms(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = ArtifactManager(
+                root_dir=Path(temp_dir) / "artifacts",
+                public_host="127.0.0.1",
+                chunk_size=16 * 1024,
+            )
+            try:
+                payload = (b"timing-" * 8192)[:65536]
+                descriptor = manager.publish_bytes(
+                    payload,
+                    producer_node_id="main-node",
+                    artifact_id="timing-fetch",
+                )
+                with self.assertLogs("transport.large_data_transfer", level="INFO") as cm:
+                    manager.fetch_bytes(descriptor, timeout=5.0)
+            finally:
+                manager.close()
+            fetched_lines = [line for line in cm.output if "artifact fetched" in line]
+            self.assertTrue(fetched_lines, "expected at least one 'artifact fetched' log line")
+            self.assertIn("recv_ms=", fetched_lines[-1])
+            self.assertIn("write_ms=", fetched_lines[-1])
+            self.assertIn("digest_ms=", fetched_lines[-1])
+
+    def test_upload_log_reports_recv_write_digest_ms(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = ArtifactManager(
+                root_dir=Path(temp_dir) / "artifacts",
+                public_host="127.0.0.1",
+                chunk_size=16 * 1024,
+            )
+            try:
+                payload = (b"upload-timing-" * 4096)[:32768]
+                checksum = hashlib.sha256(payload).hexdigest()
+                future = manager.register_upload_slot(
+                    upload_id="timing-upload",
+                    expected_size=len(payload),
+                    expected_checksum=checksum,
+                )
+                with self.assertLogs("transport.large_data_transfer", level="INFO") as cm:
+                    with socket.create_connection(("127.0.0.1", manager.port), timeout=5.0) as sock:
+                        sock.settimeout(5.0)
+                        sock.sendall(
+                            encode_deliver(
+                                upload_id="timing-upload",
+                                size_bytes=len(payload),
+                                checksum=checksum,
+                                content_type="application/octet-stream",
+                            )
+                        )
+                        chunk_size = 16 * 1024
+                        for offset in range(0, len(payload), chunk_size):
+                            sock.sendall(
+                                encode_chunk(offset=offset, data=payload[offset:offset + chunk_size])
+                            )
+                        sock.sendall(encode_end(size_bytes=len(payload)))
+                    future.result(timeout=5.0)
+            finally:
+                manager.close()
+            accepted_lines = [line for line in cm.output if "upload accepted" in line]
+            self.assertTrue(accepted_lines, "expected at least one 'upload accepted' log line")
+            self.assertIn("recv_ms=", accepted_lines[-1])
+            self.assertIn("write_ms=", accepted_lines[-1])
+            self.assertIn("digest_ms=", accepted_lines[-1])
+
+
 if __name__ == "__main__":
     unittest.main()

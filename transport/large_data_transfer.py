@@ -13,6 +13,7 @@ import logging
 import os
 import socket
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -278,6 +279,9 @@ class LargeDataTransferServer:
         tmp_path = slot.destination_path.with_suffix(slot.destination_path.suffix + ".tmp")
         digest = hashlib.sha256()
         bytes_written = 0
+        recv_ns = 0
+        write_ns = 0
+        digest_ns = 0
         try:
             with tmp_path.open("wb") as handle:
                 while True:
@@ -287,9 +291,16 @@ class LargeDataTransferServer:
                         rest = _recv_exactly(conn, CHUNK_HEADER.size - 6)
                         chunk_header = header + rest
                         _, _, _, _offset, length = CHUNK_HEADER.unpack(chunk_header)
-                        _, payload = decode_chunk(chunk_header, _recv_exactly(conn, length))
+                        _t = time.perf_counter_ns()
+                        raw_payload = _recv_exactly(conn, length)
+                        recv_ns += time.perf_counter_ns() - _t
+                        _, payload = decode_chunk(chunk_header, raw_payload)
+                        _t = time.perf_counter_ns()
                         handle.write(payload)
+                        write_ns += time.perf_counter_ns() - _t
+                        _t = time.perf_counter_ns()
                         digest.update(payload)
+                        digest_ns += time.perf_counter_ns() - _t
                         bytes_written += len(payload)
                     elif next_type == int(MSG_END):
                         rest = _recv_exactly(conn, END_HEADER.size - 6)
@@ -313,11 +324,14 @@ class LargeDataTransferServer:
                 raise ValueError("upload checksum mismatch after END")
             os.replace(tmp_path, slot.destination_path)
             logger.info(
-                "upload accepted upload_id=%s bytes=%s declared_checksum=%s local_checksum=%s",
+                "upload accepted upload_id=%s bytes=%s declared_checksum=%s local_checksum=%s recv_ms=%d write_ms=%d digest_ms=%d",
                 frame.upload_id,
                 bytes_written,
                 slot.expected_checksum or "<none>",
                 local_checksum,
+                recv_ns // 1_000_000,
+                write_ns // 1_000_000,
+                digest_ns // 1_000_000,
             )
         except Exception as exc:  # noqa: BLE001 — we rethrow via the slot future
             tmp_path.unlink(missing_ok=True)
@@ -361,6 +375,9 @@ def fetch_artifact_to_file(
     tmp_path = destination_path.with_suffix(destination_path.suffix + ".tmp")
     digest = hashlib.sha256()
     bytes_written = 0
+    recv_ns = 0
+    write_ns = 0
+    digest_ns = 0
 
     with socket.create_connection((descriptor.transfer_host, descriptor.transfer_port), timeout=timeout) as sock:
         sock.settimeout(timeout)
@@ -389,9 +406,16 @@ def fetch_artifact_to_file(
                     rest = _recv_exactly(sock, CHUNK_HEADER.size - 6)
                     chunk_header = header + rest
                     _, _, _, _offset, length = CHUNK_HEADER.unpack(chunk_header)
-                    _offset, payload = decode_chunk(chunk_header, _recv_exactly(sock, length))
+                    _t = time.perf_counter_ns()
+                    raw_payload = _recv_exactly(sock, length)
+                    recv_ns += time.perf_counter_ns() - _t
+                    _offset, payload = decode_chunk(chunk_header, raw_payload)
+                    _t = time.perf_counter_ns()
                     handle.write(payload)
+                    write_ns += time.perf_counter_ns() - _t
+                    _t = time.perf_counter_ns()
                     digest.update(payload)
+                    digest_ns += time.perf_counter_ns() - _t
                     bytes_written += len(payload)
                 elif message_type == 4:
                     rest = _recv_exactly(sock, END_HEADER.size - 6)
@@ -416,12 +440,15 @@ def fetch_artifact_to_file(
         raise ValueError("artifact size mismatch")
     os.replace(tmp_path, destination_path)
     logger.info(
-        "artifact fetched artifact_id=%s bytes=%s destination=%s server_checksum=%s local_checksum=%s",
+        "artifact fetched artifact_id=%s bytes=%s destination=%s server_checksum=%s local_checksum=%s recv_ms=%d write_ms=%d digest_ms=%d",
         descriptor.artifact_id,
         bytes_written,
         destination_path,
         expected_checksum,
         checksum,
+        recv_ns // 1_000_000,
+        write_ns // 1_000_000,
+        digest_ns // 1_000_000,
     )
     return destination_path
 
