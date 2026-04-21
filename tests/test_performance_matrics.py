@@ -326,7 +326,7 @@ class PerformanceMatricsTests(unittest.TestCase):
         self.assertEqual(sha256_hex, "parallel-sha256")
         parallel_writer.assert_called_once()
 
-    def test_windows_default_backend_order_routes_gpu_by_display_adapter(self) -> None:
+    def test_windows_default_backend_order_pairs_cpu_with_detected_gpu(self) -> None:
         with (
             mock.patch(
                 "compute_node.performance_metrics.gemv.backends.os.name",
@@ -339,9 +339,9 @@ class PerformanceMatricsTests(unittest.TestCase):
         ):
             names = [backend.name for backend in backend_registry.build_backends()]
 
-        self.assertEqual(names, ["cuda"])
+        self.assertEqual(names, ["cpu", "cuda"])
 
-    def test_spatial_windows_default_backend_order_routes_gpu_by_display_adapter(self) -> None:
+    def test_spatial_windows_default_backend_order_pairs_cpu_with_detected_gpu(self) -> None:
         with (
             mock.patch(
                 "compute_node.performance_metrics.conv2d.backends.os.name",
@@ -354,7 +354,7 @@ class PerformanceMatricsTests(unittest.TestCase):
         ):
             names = [backend.name for backend in conv2d_backend_registry.build_backends()]
 
-        self.assertEqual(names, ["cuda"])
+        self.assertEqual(names, ["cpu", "cuda"])
 
     def test_windows_default_backend_order_falls_back_to_cpu_without_gpu(self) -> None:
         with (

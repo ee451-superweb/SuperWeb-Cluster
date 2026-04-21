@@ -44,20 +44,20 @@ def _known_backend_factories() -> dict[str, type[object]]:
 def _default_backend_names() -> list[str]:
     """Pick the backends that should run automatically.
 
-    CUDA is treated as the one GPU path that should suppress CPU benchmarking
-    by default. Metal stays paired with CPU so macOS runs still keep a CPU
-    baseline beside the Metal result. DX12 stays excluded entirely because the
-    DX12 module is currently considered unsafe to run.
+    CPU always runs so the cluster's dynamic-capacity logic can rely on it as
+    the universal fallback backend. When a usable GPU path is detected it is
+    added alongside CPU. DX12 stays excluded entirely because the DX12 module
+    is currently considered unsafe to run.
     """
     if os.name == "nt":
         nvidia_adapter_name, _ = detect_nvidia_windows_adapter()
-        return ["cuda"] if nvidia_adapter_name is not None else ["cpu"]
+        return ["cpu", "cuda"] if nvidia_adapter_name is not None else ["cpu"]
 
     if sys.platform == "darwin":
         return ["cpu", "metal"]
 
     if shutil.which("nvidia-smi") is not None:
-        return ["cuda"]
+        return ["cpu", "cuda"]
 
     return ["cpu"]
 
