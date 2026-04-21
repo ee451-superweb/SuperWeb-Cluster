@@ -29,8 +29,10 @@ from app.constants import (
     STATUS_OK,
 )
 from app.trace_utils import trace_function
+from common.work_partition import partition_contiguous_range
 from compute_node.input_matrix.gemv import build_input_matrix_spec as build_gemv_input_matrix_spec
 from compute_node.compute_methods.conv2d.executor import load_named_workload_spec
+from main_node.dispatcher import WorkerTaskSlice
 from wire.internal_protocol.runtime_transport import (
     GemvResponsePayload,
     Conv2dResponsePayload,
@@ -189,6 +191,191 @@ class ClientRequestHandler:
                     os.unlink(task_result.local_result_path)
                 except FileNotFoundError:
                     pass
+
+    def _build_retry_assignments(
+        self,
+        request,
+        failed_slice: WorkerTaskSlice,
+        surviving_connections,
+        original_weights: dict[str, float],
+        retry_counter: list[int],
+    ) -> list[WorkerTaskSlice]:
+        """Re-partition a failed slice's range across surviving workers.
+
+        Why: a single worker dying must not sink the entire client request — the
+        dispatcher already partitioned the request proportional to effective
+        GFLOPS, so the fairest redispatch is to split the failed range across
+        the remaining workers using those same weights. New task/artifact ids
+        are minted per retry so the wire protocol and connection mailboxes can
+        route messages for original and retry slices to the same worker without
+        id collisions.
+        """
+        if failed_slice.method == METHOD_GEMV:
+            range_start, range_end = failed_slice.row_start, failed_slice.row_end
+        else:
+            range_start, range_end = failed_slice.start_oc, failed_slice.end_oc
+        if range_end <= range_start:
+            return []
+
+        weights = [float(original_weights.get(conn.peer_id, 0.0)) for conn in surviving_connections]
+        if sum(weights) <= 0.0:
+            weights = [1.0] * len(surviving_connections)
+
+        partitions = partition_contiguous_range(range_start, range_end, weights)
+
+        retry_slices: list[WorkerTaskSlice] = []
+        for partition, connection in zip(partitions, surviving_connections):
+            if partition.end <= partition.start:
+                continue
+            retry_index = retry_counter[0]
+            retry_counter[0] += 1
+            retry_task_id = f"{request.request_id}-r{retry_index}"
+            if failed_slice.method == METHOD_GEMV:
+                retry_slices.append(
+                    WorkerTaskSlice(
+                        connection=connection,
+                        task_id=retry_task_id,
+                        artifact_id=f"{retry_task_id}:{connection.runtime_id}",
+                        row_start=partition.start,
+                        row_end=partition.end,
+                        effective_gflops=float(original_weights.get(connection.peer_id, 0.0)),
+                        method=METHOD_GEMV,
+                    )
+                )
+            else:
+                retry_slices.append(
+                    WorkerTaskSlice(
+                        connection=connection,
+                        task_id=retry_task_id,
+                        artifact_id=f"{retry_task_id}:{connection.runtime_id}:0",
+                        row_start=0,
+                        row_end=0,
+                        start_oc=partition.start,
+                        end_oc=partition.end,
+                        effective_gflops=float(original_weights.get(connection.peer_id, 0.0)),
+                        method=METHOD_CONV2D,
+                    )
+                )
+        return retry_slices
+
+    def _run_assignments_with_failover(self, request, assignments: list[WorkerTaskSlice]):
+        """Execute worker assignments with mid-task failover.
+
+        Submits every assignment to a thread pool. When a worker slice raises,
+        the failed worker is marked dead and its range is re-sliced across the
+        still-healthy workers proportional to their original effective GFLOPS.
+        The request only fails when no healthy workers remain.
+
+        Returns a list of ``(TaskResult, WorkerTiming)`` outcomes whose union of
+        ranges tiles the original request range, ready for the aggregator.
+        """
+        if not assignments:
+            return []
+
+        original_weights = {
+            assignment.connection.peer_id: assignment.effective_gflops
+            for assignment in assignments
+        }
+
+        def _peer_id(assignment: WorkerTaskSlice) -> str:
+            return assignment.connection.peer_id
+
+        def _unique_survivors(failed_peer_ids: set[str]):
+            """Return one connection per live peer from the assignment pool."""
+            unique: list = []
+            seen: set[str] = set()
+            for assignment in assignments:
+                peer_id = _peer_id(assignment)
+                if peer_id in failed_peer_ids or peer_id in seen:
+                    continue
+                seen.add(peer_id)
+                unique.append(assignment.connection)
+            return unique
+
+        outcomes: list = []
+        failed_peer_ids: set[str] = set()
+        retry_counter = [0]
+        pending: dict = {}
+
+        def _slice_scope(slice_: WorkerTaskSlice) -> str:
+            if request.method == METHOD_CONV2D:
+                return f"oc={slice_.start_oc}:{slice_.end_oc}"
+            return f"rows={slice_.row_start}:{slice_.row_end}"
+
+        def _submit_retry(slice_: WorkerTaskSlice):
+            """Submit one retry slice and surface any queue-wait to operators.
+
+            When the survivor's ``task_lock`` is already held by an in-flight
+            original slice, the retry will block inside ``run_worker_task_slice``
+            until that lock releases. Emit one audit line at submit time so the
+            log shows *why* there is a gap between ``redispatch`` and the next
+            ``TASK_ASSIGN`` line for this retry task.
+            """
+            target_lock = getattr(slice_.connection, "task_lock", None)
+            if target_lock is not None and getattr(target_lock, "locked", lambda: False)():
+                write_audit_event(
+                    f"worker failover retry queued request_id={request.request_id} "
+                    f"retry_task_id={slice_.task_id} "
+                    f"target_runtime_id={slice_.connection.runtime_id} "
+                    f"reason=connection busy with prior slice on this worker",
+                    stdout=True,
+                    logger=self.logger,
+                )
+            return executor.submit(self.run_worker_task_slice, request, slice_)
+
+        max_workers = max(len(assignments), 1) * 2
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="task-dispatch") as executor:
+            for assignment in assignments:
+                future = executor.submit(self.run_worker_task_slice, request, assignment)
+                pending[future] = assignment
+
+            while pending:
+                done, _ = concurrent.futures.wait(
+                    pending,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+                for future in done:
+                    failed_assignment = pending.pop(future)
+                    try:
+                        outcomes.append(future.result())
+                        continue
+                    except (OSError, ValueError, ConnectionError, RuntimeError) as exc:
+                        peer_id = _peer_id(failed_assignment)
+                        failed_peer_ids.add(peer_id)
+                        write_audit_event(
+                            f"worker failover triggered request_id={request.request_id} "
+                            f"failed_runtime_id={failed_assignment.connection.runtime_id} "
+                            f"failed_task_id={failed_assignment.task_id} "
+                            f"method={request.method} error={exc}",
+                            stdout=True,
+                            logger=self.logger,
+                        )
+                        survivors = _unique_survivors(failed_peer_ids)
+                        if not survivors:
+                            raise RuntimeError(
+                                f"request {request.request_id} failed: all workers failed during "
+                                f"task execution, no surviving worker to redispatch to "
+                                f"(last error: {exc})"
+                            ) from exc
+                        retry_slices = self._build_retry_assignments(
+                            request,
+                            failed_assignment,
+                            survivors,
+                            original_weights,
+                            retry_counter,
+                        )
+                        for retry_slice in retry_slices:
+                            write_audit_event(
+                                f"worker failover redispatch request_id={request.request_id} "
+                                f"retry_task_id={retry_slice.task_id} "
+                                f"target_runtime_id={retry_slice.connection.runtime_id} "
+                                f"{_slice_scope(retry_slice)}",
+                                logger=self.logger,
+                            )
+                            future = _submit_retry(retry_slice)
+                            pending[future] = retry_slice
+
+        return outcomes
 
     @trace_function
     def build_client_response_for_request(
@@ -408,8 +595,7 @@ class ClientRequestHandler:
             dispatch_done_at = time.monotonic()
             if request.method == METHOD_GEMV:
                 task_window_started_at = time.monotonic()
-                with ThreadPoolExecutor(max_workers=len(assignments), thread_name_prefix="task-dispatch") as executor:
-                    outcomes = list(executor.map(lambda item: self.run_worker_task_slice(request, item), assignments))
+                outcomes = self._run_assignments_with_failover(request, assignments)
                 task_window_done_at = time.monotonic()
                 task_results = [outcome[0] for outcome in outcomes]
                 worker_timings = tuple(outcome[1] for outcome in outcomes)
@@ -456,8 +642,7 @@ class ClientRequestHandler:
                     else self.artifact_manager.root_dir / f"{request.request_id}.bin"
                 )
                 task_window_started_at = time.monotonic()
-                with ThreadPoolExecutor(max_workers=len(assignments), thread_name_prefix="task-dispatch") as executor:
-                    outcomes = list(executor.map(lambda item: self.run_worker_task_slice(request, item), assignments))
+                outcomes = self._run_assignments_with_failover(request, assignments)
                 task_window_done_at = time.monotonic()
                 task_results = [outcome[0] for outcome in outcomes]
                 worker_timings = tuple(outcome[1] for outcome in outcomes)
