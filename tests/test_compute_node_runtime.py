@@ -514,5 +514,50 @@ class ComputeNodeRuntimeTests(unittest.TestCase):
         worker_process.join.assert_called_once_with(timeout=1.0)
 
 
+class SubprocessEntrypointPinnedBackendTests(unittest.TestCase):
+    """Validate that the subprocess task entrypoint forwards pinned_backend."""
+
+    def test_execute_task_in_subprocess_forwards_pinned_backend(self) -> None:
+        captured_kwargs: dict[str, object] = {}
+
+        fake_router = mock.Mock()
+        fake_router.execute_task.return_value = "result-sentinel"
+        fake_registry = mock.Mock()
+
+        def _fake_build_handlers(**kwargs):
+            captured_kwargs.update(kwargs)
+            return fake_registry
+
+        with (
+            mock.patch.object(runtime_module, "build_default_method_handlers", side_effect=_fake_build_handlers),
+            mock.patch.object(runtime_module, "TaskExecutionRouter", return_value=fake_router),
+        ):
+            result = runtime_module._execute_task_in_subprocess(
+                task=mock.sentinel.task,
+                pinned_backend="cpu",
+            )
+
+        self.assertEqual(result, "result-sentinel")
+        self.assertEqual(captured_kwargs, {"pinned_backend": "cpu"})
+        fake_router.close.assert_called_once_with()
+
+    def test_execute_task_in_subprocess_defaults_to_none_backend(self) -> None:
+        captured_kwargs: dict[str, object] = {}
+        fake_router = mock.Mock()
+        fake_router.execute_task.return_value = "ok"
+
+        def _fake_build_handlers(**kwargs):
+            captured_kwargs.update(kwargs)
+            return mock.Mock()
+
+        with (
+            mock.patch.object(runtime_module, "build_default_method_handlers", side_effect=_fake_build_handlers),
+            mock.patch.object(runtime_module, "TaskExecutionRouter", return_value=fake_router),
+        ):
+            runtime_module._execute_task_in_subprocess(task=mock.sentinel.task)
+
+        self.assertEqual(captured_kwargs, {"pinned_backend": None})
+
+
 if __name__ == "__main__":
     unittest.main()

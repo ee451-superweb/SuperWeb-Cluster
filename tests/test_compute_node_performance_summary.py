@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from compute_node.compute_methods.conv2d import executor as spatial_executor
 from compute_node.performance_summary import load_compute_performance_summary, load_runtime_processor_inventory
 
 
@@ -153,6 +154,47 @@ class ComputeNodePerformanceSummaryTests(unittest.TestCase):
             inventory = load_runtime_processor_inventory(result_path, pinned_backend="metal")
 
         self.assertEqual(inventory.processors, ())
+
+
+class Conv2dPinnedBackendSelectionTests(unittest.TestCase):
+    """Ensure conv2d backend selection respects pinned_backend at dispatch time."""
+
+    def _write_payload(self, directory: Path) -> Path:
+        payload = {
+            "methods": {
+                "conv2d": {
+                    "backend_results": {
+                        "cuda": {
+                            "available": True,
+                            "rank": 1,
+                            "best_config": {"tile": 16},
+                            "best_result": {"effective_gflops": 200.0},
+                        },
+                        "cpu": {
+                            "available": True,
+                            "rank": 2,
+                            "best_config": {"workers": 8},
+                            "best_result": {"effective_gflops": 120.0},
+                        },
+                    },
+                    "ranking": ["cuda", "cpu"],
+                },
+            },
+        }
+        result_path = directory / "result.json"
+        result_path.write_text(json.dumps(payload), encoding="utf-8")
+        return result_path
+
+    def test_best_backend_profile_returns_pinned_backend_even_when_not_top_ranked(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result_path = self._write_payload(Path(temp_dir))
+            profile = spatial_executor._best_backend_profile(result_path, pinned_backend="cpu")
+        self.assertIsNotNone(profile)
+        self.assertEqual(profile.hardware_type, "cpu")
+
+    def test_best_backend_name_returns_pinned_backend_even_without_result_file(self) -> None:
+        name = spatial_executor._best_backend_name(Path("/does/not/exist.json"), pinned_backend="cpu")
+        self.assertEqual(name, "cpu")
 
 
 if __name__ == "__main__":
