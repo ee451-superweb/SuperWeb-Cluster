@@ -2,8 +2,8 @@
 
 ## Status
 
-`superweb-cluster` has completed the Sprint 1 and Sprint 2 foundation work and
-is now entering Sprint 3.
+`superweb-cluster` has completed Sprint 1, Sprint 2, and Sprint 3, and is now
+in Sprint 4.
 
 Sprint 1 established the baseline runtime: bootstrap, discovery, registration,
 protobuf messaging, heartbeat, and the first end-to-end distributed compute
@@ -13,6 +13,16 @@ Sprint 2 hardened that baseline around the first production method, expanded
 hardware benchmark coverage, and reshaped the repository so new compute methods
 can be added without collapsing everything back into one runtime path.
 
+Sprint 3 turned the cluster into a multi-method platform, brought `conv2d`
+fully online end-to-end (including a separate TCP data plane for large
+artifacts), and introduced the first WinUI3 and iOS frontends so the cluster is
+no longer terminal-only.
+
+Sprint 4 is hardening the production path for release: fault tolerance,
+richer per-slice timing diagnostics, multi-mode client response shapes, faster
+aggregation, a third compute method (`gemm`), an OS-driven adaptive capacity
+signal, and frontend / per-platform-backend work to ship the clients.
+
 ## Features
 
 | Capability | Description |
@@ -20,42 +30,85 @@ can be added without collapsing everything back into one runtime path.
 | **Auto-Discovery** | Zero-configuration LAN discovery via mDNS, with `discover` and `announce` bootstrap roles |
 | **Method-Aware Benchmarking** | Each node benchmarks supported methods locally and reports per-method GFLOPS summaries during registration |
 | **GFLOPS-Aware Scheduling** | The main node tracks benchmark-derived processor inventories and partitions work proportionally to measured throughput |
+| **Worker-Level Failover** | When a worker dies mid-slice, its row/output-channel range is re-partitioned across surviving workers proportional to their original throughput; the in-flight client request still completes |
+| **Multi-Mode Client Response** | Conv2d clients can opt into stats-only summaries, sampled previews, or full artifact downloads, so very large outputs do not have to be materialized client-side |
+| **Per-Slice Timing Diagnostics** | The runtime protocol carries compute, fetch, and peripheral milliseconds per worker slice, so the client response captures where time was actually spent |
+| **Memmap Fan-In Aggregation** | Conv2d aggregation streams worker artifacts into the final output via `np.memmap` strided assignment instead of per-pixel Python I/O |
 | **Deterministic Input Data** | Shared fixed-seed generators create byte-stable GEMV and conv2d datasets on every machine |
 | **Native Runner Stack** | In-tree CPU, CUDA, and Metal runners back both benchmarking and compute-node task execution |
 | **Structured Runtime Protocol** | Registration, heartbeat, client requests, task assignment, worker updates, and task results all flow through framed protobuf messages, with large artifacts moved onto a separate TCP data plane |
 | **Crash-Survivable Benchmark Tracing** | Benchmark progress is persisted to `result_status.json` and `result_trace.jsonl` for postmortem analysis |
 
-## System Picture
+## Architecture
 
 ```text
-Client
-  |
-  |  CLIENT_REQUEST(method, object_id, iteration_count, payload)
-  v
-Main Node
-  |
-  |  before accepting work:
-  |  1. prepare local dataset cache
-  |  2. run local benchmark for supported methods
-  |  3. collect worker registrations and method summaries
-  |
-  |  runtime responsibilities:
-  |  - choose method-aware scheduler
-  |  - partition work by benchmarked GFLOPS
-  |  - aggregate task results into one client response
-  v
-Compute Nodes
-  |
-  |  on startup:
-  |  1. prepare deterministic dataset cache
-  |  2. run local method benchmarks
-  |  3. register per-method hardware summaries
-  |
-  |  on task receipt:
-  |  - dispatch to the selected native runner
-  |  - execute the local slice
-  |  - return a structured task result
++============================== LAN =============================+
+|                                                                |
+|   +-----------+                                                |
+|   |  Client   |                                                |
+|   | (CLI /    |---+                                            |
+|   |  WinUI3 / |   |  CLIENT_REQUEST / CLIENT_RESPONSE          |
+|   |  iOS)     |   |  + artifact upload / download (data plane) |
+|   +-----------+   |                                            |
+|                   v                                            |
+|                 +-------------------------------+              |
+|                 |           Main Node           |              |
+|                 |                               |              |
+|                 |  discovery      :5353  UDP    |              |
+|                 |    mDNS 224.0.0.251           |              |
+|                 |  control plane  :52020 TCP    |              |
+|                 |    REGISTER / HEARTBEAT       |              |
+|                 |    TASK_ASSIGN / TASK_RESULT  |              |
+|                 |    CLIENT_REQUEST / RESPONSE  |              |
+|                 |  data plane     :52021 TCP    |              |
+|                 |    DELIVER frames,            |              |
+|                 |    weight upload / full       |              |
+|                 |    artifact download          |              |
+|                 |                               |              |
+|                 |  scheduler                    |              |
+|                 |   - method-aware partition    |              |
+|                 |   - GFLOPS-proportional split |              |
+|                 |   - worker-level failover     |              |
+|                 |   - memmap fan-in aggregation |              |
+|                 +-------------------------------+              |
+|                     ^         ^          ^                     |
+|                     |  TASK_ASSIGN / HEARTBEAT / TASK_RESULT   |
+|                     |  (+ slice artifacts on data plane)       |
+|                     v         v          v                     |
+|              +----------+ +----------+ +----------+            |
+|              | Compute  | | Compute  | | Compute  |            |
+|              | Node #1  | | Node #2  | | Node #n  |            |
+|              |          | |          | |          |            |
+|              | native   | | native   | | native   |            |
+|              | runners: | | runners: | | runners: |            |
+|              |  CPU /   | |  CPU /   | |  CPU /   |            |
+|              |  CUDA /  | |  CUDA /  | |  CUDA /  |            |
+|              |  Metal   | |  Metal   | |  Metal   |            |
+|              |          | |          | |          |            |
+|              | methods: | | methods: | | methods: |            |
+|              |  gemv,   | |  gemv,   | |  gemv,   |            |
+|              |  conv2d  | |  conv2d  | |  conv2d  |            |
+|              +----------+ +----------+ +----------+            |
+|                                                                |
++================================================================+
 ```
+
+The main node exposes three network surfaces. UDP `:5353` handles mDNS
+discovery and announcement. TCP `:52020` carries the protobuf control
+plane: worker registration, heartbeats, task assignment, task results,
+and client requests / responses. TCP `:52021` carries the bulk data
+plane: framed `DELIVER` transfers for large inputs (such as conv2d
+weight uploads) and large outputs (such as conv2d full-artifact
+downloads).
+
+Compute nodes serve as both benchmarkers and workers. On startup, each
+node benchmarks every supported method on every surviving hardware
+backend, then registers per-method GFLOPS summaries. At runtime, the
+main node uses those summaries to partition work proportionally and
+dispatch method-aware task slices to the native runner best suited for
+each backend. When a worker dies mid-slice, the main node
+re-partitions the lost range across survivors so the in-flight client
+request still completes.
 
 ## Method Workloads
 
@@ -82,7 +135,7 @@ home devices usually have much less RAM than disk capacity, and widespread SSD
 adoption means sequential disk I/O is now fast enough that a disk-first artifact
 path is often the safer choice when we are forced to choose.
 
-## Progress Through Sprint 2
+## Progress Through Sprint 3
 
 Sprint 1 delivered:
 
@@ -114,39 +167,69 @@ Sprint 2 delivered the current baseline:
 - expanded tests and documentation for the reorganized runtime model
 - planning groundwork for method-aware runtime evolution beyond GEMV
 
-## Sprint 3 Plan
+Sprint 3 delivered:
 
-Sprint 3 will focus on turning `superweb-cluster` from a single-method cluster
-into a multi-method platform, while also exposing more of the system through
-user-facing frontends.
-
-Compute-method goals:
-
-- add more executable methods beyond `gemv`
-- start with `conv2d` / `conv2d` as the next major method
-- make worker registration method-aware so one worker can report different GFLOPS summaries for different methods
-- make main-node dispatch and aggregation method-aware so scheduling follows the client-requested method
-- continue restructuring the compute-node runtime around method handlers and reusable task routing
-
-Frontend goals:
-
-- build corresponding frontend features for cluster visibility, request submission, method selection, and result inspection
-- expose worker inventory, benchmark rankings, active method, and scheduler decisions in a human-friendly way
-- reduce reliance on terminal-only workflows for demos, debugging, and operator control
-
-Frontend coverage goals:
-
-- expand beyond the current CLI-first experience
-- add Windows frontend coverage for desktop demos and operator workflows
-- add iOS frontend coverage for mobile monitoring and lightweight control scenarios
-- keep shared backend contracts so web, Windows, and iOS surfaces can evolve against the same runtime concepts
+- `conv2d` as the second production method, end-to-end through dispatch, worker execution, and aggregation
+- method-aware worker registration so one worker reports separate GFLOPS summaries for `gemv` and `conv2d`
+- method-aware main-node dispatch that partitions row ranges (`gemv`) or output-channel ranges (`conv2d`) per the client-requested method
+- a separate TCP data plane for large artifacts, with DELIVER-frame upload for client-supplied conv2d weights and download IDs for large client responses
+- shared backend contracts under `wire/external_protocol/` so the WinUI3 desktop frontend, the iOS frontend, and the Python CLI client all evolve against the same runtime concepts
+- first WinUI3 desktop frontend covering cluster visibility, request submission, method selection, and result inspection
+- first iOS frontend covering mobile monitoring and lightweight control flows
+- a cleaner compute-method tree under `compute_node/compute_methods/` so runtime executors and benchmark backends share method source rather than duplicating it
 
 A detailed Sprint 3 planning document lives at
 `docs/sprint3_plan_2026-04-15.txt`.
 
+## Sprint 4 Plan
+
+Sprint 4 hardens the production path for release: fault tolerance, richer
+observability, faster aggregation, a third compute method, an OS-driven
+adaptive capacity signal that replaces the experimental idle benchmark
+refresh, and the frontend / per-platform-backend work needed to ship the
+clients.
+
+Status legend: `[x]` shipped, `[~]` in progress, `[ ]` not started.
+
+Runtime hardening:
+
+- `[x]` worker-level task failover: when a worker dies mid-slice, the failed row / output-channel range is re-partitioned across surviving workers proportional to their original throughput, and the in-flight client request still completes
+- `[x]` runtime protocol carries per-slice timing diagnostics (compute, fetch, peripheral milliseconds) so the final `CLIENT_RESPONSE` records where time was spent on every worker
+- `[x]` multi-mode conv2d client response: `stats_only` summary, sampled preview, or full artifact download, so very large outputs do not have to be materialized client-side
+- `[x]` faster fan-in / fan-out aggregation: conv2d output assembly streams worker artifacts via `np.memmap` strided assignment instead of per-pixel Python I/O
+
+Compute method:
+
+- `[ ]` add `gemm` as a third production method, including benchmark, dispatch, runtime executor, and aggregation paths
+
+Adaptive capacity:
+
+- `[~]` replace the experimental idle benchmark refresh feature with a formal adaptive capacity update driven by the OS, reading load from Windows Task Manager and macOS Activity Monitor instead of re-running benchmarks while a worker is idle
+
+Frontend and release:
+
+- `[ ]` update the WinUI3 desktop frontend to consume the latest control-plane and data-plane protocol, including timing diagnostics and the new conv2d response modes
+- `[ ]` update the iOS frontend the same way
+- `[ ]` give each platform's client its own backend logic so per-platform clients can be packaged and released independently
+- `[ ]` Android native app — included in the plan for completeness, but likely out of scope for this submission window
+
 ## Project Entry
 
-The main entrypoint is still:
+There are two entrypoints, split along the internet boundary:
+
+**`setup.py`** — the *internet* step. Prepares the machine: creates
+`.venv`, installs `requirements.txt`, and reaches out to PyPI to resolve
+Python dependencies. This is the only entrypoint that needs WAN access.
+
+```bash
+python setup.py
+```
+
+**`bootstrap.py`** — the *LAN-only* step. Starts the runtime on an
+already-prepared machine. Once `.venv` is in place, bootstrap never
+touches the wide-area network: mDNS discovery runs on the local
+subnet's multicast group, and all inter-node traffic is TCP inside the
+LAN.
 
 ```bash
 python bootstrap.py --role discover
@@ -158,17 +241,12 @@ or:
 python bootstrap.py --role announce
 ```
 
-`bootstrap.py` stays at the repository root on purpose. It is the one file a
-human should be able to find immediately.
-
-The environment-preparation entrypoint is:
-
-```bash
-python setup.py
-```
-
-Use this when you want to separate "prepare the machine" from "start the
-runtime."
+`bootstrap.py` stays at the repository root on purpose. It is the one
+file a human should be able to find immediately. On a fresh clone where
+`.venv` is missing, bootstrap will invoke `setup.py` on your behalf so
+the first-run flow still works end-to-end — but that first run is the
+only time bootstrap transitively reaches WAN, and it does so strictly
+by delegating to `setup.py`.
 
 ## Current Layout
 
@@ -228,9 +306,38 @@ main operational entrypoint in the obvious place.
 
 The current startup flow is:
 
+```mermaid
+flowchart TD
+    A([python bootstrap.py]) --> B{project .venv<br/>ready?}
+    B -- no --> C[run setup.py,<br/>relaunch under .venv]
+    C --> F
+    B -- yes --> D{running under<br/>project .venv?}
+    D -- no --> E[relaunch self with<br/>.venv interpreter]
+    E --> F
+    D -- yes --> F{benchmark result.json<br/>present?<br/>--retest / --rebuild off?}
+    F -- no --> G[run benchmark.py for<br/>every supported method]
+    G --> H
+    F -- yes --> H[detect platform,<br/>configure firewall rules]
+    H --> I{--role?}
+    I -- announce --> J([start as main node<br/>answer mDNS,<br/>accept TCP connections])
+    I -- discover --> K[mDNS discovery<br/>--discover-attempts rounds]
+    K --> L{main node<br/>found?}
+    L -- yes --> M[connect over TCP<br/>as compute node]
+    L -- no --> N{--manual-fallback?}
+    N -- yes --> O[prompt operator for<br/>main-node address]
+    O --> M
+    N -- no --> P([hard fail])
+    M --> Q[send REGISTER_WORKER<br/>with hardware + GFLOPS summary]
+    Q --> R[receive REGISTER_OK,<br/>runtime id assigned]
+    R --> S([runtime loop:<br/>HEARTBEAT / TASK_ASSIGN /<br/>TASK_RESULT / CLIENT_REQUEST])
+    J --> S
+```
+
+In detail:
+
 1. `bootstrap.py` starts.
 2. It checks whether the project `.venv` and dependency stamp are already ready.
-3. If the environment is not ready, it stops and tells the user to run `setup.py`.
+3. If the environment is not ready, it invokes `python setup.py` — the only step in the whole startup path that reaches the wide-area network, since `setup.py` installs from PyPI. On every subsequent run with a prepared `.venv`, this step is skipped and bootstrap stays LAN-only.
 4. If the environment is ready but the current interpreter is not the project `.venv`, it relaunches itself with the project interpreter.
 5. It checks for `compute_node/performance_metrics/result.json`.
 6. If benchmark results are missing, it runs `compute_node/performance_metrics/benchmark.py`.
@@ -251,24 +358,32 @@ The current startup flow is:
 18. Workers send periodic `HEARTBEAT_OK` and optional idle `WORKER_UPDATE` performance refreshes.
 19. The main node aggregates worker slices and returns one `CLIENT_RESPONSE`, using artifact descriptors plus the TCP data plane for large outputs.
 
-## Local Vs Networked Steps
+## Local, LAN, And Internet Steps
 
-- Local-only:
-  - `python setup.py --venv-only`
-  - creating `.venv`
+The runtime splits cleanly across three scopes. Only one of them
+requires the wide-area network.
+
+- **Machine-local only** (no network at all):
+  - `python setup.py --venv-only` (create `.venv` without installing)
   - reading config and local files
-  - running the local benchmark
+  - running the local benchmark (`compute_node/performance_metrics/benchmark.py`)
   - starting the main node directly with `--role announce`
-- May require network access:
-  - `python setup.py`
-  - `pip install -r requirements.txt`
-  - mDNS discovery in `--role discover`
-  - TCP runtime registration between nodes
+- **LAN only** (local subnet, no WAN):
+  - mDNS discovery in `--role discover` (UDP multicast to `224.0.0.251:5353`)
+  - TCP runtime registration between nodes (`:52020`)
+  - TCP data-plane artifact transfers (`:52021`)
+  - heartbeats, task assignment, results, client requests
+- **Internet required** (the only WAN step):
+  - `python setup.py` — resolves Python dependencies against PyPI
+  - `pip install -r requirements.txt` — the specific call `setup.py` makes
 
-`bootstrap.py` itself is not responsible for creating `.venv` or installing
-dependencies manually anymore. If the local environment is missing or stale,
-`bootstrap.py` now runs `python setup.py` itself, then relaunches under the
-project `.venv`.
+`bootstrap.py` itself never opens a WAN connection. If the local
+environment is missing or stale, `bootstrap.py` delegates to
+`python setup.py` and then relaunches under `.venv` — so the WAN hop
+stays fully owned by `setup.py` and is skipped entirely on every
+subsequent run. In an offline or air-gapped deployment, run `setup.py`
+once against a local mirror (or pre-populate `.venv`), after which the
+cluster operates end-to-end on LAN only.
 
 ## Current Runtime Model
 
@@ -336,7 +451,36 @@ refresh, and only marks the cluster dead after repeated missed replies.
 
 ## Quick Start
 
-Start in discover mode:
+The simplest invocation is:
+
+```bash
+python bootstrap.py
+```
+
+With no flags, `bootstrap.py` defaults to `--role discover`. That triggers
+this sequence:
+
+1. Verify the project `.venv` and `requirements.txt` stamp are current; run
+   `setup.py` and self-relaunch into `.venv` if not.
+2. Detect the platform; on Windows, optionally elevate to admin (only when
+   `--elevate-if-needed` is also set).
+3. Make sure `compute_node/performance_metrics/result.json` exists; if it
+   does not (or `--retest` / `--rebuild` was passed), run the local
+   benchmark first.
+4. Configure firewall rules for the UDP discovery port and the TCP
+   data-plane port.
+5. Try mDNS discovery `--discover-attempts` times (default `3`), waiting up
+   to `--timeout` seconds (default `1.0`) per attempt and `--retry-delay`
+   seconds (default `0.3`) between attempts.
+6. If a main node is found, register as a compute node over TCP. If
+   discovery exhausts every attempt, promote this process into the main
+   node itself (unless `--no-manual-fallback` was passed and you want a
+   hard failure instead).
+
+`--role announce` skips the discovery loop and starts as the main node
+immediately.
+
+Start in discover mode (the implicit default, written explicitly):
 
 ```bash
 python bootstrap.py --role discover --udp-port 5353 --tcp-port 52020
@@ -347,6 +491,26 @@ Start in announce mode:
 ```bash
 python bootstrap.py --role announce --udp-port 5353 --tcp-port 52020
 ```
+
+### Bootstrap Options
+
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `--role {discover,announce}` | `discover` | `discover` looks for an existing main node first and promotes self only if discovery fails. `announce` starts directly as the main node. |
+| `--node-name NAME` | `node` | Cluster label this process advertises. The default resolves to `main node` when role is `announce` and `compute node` otherwise; pass an explicit name only when you want a custom label. |
+| `--multicast-group ADDR` | `224.0.0.251` | IPv4 multicast group used for discovery traffic. Override only if your LAN reserves the default. |
+| `--udp-port PORT` | `5353` | UDP port used for multicast announce / discover packets. |
+| `--tcp-port PORT` | `52020` | TCP port the main-node runtime server listens on for worker and client control connections. |
+| `--data-plane-port PORT` | `52021` | TCP port the main-node artifact data plane listens on for large-artifact upload / download (DELIVER frames, conv2d weight uploads, conv2d full-output downloads). |
+| `--timeout SECONDS` | `1.0` | Max seconds to wait for a discovery reply per attempt. Raise on lossy networks. |
+| `--discover-attempts N` | `3` | How many discovery rounds to run before falling back. With the defaults this is roughly 3–4 seconds of total discovery time before self-promotion. |
+| `--retry-delay SECONDS` | `0.3` | Pause between discovery attempts. |
+| `--manual-fallback / --no-manual-fallback` | `--manual-fallback` (on) | When discovery fails, prompt the operator for a manual main-node address instead of immediately promoting self. Pass `--no-manual-fallback` for non-interactive runs that should hard-fail when discovery does not find a main node. |
+| `--elevate-if-needed` | off | On Windows, relaunch the process with administrator privileges. Required when firewall rule installation needs elevation. The bootstrap auto-injects this flag into its own `.venv` self-relaunch so behavior is consistent. |
+| `--retest` | off | Regenerate the deterministic input matrices and rerun the local benchmark before startup. Use after changing dataset shapes or after replacing hardware. |
+| `--rebuild` | off | Rerun the local benchmark and force the native runner binaries to rebuild, but do **not** regenerate input matrices. Use after editing a backend's CUDA / Metal / CPU source. |
+| `--log-start-mode {normal,clean,cleanse}` | `normal` | `normal` keeps prior session logs untouched. `clean` archives previous loose log files into a dated archive directory. `cleanse` permanently removes them. |
+| `--verbose` | off | Enable DEBUG-level logging in the bootstrap session log. |
 
 Run only the benchmark workspace:
 
