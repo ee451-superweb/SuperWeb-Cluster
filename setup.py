@@ -11,11 +11,31 @@ humans can tell which steps may need internet access.
 
 from __future__ import annotations
 
+import sys
+
+MIN_PYTHON = (3, 11)
+DEV_PYTHON_DISPLAY = "3.14.3"
+if sys.version_info < MIN_PYTHON:
+    _found = ".".join(str(n) for n in sys.version_info[:3])
+    _required = ".".join(str(n) for n in MIN_PYTHON)
+    sys.stderr.write(
+        f"superweb-cluster setup.py requires Python {_required}+, "
+        f"but this interpreter is Python {_found}.\n"
+        f"The project is developed on Python {DEV_PYTHON_DISPLAY}. Install a supported Python via one of:\n"
+        f"  - uv python install 3.14   (https://docs.astral.sh/uv/)\n"
+        f"  - https://www.python.org/downloads/\n"
+        f"  - winget install Python.Python.3.14   (Windows)\n"
+        f"  - brew install python@3.14            (macOS)\n"
+    )
+    sys.exit(1)
+
 import argparse
 import hashlib
 import logging
+import platform
+import re
+import shutil
 import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,6 +47,87 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 VENV_DIR = PROJECT_ROOT / ".venv"
 REQUIREMENTS_PATH = PROJECT_ROOT / "requirements.txt"
 REQUIREMENTS_STAMP_PATH = VENV_DIR / ".requirements.sha256"
+
+def _probe_msvc_via_vswhere(_tool: dict) -> tuple[bool, str | None, str]:
+    """Detect MSVC via vswhere; `cl.exe` is never on the default PATH by design."""
+
+    vswhere = Path(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe")
+    if not vswhere.exists():
+        return False, None, "vswhere.exe not found (no Visual Studio Installer present)"
+    try:
+        result = subprocess.run(
+            [
+                str(vswhere),
+                "-latest",
+                "-products", "*",
+                "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+                "-property", "installationPath",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False, None, "vswhere.exe failed to run"
+    path = (result.stdout or "").strip()
+    if not path:
+        return False, None, "Visual Studio present but no C++ workload installed"
+    return True, f"installed at {path}", ""
+
+
+DEV_TOOLS: tuple[dict, ...] = (
+    {
+        "name": "MSVC (cl.exe)",
+        "probe_impl": _probe_msvc_via_vswhere,
+        "applicable_on": frozenset({"Windows"}),
+        "install": {
+            "Windows": "winget install Microsoft.VisualStudio.2022.BuildTools",
+        },
+        "landing": "https://visualstudio.microsoft.com/downloads/",
+    },
+    {
+        "name": "NVIDIA CUDA (nvcc)",
+        "probe_cmd": ["nvcc", "--version"],
+        "applicable_on": frozenset({"Windows", "Linux"}),
+        "install": {
+            "Windows": "winget install Nvidia.CUDA",
+            "Linux": "sudo apt install nvidia-cuda-toolkit",
+        },
+        "landing": "https://developer.nvidia.com/cuda-downloads",
+    },
+    {
+        "name": ".NET SDK (>= 8.0; latest LTS is 10)",
+        "probe_cmd": ["dotnet", "--list-sdks"],
+        "min_version": (8, 0),
+        "applicable_on": frozenset({"Windows", "Linux", "Darwin"}),
+        "install": {
+            "Windows": "winget install Microsoft.DotNet.SDK.10   (latest LTS)",
+            "Linux": "sudo apt install dotnet-sdk-10.0           (latest LTS)",
+            "Darwin": "brew install --cask dotnet-sdk            (latest LTS)",
+        },
+        "landing": "https://dotnet.microsoft.com/download/dotnet/10.0",
+    },
+    {
+        "name": "Xcode Command Line Tools",
+        "probe_cmd": ["xcrun", "--version"],
+        "applicable_on": frozenset({"Darwin"}),
+        "install": {
+            "Darwin": "xcode-select --install",
+        },
+        "landing": "https://developer.apple.com/xcode/",
+    },
+    {
+        "name": "GCC (g++)",
+        "probe_cmd": ["gcc", "--version"],
+        "applicable_on": frozenset({"Windows", "Linux", "Darwin"}),
+        "install": {
+            "Windows": "winget install GnuWin32.Gcc   (or install MSYS2 for a full toolchain)",
+            "Linux": "sudo apt install build-essential",
+            "Darwin": "xcode-select --install   (ships clang, which most GCC-targeted builds accept)",
+        },
+        "landing": "https://gcc.gnu.org/",
+    },
+)
 
 
 @dataclass(slots=True)
@@ -54,6 +155,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--venv-only",
         action="store_true",
         help="Create or refresh the local .venv only. This is a local-only step and does not install dependencies.",
+    )
+    parser.add_argument(
+        "--dev",
+        action="store_true",
+        help=(
+            "After the normal setup, print a developer-toolchain report: "
+            "detect MSVC, CUDA, .NET 8, Xcode CLT, and GCC, and for any missing "
+            "item show the package-manager command plus the official landing URL. "
+            "Informational only; setup.py never installs OS toolchains itself."
+        ),
     )
     parser.add_argument(
         "--verbose",
@@ -206,6 +317,80 @@ def ensure_project_python_environment(logger: logging.Logger, *, install_require
     return install_project_requirements(logger)
 
 
+def _probe_dev_tool(tool: dict) -> tuple[bool, str | None, str]:
+    """Probe one tool. Returns (satisfied, version_line, miss_reason).
+
+    `miss_reason` distinguishes a missing binary from a binary that is
+    present but does not satisfy the requested version filter.
+    """
+
+    custom = tool.get("probe_impl")
+    if custom is not None:
+        return custom(tool)
+
+    exe = tool["probe_cmd"][0]
+    if not shutil.which(exe):
+        return False, None, "not found on PATH"
+    try:
+        result = subprocess.run(
+            tool["probe_cmd"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return True, None, ""
+    combined = (result.stdout or "") + (result.stderr or "")
+    all_lines = [line.strip() for line in combined.splitlines() if line.strip()]
+    min_version = tool.get("min_version")
+    if min_version:
+        leading_version_re = re.compile(r"^(\d+)\.(\d+)(?:\.(\d+))?")
+        satisfying: list[tuple[tuple[int, ...], str]] = []
+        for line in all_lines:
+            match = leading_version_re.match(line)
+            if not match:
+                continue
+            parsed = tuple(int(g) for g in match.groups() if g is not None)
+            if parsed >= min_version:
+                satisfying.append((parsed, line))
+        if not satisfying:
+            installed = ", ".join(all_lines) if all_lines else "none"
+            want = ".".join(str(n) for n in min_version)
+            return False, None, f"on PATH but no version >= {want} (installed: {installed})"
+        satisfying.sort(key=lambda entry: entry[0])
+        return True, satisfying[-1][1], ""
+    first_line = all_lines[0] if all_lines else None
+    return True, first_line, ""
+
+
+def report_dev_toolchain(logger: logging.Logger) -> None:
+    """Print a dev-toolchain detection report for the current OS.
+
+    Does not install anything. Missing tools get a package-manager hint
+    plus the official landing URL so operators can grab the latest
+    release themselves.
+    """
+
+    current_os = platform.system()
+    logger.info("=== Dev Toolchain Report (%s) ===", current_os or "unknown")
+    for tool in DEV_TOOLS:
+        name = tool["name"]
+        if current_os not in tool["applicable_on"]:
+            applicable = ", ".join(sorted(tool["applicable_on"]))
+            logger.info("[--] %s: only applicable on %s (skipped on %s)", name, applicable, current_os)
+            continue
+        present, version, miss_reason = _probe_dev_tool(tool)
+        if present:
+            logger.info("[ok] %s: %s", name, version or "detected (version unknown)")
+            continue
+        logger.info("[--] %s: %s", name, miss_reason)
+        install_cmd = tool["install"].get(current_os)
+        if install_cmd:
+            logger.info("     install: %s", install_cmd)
+        logger.info("     manual:  %s", tool["landing"])
+    logger.info("Note: this is informational only. setup.py never installs OS toolchains.")
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the standalone setup entrypoint."""
 
@@ -216,6 +401,8 @@ def main(argv: list[str] | None = None) -> int:
         logger,
         install_requirements_flag=not args.venv_only,
     )
+    if args.dev:
+        report_dev_toolchain(logger)
     return 0 if ready else 1
 
 
