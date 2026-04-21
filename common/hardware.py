@@ -6,6 +6,7 @@ import ctypes
 import os
 import platform
 import socket
+import subprocess
 
 from adapters import network
 from common.types import HardwareProfile
@@ -32,6 +33,33 @@ def _detect_total_memory_bytes() -> int:
     return 0
 
 
+def detect_processor_name() -> str:
+    """Return the friendliest processor label available on this host.
+
+    Use this for registration and report headers so Apple Silicon machines do
+    not collapse down to generic labels such as ``arm`` or ``arm64``.
+    """
+
+    if platform.system() == "Darwin":
+        try:
+            completed = subprocess.run(
+                ["sysctl", "-n", "machdep.cpu.brand_string"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=2.0,
+            )
+        except (OSError, subprocess.SubprocessError):
+            completed = None
+        if completed is not None and completed.returncode == 0:
+            detected = completed.stdout.strip()
+            if detected:
+                return detected
+
+    return platform.processor() or platform.machine()
+
+
 @trace_function
 def collect_hardware_profile(remote_host: str = "", remote_port: int = 0) -> HardwareProfile:
     """Collect best-effort host information for runtime registration."""
@@ -48,8 +76,7 @@ def collect_hardware_profile(remote_host: str = "", remote_port: int = 0) -> Har
         system=platform.system(),
         release=platform.release(),
         machine=platform.machine(),
-        processor=platform.processor() or platform.machine(),
+        processor=detect_processor_name(),
         logical_cpu_count=os.cpu_count() or 0,
         memory_bytes=_detect_total_memory_bytes(),
     )
-

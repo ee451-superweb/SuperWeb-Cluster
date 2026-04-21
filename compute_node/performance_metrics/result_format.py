@@ -441,6 +441,16 @@ def _extract_device_name(
     if backend_name == "cpu":
         return str(((device_overview.get("cpu") or {}).get("name")) or backend_name)
 
+    fallback_gpu_name = ""
+    if backend_name == "metal":
+        for gpu in device_overview.get("gpus") or []:
+            if not isinstance(gpu, dict):
+                continue
+            candidate = str(gpu.get("name") or "").strip()
+            if candidate:
+                fallback_gpu_name = candidate
+                break
+
     note_sources = [
         *[str(item) for item in raw_backend.get("trial_notes", [])],
         *[str(item) for item in raw_backend.get("notes", [])],
@@ -449,7 +459,10 @@ def _extract_device_name(
     for note in note_sources:
         match = _DEVICE_NOTE_PATTERN.search(note)
         if match:
-            return match.group(1).strip()
+            candidate = match.group(1).strip()
+            if backend_name == "metal" and candidate.lower() == "metal" and fallback_gpu_name:
+                return fallback_gpu_name
+            return candidate
         if backend_name in {"cuda", "dx12"} and "adapter" in note.lower():
             quoted = _QUOTED_DEVICE_PATTERN.search(note)
             if quoted:
@@ -458,6 +471,8 @@ def _extract_device_name(
             quoted = _QUOTED_DEVICE_PATTERN.search(note)
             if quoted:
                 return quoted.group(1).strip()
+    if backend_name == "metal" and fallback_gpu_name:
+        return fallback_gpu_name
     return backend_name
 
 

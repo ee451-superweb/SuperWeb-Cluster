@@ -400,7 +400,7 @@ class WorkerTaskExchange:
                 end_oc=assignment.end_oc,
                 weight_path=self._client_weight_paths.get(request.request_id),
             )
-            weight_artifact_id = f"{assignment.task_id}-weight"
+            weight_artifact_id = f"{assignment.artifact_id}-weight"
             weight_artifact_descriptor = self.artifact_manager.publish_bytes(
                 weight_bytes,
                 producer_node_id=MAIN_NODE_NAME,

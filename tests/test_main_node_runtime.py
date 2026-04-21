@@ -361,6 +361,18 @@ class MainNodeRuntimeTests(unittest.TestCase):
         self.assertEqual(response.client_response.output_length, runtime.gemv_spec.rows)
         self.assertEqual(len(response.client_response.output_vector), runtime.gemv_spec.rows * 4)
         self.assertEqual(unpack_float32_bytes(response.client_response.output_vector)[:2], [1.0, 1.0])
+        printed_messages = [call.args[0] for call in print_mock.call_args_list if call.args]
+        self.assertIn(
+            "CLIENT_RESPONSE to superweb client status_code=200 task_id=gemv-1",
+            printed_messages,
+        )
+        self.assertTrue(
+            all(
+                "elapsed_ms=" not in message and "output_length=" not in message and "inline_bytes=" not in message
+                for message in printed_messages
+                if message.startswith("CLIENT_RESPONSE ")
+            )
+        )
         runtime.registry.remove_client.assert_called_once_with(connection.peer_id)
         safe_close_mock.assert_called_once_with(connection.sock)
         self.assertTrue(print_mock.called)
@@ -534,6 +546,8 @@ class MainNodeRuntimeTests(unittest.TestCase):
             config=AppConfig(node_name=MAIN_NODE_NAME),
             logger=mock.Mock(),
         )
+        runtime.artifact_manager._server.port = 0
+        self.addCleanup(runtime.artifact_manager.close)
 
         worker_connection = mock.Mock()
         worker_connection.node_name = COMPUTE_NODE_NAME
@@ -640,7 +654,7 @@ class MainNodeRuntimeTests(unittest.TestCase):
         self.assertEqual(release_message.artifact_release.artifact_id, "artifact-1")
         weight_artifact = assign_message.task_assign.task_payload.weight_artifact
         self.assertIsNotNone(weight_artifact)
-        self.assertEqual(weight_artifact.artifact_id, "req-spatial-weight")
+        self.assertEqual(weight_artifact.artifact_id, "artifact-1-weight")
         self.assertEqual(
             weight_artifact.content_type, "application/x-superweb-conv2d-weight"
         )
@@ -662,6 +676,8 @@ class MainNodeRuntimeTests(unittest.TestCase):
             logger=mock.Mock(),
         )
         runtime.task_exchange._remove_worker_connection = mock.Mock()
+        runtime.artifact_manager._server.port = 0
+        self.addCleanup(runtime.artifact_manager.close)
 
         worker_connection = mock.Mock()
         worker_connection.node_name = COMPUTE_NODE_NAME
@@ -733,6 +749,126 @@ class MainNodeRuntimeTests(unittest.TestCase):
         runtime.task_exchange._remove_worker_connection.assert_called_once()
 
     @mock.patch("builtins.print")
+    @mock.patch("main_node.task_exchange.recv_message")
+    @mock.patch("main_node.task_exchange.send_message")
+    def test_run_worker_task_slice_uses_unique_weight_artifact_per_worker_slice(
+        self,
+        send_message_mock: mock.Mock,
+        recv_message_mock: mock.Mock,
+        print_mock: mock.Mock,
+    ) -> None:
+        del print_mock
+        runtime = MainNodeRuntime(
+            config=AppConfig(node_name=MAIN_NODE_NAME),
+            logger=mock.Mock(),
+        )
+        runtime.task_exchange._remove_worker_connection = mock.Mock()
+        runtime.artifact_manager._server.port = 0
+        self.addCleanup(runtime.artifact_manager.close)
+
+        def _worker_fail(task_id: str, node_id: str) -> list[RuntimeEnvelope]:
+            return [
+                RuntimeEnvelope(
+                    kind=MessageKind.TASK_ACCEPT,
+                    task_accept=TaskAccept(
+                        request_id="req-shared",
+                        node_id=node_id,
+                        task_id=task_id,
+                        timestamp_ms=123456,
+                        status_code=STATUS_ACCEPTED,
+                    ),
+                ),
+                RuntimeEnvelope(
+                    kind=MessageKind.TASK_FAIL,
+                    task_fail=TaskFail(
+                        request_id="req-shared",
+                        node_id=node_id,
+                        task_id=task_id,
+                        timestamp_ms=123457,
+                        status_code=STATUS_OK,
+                        error_message="worker boom",
+                    ),
+                ),
+            ]
+
+        recv_message_mock.side_effect = (
+            _worker_fail("req-shared", "worker-1")
+            + _worker_fail("req-shared", "worker-2")
+        )
+
+        request = build_client_request(
+            SUPERWEB_CLIENT_NAME,
+            "req-shared",
+            METHOD_CONV2D,
+            b"",
+            size="small",
+            object_id="conv2d/small",
+            stream_id="stream-shared",
+            iteration_count=1,
+        ).client_request
+        assert request is not None
+
+        worker_1 = mock.Mock()
+        worker_1.node_name = COMPUTE_NODE_NAME
+        worker_1.runtime_id = "worker-1"
+        worker_1.peer_id = "worker:compute node@10.0.0.2:5000"
+        worker_1.peer_address = "10.0.0.2"
+        worker_1.peer_port = 5000
+        worker_1.sock = mock.Mock()
+        worker_1.sock.gettimeout.return_value = 1.0
+        worker_1.io_lock = threading.Lock()
+
+        worker_2 = mock.Mock()
+        worker_2.node_name = COMPUTE_NODE_NAME
+        worker_2.runtime_id = "worker-2"
+        worker_2.peer_id = "worker:compute node@10.0.0.3:5000"
+        worker_2.peer_address = "10.0.0.3"
+        worker_2.peer_port = 5000
+        worker_2.sock = mock.Mock()
+        worker_2.sock.gettimeout.return_value = 1.0
+        worker_2.io_lock = threading.Lock()
+
+        assignment_1 = WorkerTaskSlice(
+            connection=worker_1,
+            task_id="req-shared",
+            artifact_id="req-shared:worker-1:0",
+            row_start=0,
+            row_end=0,
+            effective_gflops=125.0,
+            method="conv2d",
+            start_oc=0,
+            end_oc=1,
+        )
+        assignment_2 = WorkerTaskSlice(
+            connection=worker_2,
+            task_id="req-shared",
+            artifact_id="req-shared:worker-2:0",
+            row_start=0,
+            row_end=0,
+            effective_gflops=125.0,
+            method="conv2d",
+            start_oc=1,
+            end_oc=2,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            runtime.artifact_manager.root_dir = Path(temp_dir)
+            with self.assertRaises(RuntimeError):
+                runtime._run_worker_task_slice(request, assignment_1)
+            with self.assertRaises(RuntimeError):
+                runtime._run_worker_task_slice(request, assignment_2)
+
+        sent_assign_messages = [call.args[1] for call in send_message_mock.call_args_list]
+        self.assertEqual(len(sent_assign_messages), 2)
+        first_weight_artifact = sent_assign_messages[0].task_assign.task_payload.weight_artifact
+        second_weight_artifact = sent_assign_messages[1].task_assign.task_payload.weight_artifact
+        assert first_weight_artifact is not None
+        assert second_weight_artifact is not None
+        self.assertEqual(first_weight_artifact.artifact_id, "req-shared:worker-1:0-weight")
+        self.assertEqual(second_weight_artifact.artifact_id, "req-shared:worker-2:0-weight")
+        self.assertNotEqual(first_weight_artifact.artifact_id, second_weight_artifact.artifact_id)
+
+    @mock.patch("builtins.print")
     @mock.patch("main_node.task_exchange.send_message")
     def test_run_worker_task_slice_waits_through_mailbox_without_result_deadline(
         self,
@@ -744,6 +880,8 @@ class MainNodeRuntimeTests(unittest.TestCase):
             config=AppConfig(node_name=MAIN_NODE_NAME),
             logger=mock.Mock(),
         )
+        runtime.artifact_manager._server.port = 0
+        self.addCleanup(runtime.artifact_manager.close)
 
         worker_connection = mock.Mock()
         worker_connection.node_name = COMPUTE_NODE_NAME
@@ -933,5 +1071,3 @@ class MainNodeRuntimeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
