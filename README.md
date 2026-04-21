@@ -355,7 +355,7 @@ In detail:
 15. Clients join, receive their own runtime ids, and send structured `CLIENT_REQUEST` messages.
 16. Each `CLIENT_REQUEST` can include an `iteration_count`, and the main node emits matching `TASK_ASSIGN` slices to workers.
 17. While a request is active, clients can poll `CLIENT_INFO_REQUEST` / `CLIENT_INFO_REPLY` for active-request visibility.
-18. Workers send periodic `HEARTBEAT_OK` and optional idle `WORKER_UPDATE` performance refreshes.
+18. Workers send periodic `HEARTBEAT_OK`, plus `WORKER_UPDATE` messages whenever their effective performance changes.
 19. The main node aggregates worker slices and returns one `CLIENT_RESPONSE`, using artifact descriptors plus the TCP data plane for large outputs.
 
 ## Local, LAN, And Internet Steps

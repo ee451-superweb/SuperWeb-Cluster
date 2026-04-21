@@ -88,13 +88,12 @@ superweb-cluster/
 │   ├── executor.py
 │   ├── handlers.py
 │   ├── heartbeat.py
-│   ├── performance_refresh.py
 │   ├── performance_summary.py
 │   ├── runtime.py
 │   ├── runtime_services.py
 │   ├── session.py
 │   ├── task_executor.py
-│   - Compute-node runtime orchestration, idle refresh, task execution, and benchmark-summary upload
+│   - Compute-node runtime orchestration, task execution, and benchmark-summary upload
 │   │
 │   ├── compute_methods/
 │   │   ├── __init__.py

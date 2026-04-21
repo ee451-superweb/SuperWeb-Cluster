@@ -622,7 +622,7 @@ def build_worker_update(
     performance: ComputePerformanceSummary,
     timestamp_ms: int | None = None,
 ) -> RuntimeEnvelope:
-    """Use this when an idle worker reports refreshed effective performance data."""
+    """Use this when a worker reports updated effective performance data."""
     if timestamp_ms is None:
         timestamp_ms = int(time.time() * 1000)
     return RuntimeEnvelope(

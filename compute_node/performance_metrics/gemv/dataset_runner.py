@@ -101,7 +101,6 @@ def generate_dataset_if_missing(
     )
     if not generate_small_dataset:
         command.append("--skip-small")
-    command.append("--skip-refresh")
     if not generate_mid_dataset:
         command.append("--skip-mid")
     if not generate_large_dataset:

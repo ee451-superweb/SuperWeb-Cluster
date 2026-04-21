@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Generate conv2d small, refresh, medium, and large datasets.
+"""Generate conv2d small, medium, and large datasets.
 
 Use this module when the project needs conv2d benchmark or runtime inputs to
-be generated or refreshed on disk.
+be generated on disk.
 """
 
 from __future__ import annotations
@@ -31,7 +31,6 @@ from compute_node.input_matrix.conv2d import (
     generate_dataset,
     get_large_input_matrix_spec,
     get_mid_input_matrix_spec,
-    get_refresh_input_matrix_spec,
 )
 from compute_node.input_matrix.progress import build_progress_reporter, emit_progress_message
 
@@ -103,7 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
     Returns:
         The configured ``ArgumentParser`` for conv2d dataset generation.
     """
-    parser = argparse.ArgumentParser(description="Generate conv2d small/refresh/mid/large datasets.")
+    parser = argparse.ArgumentParser(description="Generate conv2d small/mid/large datasets.")
     parser.add_argument("--output-dir", type=Path, default=DATASET_DIR)
     parser.add_argument("--role", choices=["compute", "main"], default="compute")
     parser.add_argument("--h", type=int)
@@ -116,7 +115,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--include-large-weight", action="store_true")
     parser.add_argument("--include-runtime-weight", action="store_true", help="Alias for --include-large-weight.")
     parser.add_argument("--skip-small", action="store_true", help="Skip the small dataset.")
-    parser.add_argument("--skip-refresh", action="store_true", help="Skip the idle-refresh dataset.")
     parser.add_argument("--skip-mid", action="store_true", help="Skip the mid-sized dataset.")
     parser.add_argument("--skip-medium", action="store_true", help="Alias for --skip-mid.")
     parser.add_argument("--skip-large", action="store_true", help="Skip the large dataset.")
@@ -157,11 +155,10 @@ def main(argv: list[str] | None = None) -> int:
 
     args = build_parser().parse_args(argv)
     skip_small = bool(args.skip_small or args.skip_test)
-    skip_refresh = bool(args.skip_refresh)
     skip_mid = bool(args.skip_mid or args.skip_medium)
     skip_large = bool(args.skip_large or args.skip_runtime)
-    if skip_small and skip_refresh and skip_mid and skip_large:
-        raise ValueError("cannot skip small, refresh, mid, and large dataset generation")
+    if skip_small and skip_mid and skip_large:
+        raise ValueError("cannot skip small, mid, and large dataset generation")
 
     _progress, close_progress = build_progress_reporter()
 
@@ -183,7 +180,6 @@ def main(argv: list[str] | None = None) -> int:
         else build_input_matrix_spec(default_variant="small")
     )
     mid_spec = get_mid_input_matrix_spec()
-    refresh_spec = get_refresh_input_matrix_spec()
     large_spec = get_large_input_matrix_spec()
     include_large_weight = bool(args.include_large_weight or args.include_runtime_weight)
     chunk_values = max(1, (args.chunk_mib * 1024 * 1024) // 4)
@@ -200,25 +196,6 @@ def main(argv: list[str] | None = None) -> int:
                 generate_dataset(
                     small_layout,
                     test_spec,
-                    skip_weight=False,
-                    progress=_progress,
-                    generator_workers=args.workers,
-                    chunk_values=chunk_values,
-                )
-
-        if not skip_refresh:
-            refresh_layout = build_dataset_layout(args.output_dir, prefix=dataset_prefix_for_size("refresh"))
-            if args.force:
-                _reset_stale_files(refresh_layout, refresh_spec, skip_weight=False)
-            elif not dataset_is_generated(refresh_layout, refresh_spec, skip_weight=False):
-                _reset_stale_files(refresh_layout, refresh_spec, skip_weight=False)
-            if args.force or not dataset_is_generated(refresh_layout, refresh_spec, skip_weight=False):
-                emit_progress_message(
-                    f"[Data Gen] Creating conv2d REFRESH dataset ({refresh_spec.h}x{refresh_spec.w})..."
-                )
-                generate_dataset(
-                    refresh_layout,
-                    refresh_spec,
                     skip_weight=False,
                     progress=_progress,
                     generator_workers=args.workers,

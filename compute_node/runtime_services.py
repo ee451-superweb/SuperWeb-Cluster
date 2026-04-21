@@ -1,8 +1,7 @@
-"""Own compute-node task state, message handling, and idle refresh helpers.
+"""Own compute-node task state and message handling helpers.
 
 Use this module when the compute-node runtime should mostly orchestrate startup
-and shutdown while dedicated helpers manage in-flight tasks and idle worker
-performance updates.
+and shutdown while dedicated helpers manage in-flight tasks.
 """
 
 from __future__ import annotations
@@ -25,7 +24,6 @@ from app.constants import (
     RUNTIME_MSG_TASK_ASSIGN,
     RUNTIME_MSG_TASK_FAIL,
     RUNTIME_MSG_TASK_RESULT,
-    RUNTIME_MSG_WORKER_UPDATE,
     STATUS_ACCEPTED,
     STATUS_INTERNAL_ERROR,
 )
@@ -40,7 +38,6 @@ from wire.internal_protocol.runtime_transport import (
     build_task_accept,
     build_task_fail,
     build_task_result,
-    build_worker_update,
 )
 
 
@@ -594,77 +591,3 @@ class WorkerTaskRuntimeService:
             return True
 
         return False
-
-
-class IdlePerformanceRefreshService:
-    """Refresh and report abstract performance after a worker stays idle."""
-
-    def __init__(self, *, config, logger, node_name: str) -> None:
-        """Store runtime settings used by idle refresh polling.
-
-        Args:
-            config: Compute-node runtime configuration with idle refresh intervals.
-            logger: Logger used for refresh-failure warnings.
-            node_name: Human-readable name of this compute node.
-        """
-        self.config = config
-        self.logger = logger
-        self.node_name = node_name
-
-    def advance(
-        self,
-        *,
-        session,
-        assigned_node_id: str,
-        refresh_thread_pool: ThreadPoolExecutor | None,
-        refresh_future,
-        last_worker_update_at: float,
-        has_active_or_pending_tasks: bool,
-        refresh_callable,
-    ):
-        """Finish completed refresh work and launch a new idle refresh when due.
-
-        Args:
-            session: Active worker session back to the main node.
-            assigned_node_id: Main-node-assigned worker id.
-            refresh_thread_pool: Optional executor for idle refresh work.
-            refresh_future: Currently running refresh future, if any.
-            last_worker_update_at: Monotonic timestamp of the last worker update.
-            has_active_or_pending_tasks: Whether the worker is currently busy.
-            refresh_callable: Callable that produces a refreshed performance summary.
-
-        Returns:
-            A ``(refresh_future, last_worker_update_at)`` tuple with updated state.
-        """
-        if refresh_future is not None and refresh_future.done():
-            completed_refresh = refresh_future
-            refresh_future = None
-            try:
-                refreshed_performance = completed_refresh.result()
-            except Exception as exc:
-                self.logger.warning("Idle worker refresh failed: %s", exc)
-                last_worker_update_at = time.monotonic()
-            else:
-                session.send(
-                    build_worker_update(
-                        node_id=assigned_node_id,
-                        performance=refreshed_performance,
-                    )
-                )
-                last_worker_update_at = time.monotonic()
-                write_audit_event(
-                    f"{RUNTIME_MSG_WORKER_UPDATE} from {self.node_name} "
-                    f"id={assigned_node_id} "
-                    f"performance={format_compute_performance_summary(refreshed_performance)}",
-                    logger=self.logger,
-                )
-
-        if (
-            refresh_thread_pool is not None
-            and refresh_future is None
-            and not has_active_or_pending_tasks
-            and (time.monotonic() - last_worker_update_at) >= self.config.idle_worker_update_interval
-        ):
-            refresh_future = refresh_thread_pool.submit(refresh_callable)
-
-        return refresh_future, last_worker_update_at

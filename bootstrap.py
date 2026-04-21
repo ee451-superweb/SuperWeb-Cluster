@@ -201,41 +201,6 @@ def _apply_log_start_mode(mode: str) -> tuple[int, str] | None:
         return logging.WARNING, f"Log start mode {normalized_mode} failed: {exc}"
 
 
-def _validate_compute_benchmark_assets(logger, result_path: Path | None = None) -> None:
-    """Validate that compute startup has refresh-ready datasets and runners.
-
-    Args:
-        logger: Bootstrap logger used to emit startup progress messages.
-        result_path: Optional benchmark result path to validate instead of the default.
-
-    Returns:
-        ``None`` when idle refresh can reuse the persisted benchmark output safely.
-    """
-    from compute_node.performance_refresh import validate_idle_refresh_requirements
-
-    resolved_result_path = BENCHMARK_RESULT_PATH if result_path is None else result_path
-    logger.info(
-        "Benchmark validation 0%%: starting startup checks for %s.",
-        _display_project_path(resolved_result_path),
-    )
-
-    def log_progress(step: int, total_steps: int, description: str) -> None:
-        percent = int(round((step / total_steps) * 100))
-        logger.info(
-            "Benchmark validation %s%% (%s/%s): %s",
-            percent,
-            step,
-            total_steps,
-            description,
-        )
-
-    validate_idle_refresh_requirements(
-        resolved_result_path,
-        progress_callback=log_progress,
-    )
-    logger.info("Benchmark validation 100%%: startup checks passed.")
-
-
 @trace_function
 def ensure_bootstrap_runtime_environment(logger, argv: list[str]) -> int | None:
     """Ensure bootstrap runs with the prepared project venv.
@@ -471,16 +436,7 @@ def ensure_compute_node_benchmark_ready(
 
     benchmark_needs_rebuild = force_retest or force_rebuild or not BENCHMARK_RESULT_PATH.exists()
     if BENCHMARK_RESULT_PATH.exists() and not (force_retest or force_rebuild):
-        try:
-            _validate_compute_benchmark_assets(logger, BENCHMARK_RESULT_PATH)
-        except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
-            logger.warning(
-                "Existing compute benchmark assets are not refresh-ready: %s. Rebuilding the local benchmark now.",
-                exc,
-            )
-            benchmark_needs_rebuild = True
-        else:
-            return True
+        return True
 
     if force_rebuild:
         logger.warning(
@@ -523,12 +479,6 @@ def ensure_compute_node_benchmark_ready(
             "Benchmark finished but %s was still not created.",
             _display_project_path(BENCHMARK_RESULT_PATH),
         )
-        return False
-
-    try:
-        _validate_compute_benchmark_assets(logger, BENCHMARK_RESULT_PATH)
-    except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
-        logger.error("Benchmark finished but compute assets are still not refresh-ready: %s", exc)
         return False
 
     logger.info(

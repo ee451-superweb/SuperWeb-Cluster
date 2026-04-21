@@ -183,14 +183,12 @@ class BootstrapTests(unittest.TestCase):
                 mock.patch.object(bootstrap, "PROJECT_ROOT", temp_root),
                 mock.patch.object(bootstrap, "BENCHMARK_SCRIPT_PATH", script_path),
                 mock.patch.object(bootstrap, "BENCHMARK_RESULT_PATH", result_path),
-                mock.patch("bootstrap._validate_compute_benchmark_assets") as validate_mock,
                 mock.patch("bootstrap._run_streaming_command", side_effect=fake_run) as run_mock,
             ):
                 ready = bootstrap.ensure_compute_node_benchmark_ready(logger)
 
         self.assertTrue(ready)
         run_mock.assert_called_once()
-        validate_mock.assert_called_once_with(logger, result_path)
         logger.warning.assert_called_once()
         logger.info.assert_called()
 
@@ -222,7 +220,6 @@ class BootstrapTests(unittest.TestCase):
                 mock.patch.object(bootstrap, "BENCHMARK_SCRIPT_PATH", benchmark_script_path),
                 mock.patch.object(bootstrap, "BENCHMARK_RESULT_PATH", result_path),
                 mock.patch.object(bootstrap, "INPUT_MATRIX_SCRIPT_PATH", dataset_script_path),
-                mock.patch("bootstrap._validate_compute_benchmark_assets") as validate_mock,
                 mock.patch("bootstrap._run_passthrough_command", side_effect=fake_dataset_run) as dataset_run_mock,
                 mock.patch("bootstrap._run_streaming_command", side_effect=fake_benchmark_run) as benchmark_run_mock,
             ):
@@ -235,7 +232,6 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(dataset_run_mock.call_args.args[0][-1], "--force")
         self.assertEqual(benchmark_run_mock.call_args.args[0][3], str(benchmark_script_path))
         self.assertNotIn("--rebuild", benchmark_run_mock.call_args.args[0])
-        validate_mock.assert_called_once_with(logger, result_path)
 
     def test_ensure_compute_node_benchmark_ready_rebuilds_benchmark_binaries_when_requested(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -257,7 +253,6 @@ class BootstrapTests(unittest.TestCase):
                 mock.patch.object(bootstrap, "PROJECT_ROOT", temp_root),
                 mock.patch.object(bootstrap, "BENCHMARK_SCRIPT_PATH", benchmark_script_path),
                 mock.patch.object(bootstrap, "BENCHMARK_RESULT_PATH", result_path),
-                mock.patch("bootstrap._validate_compute_benchmark_assets") as validate_mock,
                 mock.patch("bootstrap._run_passthrough_command") as dataset_run_mock,
                 mock.patch("bootstrap._run_streaming_command", side_effect=fake_run) as run_mock,
             ):
@@ -271,40 +266,6 @@ class BootstrapTests(unittest.TestCase):
         run_mock.assert_called_once()
         self.assertEqual(run_mock.call_args.args[0][3], str(benchmark_script_path))
         self.assertIn("--rebuild", run_mock.call_args.args[0])
-        validate_mock.assert_called_once_with(logger, result_path)
-
-    def test_ensure_compute_node_benchmark_ready_rebuilds_invalid_existing_assets(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_root = Path(temp_dir)
-            result_path = temp_root / "compute_node" / "performance_metrics" / "result.json"
-            script_path = temp_root / "compute_node" / "performance_metrics" / "benchmark.py"
-            result_path.parent.mkdir(parents=True, exist_ok=True)
-            result_path.write_text("{}", encoding="utf-8")
-            script_path.write_text("# placeholder\n", encoding="utf-8")
-            logger = mock.Mock()
-
-            def fake_run(*_args, **_kwargs) -> int:
-                result_path.write_text("{\"ok\": true}", encoding="utf-8")
-                return 0
-
-            with (
-                mock.patch.object(bootstrap, "PROJECT_ROOT", temp_root),
-                mock.patch.object(bootstrap, "BENCHMARK_SCRIPT_PATH", script_path),
-                mock.patch.object(bootstrap, "BENCHMARK_RESULT_PATH", result_path),
-                mock.patch(
-                    "bootstrap._validate_compute_benchmark_assets",
-                    side_effect=[ValueError("benchmark result is missing backends"), None],
-                ) as validate_mock,
-                mock.patch("bootstrap._run_streaming_command", side_effect=fake_run) as run_mock,
-            ):
-                ready = bootstrap.ensure_compute_node_benchmark_ready(logger)
-
-        self.assertTrue(ready)
-        run_mock.assert_called_once()
-        self.assertEqual(validate_mock.call_count, 2)
-        validate_mock.assert_any_call(logger, result_path)
-        logger.warning.assert_called()
-        logger.info.assert_called()
 
     @mock.patch("bootstrap.detect_os")
     @mock.patch("bootstrap.configure_logging")

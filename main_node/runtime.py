@@ -389,7 +389,7 @@ class MainNodeRuntime:
         self.runtime_connection_handler.remove_worker_connection(connection, reason)
 
     def _handle_worker_update(self, connection: RuntimePeerConnection, worker_update) -> None:
-        """Use this when an idle worker sends refreshed abstract performance data.
+        """Use this when a worker sends updated abstract performance data.
 
         Args: connection worker that sent the update and worker_update decoded WORKER_UPDATE payload.
         Returns: None after the registry is updated and cluster capacity is reprinted.

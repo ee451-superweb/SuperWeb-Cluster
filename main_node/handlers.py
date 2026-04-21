@@ -134,7 +134,7 @@ class RuntimeConnectionHandler:
             mailbox.publish(message)
 
     def handle_worker_update(self, connection, worker_update) -> None:
-        """Apply a worker's refreshed abstract performance summary to the registry.
+        """Apply a worker's updated abstract performance summary to the registry.
 
         Args:
             connection: Worker connection that sent the update.

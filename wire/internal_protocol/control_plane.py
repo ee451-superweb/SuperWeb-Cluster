@@ -126,7 +126,7 @@ class ArtifactRelease:
 
 @dataclass(slots=True)
 class WorkerUpdate:
-    """Idle-period worker performance refresh sent from compute node to main node."""
+    """Updated worker performance summary sent from compute node to main node."""
 
     node_id: str
     timestamp_ms: int

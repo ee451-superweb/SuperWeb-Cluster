@@ -1,8 +1,7 @@
 """Run the long-lived compute-node control loop for one worker process.
 
 Use this module after discovery has resolved a main node and the worker needs to
-register itself, accept tasks, keep heartbeats flowing, publish artifacts, and
-send idle performance refresh updates.
+register itself, accept tasks, keep heartbeats flowing, and publish artifacts.
 """
 
 from __future__ import annotations
@@ -11,7 +10,6 @@ import logging
 import multiprocessing
 import signal
 import socket
-import time
 from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
@@ -24,10 +22,8 @@ from common.types import DiscoveryResult
 from compute_node.executor import TaskExecutionRouter
 from compute_node.handlers import build_default_method_handlers
 from compute_node.heartbeat import WorkerHeartbeat
-from compute_node.performance_refresh import refresh_idle_performance_summary
 from compute_node.performance_summary import load_compute_performance_summary, load_runtime_processor_inventory
 from compute_node.runtime_services import (
-    IdlePerformanceRefreshService,
     WorkerTaskRuntimeService,
     format_compute_performance_summary,
 )
@@ -125,11 +121,6 @@ class ComputeNodeRuntime:
         self._session_factory = session_factory or WorkerSession
         self._task_executor_factory = task_executor_factory
         self.task_runtime_service = WorkerTaskRuntimeService(
-            config=self.config,
-            logger=self.logger,
-            node_name=self.config.node_name,
-        )
-        self.idle_refresh_service = IdlePerformanceRefreshService(
             config=self.config,
             logger=self.logger,
             node_name=self.config.node_name,
@@ -255,16 +246,12 @@ class ComputeNodeRuntime:
         session = self._build_session()
         task_executor = None
         task_thread_pool = None
-        refresh_thread_pool = None
-        refresh_future = None
         task_process_pool = None
         artifact_manager = None
         pending_tasks: dict[str, tuple[object, object]] = {}
-        last_worker_update_at = 0.0
         try:
             hardware, performance = self._load_registration_profile()
             task_process_pool, task_thread_pool, task_executor = self._build_task_execution_backend()
-            refresh_thread_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="worker-refresh")
 
             session.connect()
             register_ok = session.register(self.config.node_name, hardware, performance)
@@ -303,7 +290,6 @@ class ComputeNodeRuntime:
                 stdout=True,
                 logger=self.logger,
             )
-            last_worker_update_at = time.monotonic()
 
             while not self.should_stop():
                 self._drain_completed_tasks(
@@ -311,15 +297,6 @@ class ComputeNodeRuntime:
                     assigned_node_id=assigned_node_id,
                     pending_tasks=pending_tasks,
                     artifact_manager=artifact_manager,
-                )
-                refresh_future, last_worker_update_at = self.idle_refresh_service.advance(
-                    session=session,
-                    assigned_node_id=assigned_node_id,
-                    refresh_thread_pool=refresh_thread_pool,
-                    refresh_future=refresh_future,
-                    last_worker_update_at=last_worker_update_at,
-                    has_active_or_pending_tasks=self.task_runtime_service.has_active_or_pending_tasks(pending_tasks),
-                    refresh_callable=refresh_idle_performance_summary,
                 )
                 try:
                     message = session.receive()
@@ -374,8 +351,6 @@ class ComputeNodeRuntime:
                 )
             if task_thread_pool is not None:
                 task_thread_pool.shutdown(wait=True, cancel_futures=True)
-            if refresh_thread_pool is not None:
-                refresh_thread_pool.shutdown(wait=refresh_future is None, cancel_futures=True)
             if task_executor is not None and hasattr(task_executor, "close"):
                 task_executor.close()
             if artifact_manager is not None:
