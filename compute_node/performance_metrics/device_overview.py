@@ -12,10 +12,35 @@ import platform
 import subprocess
 from typing import Any
 
-from common.hardware import _detect_total_memory_bytes
+from common.hardware import _detect_total_memory_bytes, detect_processor_name
 from compute_node.performance_metrics.gemv.backends.windows_gpu_inventory import (
     list_windows_display_adapters,
 )
+
+
+def _run_json_command(command: list[str], *, timeout: float = 5.0) -> Any | None:
+    """Execute one command that emits JSON and parse its stdout payload."""
+
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    payload_text = (completed.stdout or "").strip()
+    if not payload_text:
+        return None
+    try:
+        return json.loads(payload_text)
+    except json.JSONDecodeError:
+        return None
 
 
 def _run_powershell_json(script: str) -> Any | None:
@@ -32,23 +57,15 @@ def _run_powershell_json(script: str) -> Any | None:
     """
     if os.name != "nt":
         return None
-    completed = subprocess.run(
-        ["powershell", "-NoProfile", "-Command", script],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=5.0,
-    )
-    if completed.returncode != 0:
+    return _run_json_command(["powershell", "-NoProfile", "-Command", script])
+
+
+def _run_system_profiler_json(data_type: str) -> Any | None:
+    """Query one macOS System Profiler data source and parse its JSON payload."""
+
+    if platform.system() != "Darwin":
         return None
-    payload_text = (completed.stdout or "").strip()
-    if not payload_text:
-        return None
-    try:
-        return json.loads(payload_text)
-    except json.JSONDecodeError:
-        return None
+    return _run_json_command(["system_profiler", data_type, "-json"])
 
 
 def detect_cpu_name() -> str:
@@ -72,7 +89,8 @@ def detect_cpu_name() -> str:
             return names[0]
     if isinstance(payload, str) and payload.strip():
         return payload.strip()
-    return platform.processor() or platform.machine()
+    detected = detect_processor_name().strip()
+    return detected or platform.machine()
 
 
 def detect_memory_modules() -> list[dict[str, object]]:
@@ -130,7 +148,38 @@ def detect_gpu_devices() -> list[dict[str, object]]:
                 "pnp_device_id": str(adapter.get("PNPDeviceID") or "").strip(),
             }
         )
-    return [device for device in devices if device["name"]]
+    if devices:
+        return [device for device in devices if device["name"]]
+
+    payload = _run_system_profiler_json("SPDisplaysDataType")
+    rows = payload.get("SPDisplaysDataType") if isinstance(payload, dict) else []
+    if not isinstance(rows, list):
+        return []
+
+    macos_devices: list[dict[str, object]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("sppci_model") or row.get("_name") or "").strip()
+        vendor = str(row.get("spdisplays_vendor") or "").strip()
+        if vendor.startswith("sppci_vendor_"):
+            vendor = vendor.removeprefix("sppci_vendor_")
+        device: dict[str, object] = {
+            "name": name,
+            "vendor": vendor,
+            "pnp_device_id": "",
+        }
+        core_count = str(row.get("sppci_cores") or "").strip()
+        if core_count.isdigit():
+            device["core_count"] = int(core_count)
+        metal_family = str(row.get("spdisplays_mtlgpufamilysupport") or "").strip()
+        if metal_family:
+            device["metal_family"] = metal_family
+        bus = str(row.get("sppci_bus") or "").strip()
+        if bus:
+            device["bus"] = bus
+        macos_devices.append(device)
+    return [device for device in macos_devices if device["name"]]
 
 
 def collect_device_overview() -> dict[str, object]:

@@ -144,6 +144,23 @@ class ClientSessionService:
             parts.append(f"output_length={payload.output_length}")
         return " " + " ".join(parts)
 
+    def summarize_client_response(self, client_name: str, response) -> str:
+        """Render the stdout-safe client-response summary for operators.
+
+        Keep terminal output compact: show only the protocol name, client name,
+        status code, and task id. The detailed response shape stays in file
+        logs through ``describe_client_response``.
+        """
+
+        payload = response.client_response
+        if payload is None:
+            return f"{RUNTIME_MSG_CLIENT_RESPONSE} to {client_name}"
+        return (
+            f"{RUNTIME_MSG_CLIENT_RESPONSE} to {client_name} "
+            f"status_code={payload.status_code} "
+            f"task_id={payload.task_id or '<unassigned>'}"
+        )
+
     @trace_function
     def serve_client_connection(self, connection, runtime_should_stop) -> None:
         """Run the request/response loop for one registered client.
@@ -234,9 +251,9 @@ class ClientSessionService:
                     f"{RUNTIME_MSG_CLIENT_RESPONSE} to {request.client_name} "
                     f"status_code={response.client_response.status_code}"
                     f"{self.describe_client_response(response)}",
-                    stdout=True,
                     logger=self.logger,
                 )
+                print(self.summarize_client_response(request.client_name, response), flush=True)
             except (OSError, ValueError, ConnectionError, RuntimeError) as exc:
                 self.remove_client_connection(connection, str(exc))
                 return
