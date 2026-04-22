@@ -242,10 +242,11 @@ class SupervisorCapacityPlanningTests(unittest.TestCase):
             )
         self.assertEqual(supervisor._plan_capacity("main"), (None, None))
 
-    def test_plan_capacity_compute_default_pins_gpu_and_does_not_spawn_cpu_peer(self) -> None:
-        # When a compute-node host has both GPU and CPU available, the local
-        # CPU is held by GPU driver overhead and must NOT be exposed as a
-        # second backend. Result-ranking should pick a different host's CPU.
+    def test_plan_capacity_compute_default_pins_gpu_and_spawns_cpu_peer(self) -> None:
+        # A compute-only supervisor (not co-located with main-node) on a
+        # GPU+CPU host exposes both backends: the GPU peer plus a CPU peer.
+        # In multi-machine deployments supervisors don't know about each
+        # other, so each host independently advertises its full capacity.
         with tempfile.TemporaryDirectory() as temp_dir:
             result_path = Path(temp_dir) / "result.json"
             _write_result_json(
@@ -256,7 +257,7 @@ class SupervisorCapacityPlanningTests(unittest.TestCase):
                 config=AppConfig(),
                 result_path=result_path,
             )
-        self.assertEqual(supervisor._plan_capacity("compute"), ("cuda", None))
+        self.assertEqual(supervisor._plan_capacity("compute"), ("cuda", "cpu"))
 
     def test_plan_capacity_compute_default_no_gpu_pins_cpu_no_peer(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
