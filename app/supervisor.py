@@ -153,7 +153,17 @@ class Supervisor:
                 "without a peer instance."
             )
             return (BACKEND_CPU, None)
-        return (best_gpu, BACKEND_CPU)
+        # GPU+CPU host: pin to GPU and do NOT spawn a CPU peer. The host CPU is
+        # consumed by the GPU driver / dispatch overhead, so exposing it as a
+        # second compute backend would race the GPU for the same physical cores
+        # and skew result-ranking. The supervisor advertises only the GPU; the
+        # main-node should pick a different host's CPU when it wants CPU work.
+        self.logger.info(
+            "GPU backend %s is available on this host; pinning compute-node to GPU and "
+            "withholding the local CPU backend (held by GPU driver overhead).",
+            best_gpu,
+        )
+        return (best_gpu, None)
 
     def _peer_command(self, peer_backend: str) -> list[str]:
         """Build the argv used to spawn a peer compute-node subprocess.
@@ -188,6 +198,7 @@ class Supervisor:
             "--data-plane-port",
             str(self.config.data_plane_port),
             "--no-manual-fallback",
+            "--peer-process",
         ]
         if self.config.no_cli:
             arguments.append("--no-cli")
@@ -473,6 +484,16 @@ class Supervisor:
 
         self._set_state(RuntimeState.SHUTDOWN)
         self._terminate_peer()
+        if self.config.peer_process:
+            status = FirewallStatus(
+                supported=True,
+                applied=False,
+                needs_admin=False,
+                backend=self.platform_info.platform_name,
+                message="firewall cleanup delegated to spawning supervisor (peer process)",
+            )
+            self.logger.info("Firewall cleanup: %s", status.message)
+            return status
         status = cleanup_rules(self.platform_info, self.config.udp_port)
         self.logger.info("Firewall cleanup: %s", status.message)
         return status

@@ -52,3 +52,4 @@ class AppConfig:
     dual_purpose: bool = False
     pinned_backend: str | None = None
     no_cli: bool = False
+    peer_process: bool = False

@@ -445,6 +445,20 @@ class BootstrapNoCliTests(unittest.TestCase):
         config = bootstrap.build_config(args)
         self.assertFalse(config.no_cli)
 
+    def test_build_parser_accepts_peer_process_flag(self) -> None:
+        args = bootstrap.build_parser().parse_args(["--peer-process"])
+        self.assertTrue(args.peer_process)
+
+    def test_build_config_propagates_peer_process(self) -> None:
+        args = bootstrap.build_parser().parse_args(["--peer-process"])
+        config = bootstrap.build_config(args)
+        self.assertTrue(config.peer_process)
+
+    def test_build_config_defaults_peer_process_false(self) -> None:
+        args = bootstrap.build_parser().parse_args([])
+        config = bootstrap.build_config(args)
+        self.assertFalse(config.peer_process)
+
     @mock.patch("bootstrap.detach_from_current_console", return_value=True)
     @mock.patch("bootstrap.has_attached_console", return_value=True)
     @mock.patch("bootstrap.ensure_compute_node_benchmark_ready", return_value=False)

@@ -242,7 +242,10 @@ class SupervisorCapacityPlanningTests(unittest.TestCase):
             )
         self.assertEqual(supervisor._plan_capacity("main"), (None, None))
 
-    def test_plan_capacity_compute_default_pins_gpu_and_spawns_cpu_peer(self) -> None:
+    def test_plan_capacity_compute_default_pins_gpu_and_does_not_spawn_cpu_peer(self) -> None:
+        # When a compute-node host has both GPU and CPU available, the local
+        # CPU is held by GPU driver overhead and must NOT be exposed as a
+        # second backend. Result-ranking should pick a different host's CPU.
         with tempfile.TemporaryDirectory() as temp_dir:
             result_path = Path(temp_dir) / "result.json"
             _write_result_json(
@@ -253,7 +256,7 @@ class SupervisorCapacityPlanningTests(unittest.TestCase):
                 config=AppConfig(),
                 result_path=result_path,
             )
-        self.assertEqual(supervisor._plan_capacity("compute"), ("cuda", "cpu"))
+        self.assertEqual(supervisor._plan_capacity("compute"), ("cuda", None))
 
     def test_plan_capacity_compute_default_no_gpu_pins_cpu_no_peer(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -401,6 +404,52 @@ class SupervisorCapacityPlanningTests(unittest.TestCase):
         self.assertEqual(kwargs["stderr"], subprocess.DEVNULL)
         self.assertIn("creationflags", kwargs)
         self.assertTrue(kwargs["creationflags"] & 0x00000008)  # DETACHED_PROCESS
+
+    def test_peer_command_appends_peer_process_flag(self) -> None:
+        # Spawned peers must carry --peer-process so their bootstrap delegates
+        # firewall lifecycle to the parent supervisor instead of touching the
+        # global rule names that the parent owns.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result_path = Path(temp_dir) / "result.json"
+            _write_result_json(
+                result_path,
+                usable_backends_by_method={"gemv": ["cpu", "cuda"]},
+            )
+            supervisor = self._build_supervisor(
+                config=AppConfig(),
+                result_path=result_path,
+                bootstrap_script_path=Path("/tmp/bootstrap.py"),
+            )
+        command = supervisor._peer_command("cuda")
+        self.assertIn("--peer-process", command)
+
+    def test_shutdown_skips_firewall_cleanup_when_peer_process(self) -> None:
+        # A peer-process supervisor must not call cleanup_rules() because the
+        # firewall rule names are global, and removing them would tear down
+        # the parent supervisor's still-needed rules.
+        supervisor = self._build_supervisor(
+            config=AppConfig(peer_process=True),
+        )
+        with mock.patch("app.supervisor.cleanup_rules") as cleanup_mock:
+            status = supervisor.shutdown()
+        cleanup_mock.assert_not_called()
+        self.assertFalse(status.applied)
+        self.assertIn("delegated", status.message)
+
+    def test_shutdown_calls_firewall_cleanup_when_not_peer_process(self) -> None:
+        supervisor = self._build_supervisor(
+            config=AppConfig(peer_process=False),
+        )
+        with mock.patch("app.supervisor.cleanup_rules") as cleanup_mock:
+            cleanup_mock.return_value = FirewallStatus(
+                supported=True,
+                applied=True,
+                needs_admin=False,
+                backend="windows",
+                message="cleaned",
+            )
+            supervisor.shutdown()
+        cleanup_mock.assert_called_once()
 
     def test_spawn_peer_uses_create_new_console_by_default_on_windows(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

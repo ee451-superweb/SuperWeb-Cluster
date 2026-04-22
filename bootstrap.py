@@ -13,6 +13,7 @@ from adapters.process import enable_utf8_mode, python_utf8_command
 enable_utf8_mode()
 
 from adapters.firewall import ensure_rules
+from common.types import FirewallStatus
 from adapters.platform import (
     detach_from_current_console,
     detect_os,
@@ -383,6 +384,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Enable verbose logging, including DEBUG-level bootstrap output.",
     )
     parser.add_argument(
+        "--peer-process",
+        action="store_true",
+        help=(
+            "Marks this process as a peer subprocess spawned by another supervisor on the "
+            "same host. Firewall lifecycle (ensure on startup, cleanup on shutdown) is "
+            "delegated to the spawning supervisor instead — peers must not touch firewall "
+            "rules because rule names are host-global and a peer's cleanup would nuke the "
+            "parent's rules. Set automatically by the supervisor when spawning peers; "
+            "operators do not pass this flag manually."
+        ),
+    )
+    parser.add_argument(
         "--dual-purpose",
         action="store_true",
         help=(
@@ -439,6 +452,7 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         dual_purpose=bool(getattr(args, "dual_purpose", False)),
         pinned_backend=getattr(args, "backend", None),
         no_cli=bool(getattr(args, "no_cli", False)),
+        peer_process=bool(getattr(args, "peer_process", False)),
     )
 @trace_function
 def ensure_compute_node_benchmark_ready(
@@ -605,9 +619,22 @@ def main(argv: list[str] | None = None) -> int:
 
         config = build_config(args)
         # Firewall work is intentionally limited to discovery-phase UDP exposure.
-        write_audit_event("setting up firewall", stdout=True, logger=logger)
-        firewall_status = ensure_rules(platform_info, config.udp_port, config.data_plane_port)
-        logger.info("Firewall setup: %s", firewall_status.message)
+        # Peer subprocesses inherit the parent supervisor's firewall ownership;
+        # they must not touch host-global rule names because their own cleanup
+        # would delete rules the parent still needs.
+        if config.peer_process:
+            firewall_status = FirewallStatus(
+                supported=True,
+                applied=False,
+                needs_admin=False,
+                backend=platform_info.platform_name,
+                message="firewall lifecycle delegated to spawning supervisor (peer process)",
+            )
+            logger.info("Firewall setup: %s", firewall_status.message)
+        else:
+            write_audit_event("setting up firewall", stdout=True, logger=logger)
+            firewall_status = ensure_rules(platform_info, config.udp_port, config.data_plane_port)
+            logger.info("Firewall setup: %s", firewall_status.message)
 
         supervisor = Supervisor(
             config=config,
