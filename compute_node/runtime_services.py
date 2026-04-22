@@ -251,22 +251,36 @@ class WorkerTaskRuntimeService:
             self._completed_task_count += 1
             try:
                 task_result = future.result()
-            except (OSError, RuntimeError, ValueError) as exc:
+            except BaseException as exc:  # noqa: BLE001
+                # Catch broadly so a single task crash (native runner segfault,
+                # CalledProcessError, KeyboardInterrupt during shutdown, etc.)
+                # cannot kill the worker silently. The cause-of-death classification
+                # was already logged inside the executor; here we just translate
+                # the failure into a TASK_FAIL upstream and keep the loop alive.
+                self.logger.exception(
+                    "Task %s failed in worker pool: %s: %s",
+                    task.task_id,
+                    type(exc).__name__,
+                    exc,
+                )
                 session.send(
                     build_task_fail(
                         request_id=task.request_id,
                         node_id=assigned_node_id,
                         task_id=task.task_id,
                         status_code=STATUS_INTERNAL_ERROR,
-                        error_message=str(exc),
+                        error_message=f"{type(exc).__name__}: {exc}",
                     )
                 )
                 write_audit_event(
                     f"{RUNTIME_MSG_TASK_FAIL} from {self.node_name} "
-                    f"id={assigned_node_id} task_id={task.task_id} error={exc}",
+                    f"id={assigned_node_id} task_id={task.task_id} "
+                    f"error_type={type(exc).__name__} error={exc}",
                     logger=self.logger,
                     level=logging.WARNING,
                 )
+                if isinstance(exc, KeyboardInterrupt):
+                    raise
                 continue
 
             result_artifact = task_result.result_artifact

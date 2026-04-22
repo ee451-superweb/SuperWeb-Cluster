@@ -7,6 +7,7 @@ import random
 import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -23,6 +24,7 @@ from app.constants import (
     BACKEND_CPU,
     GPU_BACKEND_PRIORITY,
 )
+from common.process_exit import classify_exit_code
 from common.state import RuntimeState
 from common.types import DiscoveryResult, FirewallStatus, PlatformInfo
 from compute_node.runtime import ComputeNodeRuntime
@@ -78,6 +80,8 @@ class Supervisor:
         )
         self._peer_process: subprocess.Popen[bytes] | None = None
         self._peer_backend: str | None = None
+        self._peer_watcher_thread: threading.Thread | None = None
+        self._peer_terminate_requested = False
         self._validate_backend_flags()
 
     def _validate_backend_flags(self) -> None:
@@ -247,10 +251,73 @@ class Supervisor:
             self._peer_process = None
             return
         self._peer_backend = peer_backend
+        self._peer_terminate_requested = False
         write_audit_event(
             f"spawned peer compute-node backend={peer_backend} pid={self._peer_process.pid}",
             logger=self.logger,
         )
+        self._start_peer_watcher(self._peer_process, peer_backend)
+
+    def _start_peer_watcher(
+        self,
+        process: subprocess.Popen[bytes],
+        peer_backend: str,
+    ) -> None:
+        """Start a daemon thread that logs the cause of death of the peer.
+
+        Why: when a peer subprocess dies mid-run (OOM-killer, segfault in a
+        native runner, parent crash, etc.) the supervisor previously had no
+        record — the peer's own console window closed and its diagnostics were
+        lost. This watcher does NOT respawn; it only writes one audit/log line
+        with the classified exit code so the operator can tell an OS-normal
+        eviction from a runner bug.
+        """
+        thread = threading.Thread(
+            target=self._watch_peer,
+            args=(process, peer_backend),
+            name=f"peer-watcher-{peer_backend}-{process.pid}",
+            daemon=True,
+        )
+        self._peer_watcher_thread = thread
+        thread.start()
+
+    def _watch_peer(
+        self,
+        process: subprocess.Popen[bytes],
+        peer_backend: str,
+    ) -> None:
+        """Block on ``process.wait`` and log a classified exit message.
+
+        Distinguishes between "we asked it to terminate" (expected, INFO) and
+        "it died on its own" (unexpected, WARNING) so a normal shutdown does
+        not look like a crash in the logs.
+        """
+        try:
+            returncode = process.wait()
+        except Exception as exc:  # noqa: BLE001 - daemon thread must not propagate
+            self.logger.error(
+                "Peer watcher for backend=%s pid=%s failed while waiting: %s",
+                peer_backend,
+                process.pid,
+                exc,
+            )
+            return
+        cause = classify_exit_code(returncode)
+        if self._peer_terminate_requested:
+            self.logger.info(
+                "Peer compute-node exited as requested: backend=%s pid=%s %s",
+                peer_backend,
+                process.pid,
+                cause,
+            )
+            return
+        message = (
+            f"peer compute-node died unexpectedly backend={peer_backend} "
+            f"pid={process.pid} returncode={returncode} cause=\"{cause}\" "
+            f"(no respawn — observability only)"
+        )
+        self.logger.warning(message)
+        write_audit_event(message, logger=self.logger, level=logging.WARNING)
 
     def _terminate_peer(self) -> None:
         """Best-effort terminate of the peer compute-node on shutdown.
@@ -265,6 +332,7 @@ class Supervisor:
         if process.poll() is not None:
             self._peer_process = None
             return
+        self._peer_terminate_requested = True
         self.logger.info(
             "Terminating peer compute-node pid=%s backend=%s",
             process.pid,

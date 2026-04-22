@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import array
 import json
+import logging
 import os
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
+
+from common.process_exit import classify_exit_code
 
 from app.constants import (
     CONV2D_CLIENT_RESPONSE_STATS_ONLY,
@@ -44,6 +47,85 @@ from compute_node.performance_summary import RuntimeProcessorProfile, load_runti
 from setup import active_python_path
 from wire.internal_protocol.control_plane import Conv2dResultPayload
 from wire.internal_protocol.runtime_transport import TaskAssign, TaskResult, TransferMode
+
+_LOGGER = logging.getLogger(__name__)
+_RUNNER_STDERR_TAIL_BYTES = 2048
+
+
+def _tail_stream(payload: str | bytes | None, *, limit: int = _RUNNER_STDERR_TAIL_BYTES) -> str:
+    """Return the trailing portion of a captured runner stream, safe to log.
+
+    Native runners can produce many KB of progress output; only the tail
+    typically matters when explaining a crash, and bounding the size keeps the
+    log readable.
+    """
+    if payload is None:
+        return "<none>"
+    if isinstance(payload, bytes):
+        text = payload.decode("utf-8", errors="replace")
+    else:
+        text = payload
+    text = text.strip()
+    if not text:
+        return "<empty>"
+    if len(text) <= limit:
+        return text
+    return f"...<truncated {len(text) - limit} bytes>...{text[-limit:]}"
+
+
+def _log_runner_failure(
+    *,
+    method: str,
+    backend_name: str,
+    task: TaskAssign,
+    returncode: int | None,
+    stderr: str | bytes | None,
+    stdout: str | bytes | None,
+    elapsed_ms: int,
+) -> None:
+    """Emit a single ERROR line summarizing why a native runner exited nonzero.
+
+    Why: the runner runs in a ProcessPoolExecutor worker; if its exception
+    propagates past ``drain_completed_tasks`` the worker dies silently with no
+    log line because its stderr was directed to a transient console window.
+    Logging here guarantees the cause-of-death (exit code + classification +
+    stderr tail) is recorded before the exception bubbles up.
+    """
+    classification = classify_exit_code(returncode)
+    _LOGGER.error(
+        "%s native runner failed: backend=%s task_id=%s elapsed_ms=%d returncode=%s cause=\"%s\" "
+        "stderr_tail=%r stdout_tail=%r",
+        method,
+        backend_name,
+        getattr(task, "task_id", "?"),
+        elapsed_ms,
+        returncode,
+        classification,
+        _tail_stream(stderr),
+        _tail_stream(stdout),
+    )
+
+
+def _log_runner_timeout(
+    *,
+    method: str,
+    backend_name: str,
+    task: TaskAssign,
+    timeout: float | None,
+    stderr: str | bytes | None,
+    stdout: str | bytes | None,
+) -> None:
+    """Emit a single ERROR line when a native runner blew its wall-clock budget."""
+    _LOGGER.error(
+        "%s native runner timed out: backend=%s task_id=%s timeout=%.1fs "
+        "stderr_tail=%r stdout_tail=%r",
+        method,
+        backend_name,
+        getattr(task, "task_id", "?"),
+        float(timeout or 0.0),
+        _tail_stream(stderr),
+        _tail_stream(stdout),
+    )
 
 
 def _summarize_conv2d_slice_file(path: Path, *, max_samples: int) -> tuple[int, float, float, tuple[float, ...]]:
@@ -513,16 +595,38 @@ class Conv2dTaskExecutor:
                     )
 
                 subprocess_started_at = time.monotonic()
-                completed = subprocess.run(
-                    cmd,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    cwd=METHOD_DIR,
-                    timeout=900.0,
-                )
+                try:
+                    completed = subprocess.run(
+                        cmd,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        cwd=METHOD_DIR,
+                        timeout=900.0,
+                    )
+                except subprocess.CalledProcessError as exc:
+                    _log_runner_failure(
+                        method="conv2d",
+                        backend_name=backend_name,
+                        task=task,
+                        returncode=exc.returncode,
+                        stderr=exc.stderr,
+                        stdout=exc.stdout,
+                        elapsed_ms=int((time.monotonic() - subprocess_started_at) * 1000),
+                    )
+                    raise
+                except subprocess.TimeoutExpired as exc:
+                    _log_runner_timeout(
+                        method="conv2d",
+                        backend_name=backend_name,
+                        task=task,
+                        timeout=exc.timeout,
+                        stderr=exc.stderr,
+                        stdout=exc.stdout,
+                    )
+                    raise
                 computation_ms_total += max(
                     0, int((time.monotonic() - subprocess_started_at) * 1000)
                 )

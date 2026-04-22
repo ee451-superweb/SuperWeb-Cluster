@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import atexit
 import json
+import logging
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+
+from common.process_exit import classify_exit_code
 
 from app.constants import DX12_BACKEND_DISABLED_REASON
 from app.compute_resource_policy import resolve_capped_cpu_worker_count, resolve_metal_headroom_policy
@@ -38,6 +41,80 @@ from wire.internal_protocol.runtime_transport import TaskAssign, TaskResult
 
 ROOT_DIR = Path(__file__).resolve().parent
 INPUT_MATRIX_GENERATED_DIR = GEMV_DATASET_DIR
+
+_LOGGER = logging.getLogger(__name__)
+_RUNNER_STDERR_TAIL_BYTES = 2048
+
+
+def _tail_stream(payload: str | bytes | None, *, limit: int = _RUNNER_STDERR_TAIL_BYTES) -> str:
+    """Return the trailing portion of a captured runner stream, safe to log."""
+    if payload is None:
+        return "<none>"
+    if isinstance(payload, bytes):
+        text = payload.decode("utf-8", errors="replace")
+    else:
+        text = payload
+    text = text.strip()
+    if not text:
+        return "<empty>"
+    if len(text) <= limit:
+        return text
+    return f"...<truncated {len(text) - limit} bytes>...{text[-limit:]}"
+
+
+def _log_gemv_runner_failure(
+    *,
+    backend_name: str,
+    task_id: str,
+    row_start: int,
+    row_end: int,
+    returncode: int | None,
+    stderr: str | bytes | None,
+    stdout: str | bytes | None,
+) -> None:
+    """Emit a single ERROR line summarizing a nonzero gemv runner exit.
+
+    Why: the gemv native runner runs in a worker subprocess; without explicit
+    capture, its CalledProcessError propagates with no log line and the
+    operator only sees that the worker disappeared.
+    """
+    classification = classify_exit_code(returncode)
+    _LOGGER.error(
+        "gemv native runner failed: backend=%s task_id=%s rows=[%d, %d) returncode=%s cause=\"%s\" "
+        "stderr_tail=%r stdout_tail=%r",
+        backend_name,
+        task_id,
+        row_start,
+        row_end,
+        returncode,
+        classification,
+        _tail_stream(stderr),
+        _tail_stream(stdout),
+    )
+
+
+def _log_gemv_runner_timeout(
+    *,
+    backend_name: str,
+    task_id: str,
+    row_start: int,
+    row_end: int,
+    timeout: float | None,
+    stderr: str | bytes | None,
+    stdout: str | bytes | None,
+) -> None:
+    """Emit a single ERROR line when the gemv runner blew its wall-clock budget."""
+    _LOGGER.error(
+        "gemv native runner timed out: backend=%s task_id=%s rows=[%d, %d) timeout=%.1fs "
+        "stderr_tail=%r stdout_tail=%r",
+        backend_name,
+        task_id,
+        row_start,
+        row_end,
+        float(timeout or 0.0),
+        _tail_stream(stderr),
+        _tail_stream(stdout),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,6 +320,7 @@ class GemvTaskExecutor:
                     temp_root,
                     spec=spec,
                     dataset_layout=dataset_layout,
+                    task_id=task.task_id,
                 )
                 slice_ms = max(0, int((time.monotonic() - slice_started_at) * 1000))
                 return processor_slice.row_start, chunk, slice_ms
@@ -351,6 +429,7 @@ class GemvTaskExecutor:
         *,
         spec,
         dataset_layout,
+        task_id: str = "?",
     ) -> bytes:
         """Run one processor-specific GEMV slice and return raw output bytes.
 
@@ -387,16 +466,39 @@ class GemvTaskExecutor:
                 spec=spec,
                 dataset_layout=dataset_layout,
             )
-            completed = subprocess.run(
-                command,
-                check=True,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                cwd=GEMV_METHOD_DIR,
-                timeout=300.0,
-            )
+            try:
+                completed = subprocess.run(
+                    command,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    cwd=GEMV_METHOD_DIR,
+                    timeout=300.0,
+                )
+            except subprocess.CalledProcessError as exc:
+                _log_gemv_runner_failure(
+                    backend_name=processor_slice.processor.hardware_type,
+                    task_id=task_id,
+                    row_start=processor_slice.row_start,
+                    row_end=processor_slice.row_end,
+                    returncode=exc.returncode,
+                    stderr=exc.stderr,
+                    stdout=exc.stdout,
+                )
+                raise
+            except subprocess.TimeoutExpired as exc:
+                _log_gemv_runner_timeout(
+                    backend_name=processor_slice.processor.hardware_type,
+                    task_id=task_id,
+                    row_start=processor_slice.row_start,
+                    row_end=processor_slice.row_end,
+                    timeout=exc.timeout,
+                    stderr=exc.stderr,
+                    stdout=exc.stdout,
+                )
+                raise
             if not output_path.exists():
                 stdout = (completed.stdout or "").strip()
                 raise RuntimeError(

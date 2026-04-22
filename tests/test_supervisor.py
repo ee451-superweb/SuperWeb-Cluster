@@ -324,8 +324,11 @@ class SupervisorCapacityPlanningTests(unittest.TestCase):
                 bootstrap_script_path=Path("/tmp/bootstrap.py"),
             )
         fake_process = mock.Mock(pid=4242)
+        fake_process.wait.return_value = 0
         with mock.patch("app.supervisor.subprocess.Popen", return_value=fake_process) as popen_mock:
             supervisor._spawn_peer("cpu")
+        if supervisor._peer_watcher_thread is not None:
+            supervisor._peer_watcher_thread.join(timeout=2.0)
         popen_mock.assert_called_once()
         self.assertIs(supervisor._peer_process, fake_process)
         self.assertEqual(supervisor._peer_backend, "cpu")
@@ -396,9 +399,13 @@ class SupervisorCapacityPlanningTests(unittest.TestCase):
                 result_path=result_path,
                 bootstrap_script_path=Path("/tmp/bootstrap.py"),
             )
-        with mock.patch("app.supervisor.subprocess.Popen", return_value=mock.Mock(pid=1)) as popen_mock, \
+        fake_process = mock.Mock(pid=1)
+        fake_process.wait.return_value = 0
+        with mock.patch("app.supervisor.subprocess.Popen", return_value=fake_process) as popen_mock, \
              mock.patch("app.supervisor.sys.platform", "win32"):
             supervisor._spawn_peer("cuda")
+        if supervisor._peer_watcher_thread is not None:
+            supervisor._peer_watcher_thread.join(timeout=2.0)
         kwargs = popen_mock.call_args.kwargs
         self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
         self.assertEqual(kwargs["stdout"], subprocess.DEVNULL)
@@ -452,6 +459,75 @@ class SupervisorCapacityPlanningTests(unittest.TestCase):
             supervisor.shutdown()
         cleanup_mock.assert_called_once()
 
+    def test_spawn_peer_starts_watcher_thread_logging_unexpected_death(self) -> None:
+        # When a peer dies on its own (no shutdown requested), the watcher
+        # thread must emit a WARNING with the classified cause so operators
+        # can tell an OS-normal eviction from a runner bug. No respawn.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result_path = Path(temp_dir) / "result.json"
+            _write_result_json(
+                result_path,
+                usable_backends_by_method={"gemv": ["cpu", "cuda"]},
+            )
+            supervisor = self._build_supervisor(
+                config=AppConfig(),
+                result_path=result_path,
+                bootstrap_script_path=Path("/tmp/bootstrap.py"),
+            )
+
+        fake_proc = mock.Mock()
+        fake_proc.pid = 4242
+        fake_proc.wait.return_value = -11  # SIGSEGV equivalent on posix; classifier handles it
+        with mock.patch("app.supervisor.subprocess.Popen", return_value=fake_proc):
+            supervisor._spawn_peer("cuda")
+        watcher = supervisor._peer_watcher_thread
+        self.assertIsNotNone(watcher)
+        watcher.join(timeout=2.0)
+        self.assertFalse(watcher.is_alive())
+        warning_calls = supervisor.logger.warning.call_args_list
+        self.assertTrue(
+            any("died unexpectedly" in str(call) for call in warning_calls),
+            f"expected unexpected-death WARNING, got {warning_calls!r}",
+        )
+
+    def test_spawn_peer_watcher_logs_info_when_terminate_requested(self) -> None:
+        # If shutdown() called terminate first, the peer's exit is expected and
+        # the watcher must log INFO, not WARNING — otherwise normal shutdowns
+        # look like crashes in the audit log.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result_path = Path(temp_dir) / "result.json"
+            _write_result_json(
+                result_path,
+                usable_backends_by_method={"gemv": ["cpu", "cuda"]},
+            )
+            supervisor = self._build_supervisor(
+                config=AppConfig(),
+                result_path=result_path,
+                bootstrap_script_path=Path("/tmp/bootstrap.py"),
+            )
+
+        wait_event = __import__("threading").Event()
+
+        def _blocking_wait():
+            wait_event.wait(timeout=2.0)
+            return 0
+
+        fake_proc = mock.Mock()
+        fake_proc.pid = 4243
+        fake_proc.wait.side_effect = _blocking_wait
+        fake_proc.poll.return_value = None
+        with mock.patch("app.supervisor.subprocess.Popen", return_value=fake_proc):
+            supervisor._spawn_peer("cuda")
+        # Mark terminate requested before unblocking wait, mirroring shutdown().
+        supervisor._peer_terminate_requested = True
+        wait_event.set()
+        supervisor._peer_watcher_thread.join(timeout=2.0)
+        warning_calls = supervisor.logger.warning.call_args_list
+        self.assertFalse(
+            any("died unexpectedly" in str(call) for call in warning_calls),
+            f"watcher must not warn on requested termination; got {warning_calls!r}",
+        )
+
     def test_spawn_peer_uses_create_new_console_by_default_on_windows(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             result_path = Path(temp_dir) / "result.json"
@@ -464,9 +540,13 @@ class SupervisorCapacityPlanningTests(unittest.TestCase):
                 result_path=result_path,
                 bootstrap_script_path=Path("/tmp/bootstrap.py"),
             )
-        with mock.patch("app.supervisor.subprocess.Popen", return_value=mock.Mock(pid=1)) as popen_mock, \
+        fake_process = mock.Mock(pid=1)
+        fake_process.wait.return_value = 0
+        with mock.patch("app.supervisor.subprocess.Popen", return_value=fake_process) as popen_mock, \
              mock.patch("app.supervisor.sys.platform", "win32"):
             supervisor._spawn_peer("cuda")
+        if supervisor._peer_watcher_thread is not None:
+            supervisor._peer_watcher_thread.join(timeout=2.0)
         kwargs = popen_mock.call_args.kwargs
         self.assertNotIn("stdout", kwargs)
         self.assertNotIn("stderr", kwargs)
