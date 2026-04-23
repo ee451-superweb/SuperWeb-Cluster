@@ -182,7 +182,10 @@ def _selected_methods(method_arg: str) -> list[str]:
         The ordered list of method names to benchmark.
     """
     if method_arg == "all":
-        return [METHOD_GEMV, METHOD_CONV2D, METHOD_GEMM]
+        # GEMM first: cuBLAS is vendor-tuned (not a hand-rolled kernel) and
+        # runs fastest, so front-loading it gets an early usable result out
+        # before the longer GEMV/conv2d autotune sweeps finish.
+        return [METHOD_GEMM, METHOD_GEMV, METHOD_CONV2D]
     return [method_arg]
 
 

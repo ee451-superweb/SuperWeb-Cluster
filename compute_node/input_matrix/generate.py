@@ -97,10 +97,13 @@ def _selected_methods(method_arg: str) -> list[str]:
         The ordered list of methods whose datasets should be generated.
     """
     if method_arg == "all":
+        # Match the benchmark ordering (GEMM first) so dataset generation
+        # finishes its fastest method first and is immediately ready when the
+        # benchmark picks up the same ordering.
         return [
+            METHOD_GEMM,
             METHOD_GEMV,
             METHOD_CONV2D,
-            METHOD_GEMM,
         ]
     return [method_arg]
 
