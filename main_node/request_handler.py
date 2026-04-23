@@ -21,6 +21,7 @@ from core.constants import (
     CONV2D_STATS_MAX_SAMPLES,
     MAIN_NODE_NAME,
     METHOD_FREE_CONTENT,
+    METHOD_GEMM,
     METHOD_GEMV,
     METHOD_CONV2D,
     STATUS_BAD_REQUEST,
@@ -31,9 +32,11 @@ from core.constants import (
 from core.tracing import trace_function
 from core.work_partition import partition_contiguous_range
 from compute_node.input_matrix.gemv import build_input_matrix_spec as build_gemv_input_matrix_spec
+from compute_node.input_matrix.gemm import build_spec as gemm_build_spec
 from compute_node.compute_methods.conv2d.executor import load_named_workload_spec
 from main_node.dispatcher import WorkerTaskSlice
 from wire.internal_protocol.transport import (
+    GemmResponsePayload,
     GemvResponsePayload,
     Conv2dResponsePayload,
     ResponseTiming,
@@ -112,7 +115,7 @@ class ClientRequestHandler:
         if not isinstance(method_totals, dict):
             method_totals = {}
         main_node_host = getattr(self.artifact_manager, "public_host", "127.0.0.1") or "127.0.0.1"
-        supported_methods = ", ".join((METHOD_GEMV, METHOD_CONV2D, METHOD_FREE_CONTENT))
+        supported_methods = ", ".join((METHOD_GEMV, METHOD_CONV2D, METHOD_GEMM, METHOD_FREE_CONTENT))
         return "\n".join(
             (
                 "superweb-cluster system overview",
@@ -122,6 +125,7 @@ class ClientRequestHandler:
                 f"total_effective_gflops: {total_effective_gflops:.3f}",
                 f"gemv_effective_gflops: {self._safe_float(method_totals.get(METHOD_GEMV, 0.0)):.3f}",
                 f"conv2d_effective_gflops: {self._safe_float(method_totals.get(METHOD_CONV2D, 0.0)):.3f}",
+                f"gemm_effective_gflops: {self._safe_float(method_totals.get(METHOD_GEMM, 0.0)):.3f}",
                 f"supported_methods: {supported_methods}",
             )
         )
@@ -212,6 +216,8 @@ class ClientRequestHandler:
         """
         if failed_slice.method == METHOD_GEMV:
             range_start, range_end = failed_slice.row_start, failed_slice.row_end
+        elif failed_slice.method == METHOD_GEMM:
+            range_start, range_end = failed_slice.m_start, failed_slice.m_end
         else:
             range_start, range_end = failed_slice.start_oc, failed_slice.end_oc
         if range_end <= range_start:
@@ -240,6 +246,20 @@ class ClientRequestHandler:
                         row_end=partition.end,
                         effective_gflops=float(original_weights.get(connection.peer_id, 0.0)),
                         method=METHOD_GEMV,
+                    )
+                )
+            elif failed_slice.method == METHOD_GEMM:
+                retry_slices.append(
+                    WorkerTaskSlice(
+                        connection=connection,
+                        task_id=retry_task_id,
+                        artifact_id=f"{retry_task_id}:{connection.runtime_id}",
+                        row_start=0,
+                        row_end=0,
+                        m_start=partition.start,
+                        m_end=partition.end,
+                        effective_gflops=float(original_weights.get(connection.peer_id, 0.0)),
+                        method=METHOD_GEMM,
                     )
                 )
             else:
@@ -300,6 +320,8 @@ class ClientRequestHandler:
         def _slice_scope(slice_: WorkerTaskSlice) -> str:
             if request.method == METHOD_CONV2D:
                 return f"oc={slice_.start_oc}:{slice_.end_oc}"
+            if request.method == METHOD_GEMM:
+                return f"m_rows={slice_.m_start}:{slice_.m_end}"
             return f"rows={slice_.row_start}:{slice_.row_end}"
 
         def _submit_retry(slice_: WorkerTaskSlice):
@@ -436,7 +458,7 @@ class ClientRequestHandler:
                 iteration_count=request.iteration_count,
             )
 
-        if request.method not in (METHOD_GEMV, METHOD_CONV2D):
+        if request.method not in (METHOD_GEMV, METHOD_CONV2D, METHOD_GEMM):
             return build_response(
                 status_code=STATUS_BAD_REQUEST,
                 method=request.method,
@@ -500,6 +522,27 @@ class ClientRequestHandler:
                 rows=gemv_spec.rows,
                 workers=workers,
                 worker_hardware=self.registry.list_worker_hardware(METHOD_GEMV),
+            )
+        elif request.method == METHOD_GEMM:
+            try:
+                gemm_spec = gemm_build_spec(default_variant=request.size or "large")
+            except ValueError as exc:
+                return build_response(
+                    status_code=STATUS_BAD_REQUEST,
+                    method=request.method,
+                    object_id=request.object_id,
+                    stream_id=request.stream_id,
+                    error_message=str(exc),
+                    worker_count=worker_count,
+                    client_count=client_count,
+                    client_id="",
+                    iteration_count=request.iteration_count,
+                )
+            assignments = self.dispatcher.dispatch_gemm(
+                request_id=request.request_id,
+                rows=gemm_spec.m,
+                workers=workers,
+                worker_hardware=self.registry.list_worker_hardware(METHOD_GEMM),
             )
         else:
             try:
@@ -619,6 +662,38 @@ class ClientRequestHandler:
                     )
                     output_vector = b""
                 response_payload = GemvResponsePayload(
+                    output_length=output_length,
+                    output_vector=output_vector,
+                )
+            elif request.method == METHOD_GEMM:
+                task_window_started_at = time.monotonic()
+                outcomes = self._run_assignments_with_failover(request, assignments)
+                task_window_done_at = time.monotonic()
+                task_results = [outcome[0] for outcome in outcomes]
+                worker_timings = tuple(outcome[1] for outcome in outcomes)
+                write_audit_event(
+                    f"aggregating result task_id={task_id} method={request.method} size={request.size or 'large'} worker_slices={len(task_results)}",
+                    stdout=True,
+                    logger=self.logger,
+                )
+                output_vector = self.aggregator.collect_gemm_result(
+                    m=gemm_spec.m,
+                    n=gemm_spec.n,
+                    results=task_results,
+                )
+                output_length = gemm_spec.m * gemm_spec.n
+                result_artifact = None
+                if len(output_vector) > self.config.max_message_size:
+                    if self.artifact_manager is None:
+                        raise RuntimeError("artifact manager is required to publish oversized GEMM results")
+                    result_artifact = self.artifact_manager.publish_bytes(
+                        output_vector,
+                        producer_node_id=MAIN_NODE_NAME,
+                        content_type="application/octet-stream",
+                        artifact_id=request.request_id,
+                    )
+                    output_vector = b""
+                response_payload = GemmResponsePayload(
                     output_length=output_length,
                     output_vector=output_vector,
                 )

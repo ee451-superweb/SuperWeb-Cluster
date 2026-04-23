@@ -438,7 +438,7 @@ class MainNodeRuntimeTests(unittest.TestCase):
         self.assertIn("main_node_endpoint: 10.0.0.5:52020", overview_text)
         self.assertIn("worker_count: 2", overview_text)
         self.assertIn("total_effective_gflops: 149.000", overview_text)
-        self.assertIn("supported_methods: gemv, conv2d, free_content", overview_text)
+        self.assertIn("supported_methods: gemv, conv2d, gemm, free_content", overview_text)
         runtime.registry.remove_client.assert_called_once_with(connection.peer_id)
         safe_close_mock.assert_called_once_with(connection.sock)
         self.assertTrue(print_mock.called)

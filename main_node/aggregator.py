@@ -146,6 +146,55 @@ class ResultAggregator:
             raise ValueError(f"task results cover only {next_row} rows out of {rows}")
         return bytes(merged)
 
+    def collect_gemm_result(
+        self,
+        *,
+        m: int,
+        n: int,
+        results: list[TaskResult],
+    ) -> bytes:
+        """Merge M-axis-partitioned GEMM results into one row-major C buffer.
+
+        Use this after GEMM worker slices finish. Each slice covers rows
+        [m_start, m_end) of the output C; concatenating the raw slice bytes
+        in ascending m_start order reproduces row-major ``C[0..M, 0..N]``.
+
+        Args:
+            m: Total M dimension expected in the final matrix.
+            n: N dimension (column count) shared across all slices.
+            results: Per-worker task results covering M-axis slices.
+
+        Returns:
+            The merged float32 output bytes in row-major order.
+        """
+        ordered_results = sorted(results, key=lambda item: item.m_start)
+        merged = bytearray()
+        next_row = 0
+        for result in ordered_results:
+            if result.m_start != next_row:
+                raise ValueError(
+                    f"gemm task results do not cover a contiguous M range: "
+                    f"expected {next_row}, got {result.m_start}"
+                )
+            if result.m_end < result.m_start:
+                raise ValueError("gemm task result m_end is smaller than m_start")
+            slice_rows = result.m_end - result.m_start
+            expected_length = slice_rows * n
+            if result.output_length != expected_length:
+                raise ValueError(
+                    f"gemm task result output length mismatch for rows {result.m_start}:{result.m_end} "
+                    f"(declared {result.output_length}, expected {expected_length})"
+                )
+            if len(result.output_vector) != expected_length * 4:
+                raise ValueError(
+                    f"gemm task result byte length mismatch for rows {result.m_start}:{result.m_end}"
+                )
+            merged.extend(result.output_vector)
+            next_row = result.m_end
+        if next_row != m:
+            raise ValueError(f"gemm task results cover only {next_row} rows out of {m}")
+        return bytes(merged)
+
     def collect_conv2d_result(
         self,
         *,
