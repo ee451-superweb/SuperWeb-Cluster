@@ -1,8 +1,11 @@
-"""Execute cuBLAS GEMM runtime tasks on the local compute node.
+"""Execute GEMM runtime tasks on the local compute node.
 
 Use this module when a compute node receives a GEMM ``TaskAssign`` and
-needs to run the pre-built cuBLAS runner against its locally generated
-A and B matrices, then return the assigned M-axis slice of C.
+needs to run a pre-built GEMM runner against its locally generated A and
+B matrices, then return the assigned M-axis slice of C. Prefers the
+cuBLAS runner when that binary is available; otherwise falls back to the
+self-contained threaded CPU runner so hosts without an NVIDIA toolchain
+can still carry GEMM work.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from core.process_exit import classify_exit_code
 from compute_node.compute_methods.gemm.paths import (
     CUDA_EXECUTABLE_PATH,
     GEMM_METHOD_DIR,
+    current_cpu_executable_path,
 )
 from compute_node.input_matrix.gemm import (
     build_dataset_layout,
@@ -55,10 +59,11 @@ def _tail_stream(payload: str | bytes | None, *, limit: int = _RUNNER_STDERR_TAI
 def _parse_compute_event_ms(stdout: str | bytes | None) -> int | None:
     """Return ``compute_event_ms`` from a runner's JSON stdout, or None.
 
-    The cuBLAS runner in dispatch mode emits a single-line JSON record whose
-    ``compute_event_ms`` is the cudaEvent-bracketed kernel time aggregated
-    across ``iteration_count`` calls. Using this over subprocess wall-clock
-    keeps capacity math consistent with the GEMV/conv2d contract.
+    Both the cuBLAS and the CPU runner emit a single-line JSON record whose
+    ``compute_event_ms`` is the kernel-loop wall time (cudaEvent-bracketed
+    for cuBLAS, ``steady_clock`` for CPU) aggregated across
+    ``iteration_count`` calls. Using this over subprocess wall-clock keeps
+    capacity math consistent across backends and methods.
     """
     if not stdout:
         return None
@@ -89,7 +94,7 @@ class _ResolvedTask:
 
 
 class GemmTaskExecutor:
-    """Execute one cuBLAS GEMM task on the local compute node."""
+    """Execute one GEMM task on the local compute node (cuBLAS or CPU)."""
 
     def __init__(self, *, dataset_root: Path | None = None) -> None:
         """Store the dataset root used at runtime.
@@ -114,11 +119,7 @@ class GemmTaskExecutor:
         resolved = self._resolve_task(task)
         self._validate_task(task, resolved)
 
-        executable_path = CUDA_EXECUTABLE_PATH
-        if not executable_path.exists():
-            raise FileNotFoundError(
-                f"cuBLAS GEMM runner is missing: {executable_path}; run performance_metrics/gemm to build"
-            )
+        executable_path, backend_label = self._select_runner_executable()
 
         output_path = self.dataset_root / f".task_{task.task_id}_C.bin"
         try:
@@ -127,6 +128,7 @@ class GemmTaskExecutor:
                 spec=resolved.spec,
                 dataset_layout=resolved.dataset_layout,
                 output_path=output_path,
+                executable_path=executable_path,
             )
             subprocess_started_at = time.monotonic()
             try:
@@ -176,7 +178,7 @@ class GemmTaskExecutor:
 
             if not output_path.exists():
                 raise RuntimeError(
-                    f"cuBLAS GEMM runner completed without writing {output_path.name}: "
+                    f"GEMM {backend_label} runner completed without writing {output_path.name}: "
                     f"{(completed.stdout or '').strip()}"
                 )
             slice_rows = task.m_end - task.m_start
@@ -184,7 +186,7 @@ class GemmTaskExecutor:
             output_bytes = output_path.read_bytes()
             if len(output_bytes) != expected_bytes:
                 raise ValueError(
-                    f"cuBLAS GEMM runner output has {len(output_bytes)} bytes, expected {expected_bytes}"
+                    f"GEMM {backend_label} runner output has {len(output_bytes)} bytes, expected {expected_bytes}"
                 )
         finally:
             try:
@@ -250,6 +252,32 @@ class GemmTaskExecutor:
                 f"run compute_node/input_matrix/generate.py --method gemm"
             )
 
+    def _select_runner_executable(self) -> tuple[Path, str]:
+        """Return ``(executable_path, backend_label)`` for the GEMM runner.
+
+        cuBLAS wins whenever the CUDA binary is built, since it's an order of
+        magnitude faster than the CPU fallback. When it isn't built (either
+        the host has no CUDA toolchain, or the ``--rebuild`` benchmark pass
+        hasn't run yet) we fall back to the self-contained CPU runner so
+        non-NVIDIA hosts can still join the cluster as GEMM workers.
+        """
+        if CUDA_EXECUTABLE_PATH.exists():
+            return CUDA_EXECUTABLE_PATH, "cuda"
+        try:
+            cpu_path = current_cpu_executable_path()
+        except RuntimeError as exc:
+            raise FileNotFoundError(
+                f"no GEMM runner is available: cuBLAS binary at {CUDA_EXECUTABLE_PATH} is missing "
+                f"and no CPU runner is configured for this platform ({exc})"
+            ) from exc
+        if not cpu_path.exists():
+            raise FileNotFoundError(
+                f"no GEMM runner is available: cuBLAS binary is missing at {CUDA_EXECUTABLE_PATH} "
+                f"and CPU fallback binary is missing at {cpu_path}; run "
+                f"performance_metrics/gemm to build one"
+            )
+        return cpu_path, "cpu"
+
     def _build_runtime_command(
         self,
         task: TaskAssign,
@@ -257,10 +285,15 @@ class GemmTaskExecutor:
         spec,
         dataset_layout,
         output_path: Path,
+        executable_path: Path,
     ) -> list[str]:
-        """Build the cuBLAS runner command line for one M-axis slice."""
+        """Build the GEMM runner command line for one M-axis slice.
+
+        The CPU and CUDA runners share the same CLI surface so dispatch code
+        can ignore which backend is actually running.
+        """
         return [
-            str(CUDA_EXECUTABLE_PATH),
+            str(executable_path),
             "--input-a",
             str(dataset_layout.a_path),
             "--input-b",

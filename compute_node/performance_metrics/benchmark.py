@@ -356,13 +356,13 @@ def _run_conv2d_benchmark(args: argparse.Namespace) -> dict[str, object]:
 
 
 def _run_gemm_benchmark(args: argparse.Namespace) -> dict[str, object]:
-    """Run the cuBLAS GEMM benchmark and return its raw report.
+    """Run the GEMM benchmark (CPU + optional cuBLAS) and return its raw report.
 
-    Use this helper from the combined benchmark flow. GEMM is cuBLAS-only so
-    there is no backend sweep or autotune: the method-local benchmark just
-    runs one cudaEvent-bracketed measurement pass on the mid workload and
-    writes out the per-method ``result.json`` the loader accepts. We call
-    the benchmark module in-process and reuse its JSON as the raw report.
+    Use this helper from the combined benchmark flow. The GEMM benchmark
+    always runs a CPU pass (self-contained threaded SGEMM) and, when
+    ``nvidia-smi`` is detectable on this host, also runs the cuBLAS pass and
+    picks the faster of the two as ``best_backend``. We call the benchmark
+    module in-process and reuse its JSON as the raw report.
 
     Args:
         args: Parsed top-level benchmark CLI arguments.
@@ -376,7 +376,7 @@ def _run_gemm_benchmark(args: argparse.Namespace) -> dict[str, object]:
         "method.gemm.dispatch",
         status="running",
         method=METHOD_GEMM,
-        requested_backends=["cuda"],
+        requested_backends=["cpu", "cuda"],
         rebuild=bool(getattr(args, "rebuild", False)),
         workload_mode=workload_mode,
         size=size,
