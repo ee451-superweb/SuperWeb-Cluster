@@ -14,7 +14,7 @@ enable_utf8_mode()
 
 from adapters.firewall import ensure_rules
 from common.types import FirewallStatus
-from adapters.platform import (
+from adapters.host import (
     detach_from_current_console,
     detect_os,
     has_attached_console,

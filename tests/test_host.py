@@ -3,7 +3,7 @@
 import unittest
 
 from adapters.network import get_local_mac_address
-from adapters.platform import detect_os, is_wsl
+from adapters.host import detect_os, is_wsl
 
 
 class PlatformTests(unittest.TestCase):
