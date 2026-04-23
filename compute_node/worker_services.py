@@ -28,7 +28,7 @@ from app.constants import (
     STATUS_INTERNAL_ERROR,
 )
 from common.types import ComputePerformanceSummary
-from wire.internal_protocol.runtime_transport import (
+from wire.internal_protocol.transport import (
     GemvResultPayload,
     MessageKind,
     NodeStatus,

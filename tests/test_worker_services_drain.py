@@ -12,7 +12,7 @@ from concurrent.futures import Future
 from unittest import mock
 
 from app.config import AppConfig
-from compute_node.runtime_services import WorkerTaskRuntimeService
+from compute_node.worker_services import WorkerTaskRuntimeService
 
 
 class _StubSession:

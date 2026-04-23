@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 from app.constants import METHOD_CONV2D, METHOD_GEMV
 from main_node.dispatcher import WorkerTaskSlice
 from main_node.request_handler import ClientRequestHandler
-from wire.internal_protocol.runtime_transport import TaskResult, WorkerTiming
+from wire.internal_protocol.transport import TaskResult, WorkerTiming
 
 
 def _make_handler(task_exchange) -> ClientRequestHandler:

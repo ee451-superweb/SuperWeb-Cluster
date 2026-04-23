@@ -24,13 +24,13 @@ from compute_node.executor import TaskExecutionRouter
 from compute_node.handlers import build_default_method_handlers
 from compute_node.heartbeat import WorkerHeartbeat
 from compute_node.performance_summary import load_compute_performance_summary, load_runtime_processor_inventory
-from compute_node.runtime_services import (
+from compute_node.worker_services import (
     WorkerTaskRuntimeService,
     format_compute_performance_summary,
 )
 from compute_node.session import WorkerSession
 from transport.artifact_manager import ArtifactManager
-from wire.internal_protocol.runtime_transport import (
+from wire.internal_protocol.transport import (
     MessageKind,
     describe_message_kind,
 )

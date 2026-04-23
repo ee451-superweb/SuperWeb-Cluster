@@ -4,11 +4,11 @@ import threading
 import unittest
 from unittest import mock
 
-import compute_node.runtime as runtime_module
+import compute_node.worker_loop as runtime_module
 from common.float32_codec import pack_float32_values
 from common.types import ComputePerformanceSummary, DiscoveryResult, HardwareProfile
 from compute_node.performance_summary import RuntimeProcessorInventory, RuntimeProcessorProfile
-from compute_node.runtime import ComputeNodeRuntime
+from compute_node.worker_loop import ComputeNodeRuntime
 from app.config import AppConfig
 from app.constants import (
     COMPUTE_NODE_NAME,
@@ -16,7 +16,7 @@ from app.constants import (
     METHOD_GEMV,
     STATUS_OK,
 )
-from wire.internal_protocol.runtime_transport import (
+from wire.internal_protocol.transport import (
     GemvResultPayload,
     Heartbeat,
     MessageKind,
@@ -124,10 +124,10 @@ class ComputeNodeRuntimeTests(unittest.TestCase):
     """Validate compute-node runtime behavior after discovery succeeds."""
 
     @mock.patch("builtins.print")
-    @mock.patch("compute_node.runtime.write_audit_event")
-    @mock.patch("compute_node.runtime.load_compute_performance_summary")
-    @mock.patch("compute_node.runtime.load_runtime_processor_inventory")
-    @mock.patch("compute_node.runtime.collect_hardware_profile")
+    @mock.patch("compute_node.worker_loop.write_audit_event")
+    @mock.patch("compute_node.worker_loop.load_compute_performance_summary")
+    @mock.patch("compute_node.worker_loop.load_runtime_processor_inventory")
+    @mock.patch("compute_node.worker_loop.collect_hardware_profile")
     def test_run_registers_records_heartbeat_and_executes_task(
         self,
         collect_hardware_profile_mock: mock.Mock,
@@ -236,9 +236,9 @@ class ComputeNodeRuntimeTests(unittest.TestCase):
         )
 
     @mock.patch("builtins.print")
-    @mock.patch("compute_node.runtime.load_compute_performance_summary")
-    @mock.patch("compute_node.runtime.load_runtime_processor_inventory")
-    @mock.patch("compute_node.runtime.collect_hardware_profile")
+    @mock.patch("compute_node.worker_loop.load_compute_performance_summary")
+    @mock.patch("compute_node.worker_loop.load_runtime_processor_inventory")
+    @mock.patch("compute_node.worker_loop.collect_hardware_profile")
     def test_run_replies_to_heartbeat_while_task_is_still_running(
         self,
         collect_hardware_profile_mock: mock.Mock,
@@ -328,9 +328,9 @@ class ComputeNodeRuntimeTests(unittest.TestCase):
         self.assertEqual(len(blocking_executor.tasks), 1)
         self.assertTrue(print_mock.called)
 
-    @mock.patch("compute_node.runtime.load_compute_performance_summary")
-    @mock.patch("compute_node.runtime.load_runtime_processor_inventory")
-    @mock.patch("compute_node.runtime.collect_hardware_profile")
+    @mock.patch("compute_node.worker_loop.load_compute_performance_summary")
+    @mock.patch("compute_node.worker_loop.load_runtime_processor_inventory")
+    @mock.patch("compute_node.worker_loop.collect_hardware_profile")
     def test_run_reports_registration_failure(
         self,
         collect_hardware_profile_mock: mock.Mock,
@@ -370,8 +370,8 @@ class ComputeNodeRuntimeTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertIn("Unable to join main-node TCP runtime", result.message)
 
-    @mock.patch("compute_node.runtime.multiprocessing.get_context")
-    @mock.patch("compute_node.runtime.ProcessPoolExecutor")
+    @mock.patch("compute_node.worker_loop.multiprocessing.get_context")
+    @mock.patch("compute_node.worker_loop.ProcessPoolExecutor")
     def test_build_task_execution_backend_uses_sigint_ignoring_initializer(
         self,
         process_pool_executor_mock: mock.Mock,
@@ -393,9 +393,9 @@ class ComputeNodeRuntimeTests(unittest.TestCase):
             runtime_module._configure_subprocess_worker_signals,
         )
 
-    @mock.patch("compute_node.runtime.load_compute_performance_summary")
-    @mock.patch("compute_node.runtime.load_runtime_processor_inventory")
-    @mock.patch("compute_node.runtime.collect_hardware_profile")
+    @mock.patch("compute_node.worker_loop.load_compute_performance_summary")
+    @mock.patch("compute_node.worker_loop.load_runtime_processor_inventory")
+    @mock.patch("compute_node.worker_loop.collect_hardware_profile")
     def test_run_waits_for_idle_process_pool_shutdown(
         self,
         collect_hardware_profile_mock: mock.Mock,
@@ -440,9 +440,9 @@ class ComputeNodeRuntimeTests(unittest.TestCase):
 
         fake_pool.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
 
-    @mock.patch("compute_node.runtime.load_compute_performance_summary")
-    @mock.patch("compute_node.runtime.load_runtime_processor_inventory")
-    @mock.patch("compute_node.runtime.collect_hardware_profile")
+    @mock.patch("compute_node.worker_loop.load_compute_performance_summary")
+    @mock.patch("compute_node.worker_loop.load_runtime_processor_inventory")
+    @mock.patch("compute_node.worker_loop.collect_hardware_profile")
     def test_run_terminates_inflight_process_pool_workers_on_shutdown(
         self,
         collect_hardware_profile_mock: mock.Mock,

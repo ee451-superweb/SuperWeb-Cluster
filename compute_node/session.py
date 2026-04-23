@@ -10,7 +10,7 @@ import socket
 
 from common.types import ComputePerformanceSummary, HardwareProfile
 from app.constants import RUNTIME_MSG_REGISTER_OK
-from wire.internal_protocol.runtime_transport import (
+from wire.internal_protocol.transport import (
     MessageKind,
     RegisterOk,
     RuntimeEnvelope,

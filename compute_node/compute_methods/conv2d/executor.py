@@ -46,7 +46,7 @@ from compute_node.input_matrix.conv2d import build_input_matrix_spec, normalize_
 from compute_node.performance_summary import RuntimeProcessorProfile, load_runtime_processor_inventory
 from setup import active_python_path
 from wire.internal_protocol.control_plane import Conv2dResultPayload
-from wire.internal_protocol.runtime_transport import TaskAssign, TaskResult, TransferMode
+from wire.internal_protocol.transport import TaskAssign, TaskResult, TransferMode
 
 _LOGGER = logging.getLogger(__name__)
 _RUNNER_STDERR_TAIL_BYTES = 2048

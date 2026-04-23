@@ -37,7 +37,7 @@ from compute_node.input_matrix.gemv import (
 from compute_node.performance_metrics.gemv.config import DATASET_DIR as GEMV_DATASET_DIR
 from compute_node.performance_summary import RuntimeProcessorInventory, RuntimeProcessorProfile, load_runtime_processor_inventory
 from app.constants import METHOD_GEMV
-from wire.internal_protocol.runtime_transport import TaskAssign, TaskResult
+from wire.internal_protocol.transport import TaskAssign, TaskResult
 
 ROOT_DIR = Path(__file__).resolve().parent
 INPUT_MATRIX_GENERATED_DIR = GEMV_DATASET_DIR
