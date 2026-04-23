@@ -553,5 +553,62 @@ class TaskExecutorCommandTests(unittest.TestCase):
         result_path.unlink(missing_ok=True)
 
 
+class GemmExecutorCommandTests(unittest.TestCase):
+    """Verify the cuBLAS GEMM runner invocation matches its CLI contract."""
+
+    def _build_task(self, *, size: str = "small", m: int = 1024, m_start: int = 0, m_end: int = 512, iteration_count: int = 3) -> TaskAssign:
+        from core.constants import METHOD_GEMM
+        from wire.internal_protocol.transport import GemmTaskPayload
+
+        return TaskAssign(
+            request_id="req-gemm",
+            node_id="worker-1",
+            task_id="req-gemm:worker-1",
+            method=METHOD_GEMM,
+            size=size,
+            object_id=f"gemm/{size}",
+            stream_id="",
+            timestamp_ms=0,
+            iteration_count=iteration_count,
+            task_payload=GemmTaskPayload(
+                m_start=m_start, m_end=m_end, m=m, n=m, k=m,
+            ),
+        )
+
+    def test_gemm_command_uses_dispatch_mode_and_iteration_flag(self) -> None:
+        from compute_node.compute_methods.gemm.executor import GemmTaskExecutor
+        from compute_node.compute_methods.gemm.paths import CUDA_EXECUTABLE_PATH
+        from compute_node.input_matrix.gemm import build_dataset_layout, build_spec, dataset_prefix_for_size
+
+        dataset_root = Path("C:/tmp/gemm_generated")
+        executor = GemmTaskExecutor(dataset_root=dataset_root)
+        task = self._build_task(size="small")
+        spec = build_spec(default_variant="small")
+        layout = build_dataset_layout(dataset_root, prefix=dataset_prefix_for_size("small"))
+
+        command = executor._build_runtime_command(
+            task,
+            spec=spec,
+            dataset_layout=layout,
+            output_path=dataset_root / ".task_C.bin",
+        )
+
+        self.assertEqual(command[0], str(CUDA_EXECUTABLE_PATH))
+        self.assertIn("--input-a", command)
+        self.assertIn("--input-b", command)
+        self.assertIn("--m-start", command)
+        self.assertEqual(command[command.index("--m-start") + 1], str(task.m_start))
+        self.assertIn("--m-end", command)
+        self.assertEqual(command[command.index("--m-end") + 1], str(task.m_end))
+        self.assertEqual(command[command.index("--m") + 1], str(spec.m))
+        self.assertEqual(command[command.index("--n") + 1], str(spec.n))
+        self.assertEqual(command[command.index("--k") + 1], str(spec.k))
+        self.assertEqual(
+            command[command.index("--iteration-count") + 1],
+            str(task.iteration_count),
+        )
+        self.assertEqual(command[command.index("--mode") + 1], "dispatch")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -10,6 +10,7 @@ from core.constants import (
     COMPUTE_NODE_NAME,
     CONV2D_CLIENT_RESPONSE_STATS_ONLY,
     MAIN_NODE_NAME,
+    METHOD_GEMM,
     METHOD_GEMV,
     METHOD_CONV2D,
     STATUS_ACCEPTED,
@@ -18,6 +19,10 @@ from core.constants import (
 )
 from wire.internal_protocol.control_plane_codec import encode_envelope, parse_envelope
 from wire.internal_protocol.transport import (
+    GemmRequestPayload,
+    GemmResponsePayload,
+    GemmResultPayload,
+    GemmTaskPayload,
     MessageKind,
     Conv2dRequestPayload,
     Conv2dResponsePayload,
@@ -209,6 +214,96 @@ class RuntimeProtocolTests(unittest.TestCase):
         self.assertEqual(result.task_result.output_length, 2)
         self.assertEqual(result.task_result.iteration_count, 11)
         self.assertEqual(unpack_float32_bytes(result.task_result.output_vector), [9.0, 10.0])
+
+    def test_gemm_messages_use_typed_payloads(self) -> None:
+        output_vector = pack_float32_values([0.25] * (512 * 1024))
+        request = parse_envelope(
+            encode_envelope(
+                build_client_request(
+                    SUPERWEB_CLIENT_NAME,
+                    "req-gemm",
+                    METHOD_GEMM,
+                    b"",
+                    size="small",
+                    object_id="gemm/small",
+                    stream_id="stream-gemm",
+                    iteration_count=2,
+                    request_payload=GemmRequestPayload(),
+                )
+            )
+        )
+        assign = parse_envelope(
+            encode_envelope(
+                build_task_assign(
+                    request_id="req-gemm",
+                    node_id=COMPUTE_NODE_NAME,
+                    task_id="req-gemm:worker-a",
+                    method=METHOD_GEMM,
+                    size="small",
+                    row_start=0,
+                    row_end=0,
+                    vector_data=b"",
+                    object_id="gemm/small",
+                    stream_id="stream-gemm",
+                    iteration_count=2,
+                    task_payload=GemmTaskPayload(
+                        m_start=0, m_end=512, m=1024, n=1024, k=1024,
+                    ),
+                )
+            )
+        )
+        result = parse_envelope(
+            encode_envelope(
+                build_task_result(
+                    "req-gemm",
+                    COMPUTE_NODE_NAME,
+                    "req-gemm:worker-a",
+                    STATUS_OK,
+                    iteration_count=2,
+                    result_payload=GemmResultPayload(
+                        m_start=0,
+                        m_end=512,
+                        output_length=512 * 1024,
+                        output_vector=output_vector,
+                    ),
+                )
+            )
+        )
+        response = parse_envelope(
+            encode_envelope(
+                build_client_response(
+                    "req-gemm",
+                    STATUS_OK,
+                    method=METHOD_GEMM,
+                    size="small",
+                    object_id="gemm/small",
+                    stream_id="stream-gemm",
+                    iteration_count=2,
+                    task_id="req-gemm",
+                    response_payload=GemmResponsePayload(
+                        output_length=1024 * 1024,
+                        output_vector=output_vector,
+                    ),
+                )
+            )
+        )
+
+        self.assertIsInstance(request.client_request.request_payload, GemmRequestPayload)
+        self.assertEqual(request.client_request.method, METHOD_GEMM)
+        self.assertEqual(request.client_request.size, "small")
+        self.assertIsInstance(assign.task_assign.task_payload, GemmTaskPayload)
+        self.assertEqual(assign.task_assign.m_start, 0)
+        self.assertEqual(assign.task_assign.m_end, 512)
+        self.assertEqual(assign.task_assign.m, 1024)
+        self.assertEqual(assign.task_assign.n, 1024)
+        self.assertEqual(assign.task_assign.k, 1024)
+        self.assertIsInstance(result.task_result.result_payload, GemmResultPayload)
+        self.assertEqual(result.task_result.m_start, 0)
+        self.assertEqual(result.task_result.m_end, 512)
+        self.assertEqual(result.task_result.output_length, 512 * 1024)
+        self.assertEqual(len(result.task_result.output_vector), 512 * 1024 * 4)
+        self.assertIsInstance(response.client_response.response_payload, GemmResponsePayload)
+        self.assertEqual(response.client_response.output_length, 1024 * 1024)
 
     def test_conv2d_messages_use_typed_payloads(self) -> None:
         weight_data = pack_float32_values([0.5] * (3 * 3 * 4 * 2))
