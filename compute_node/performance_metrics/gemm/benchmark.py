@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -82,6 +83,23 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+_GEMM_GENCODE_ARGS = (
+    "-gencode=arch=compute_75,code=sm_75",
+    "-gencode=arch=compute_80,code=sm_80",
+    "-gencode=arch=compute_86,code=sm_86",
+    "-gencode=arch=compute_87,code=sm_87",
+    "-gencode=arch=compute_88,code=sm_88",
+    "-gencode=arch=compute_89,code=sm_89",
+    "-gencode=arch=compute_90,code=sm_90",
+    "-gencode=arch=compute_100,code=sm_100",
+    "-gencode=arch=compute_103,code=sm_103",
+    "-gencode=arch=compute_110,code=sm_110",
+    "-gencode=arch=compute_120,code=sm_120",
+    "-gencode=arch=compute_121,code=sm_121",
+    "-gencode=arch=compute_120,code=compute_120",
+)
+
+
 def _ensure_runner_built(force_rebuild: bool = False) -> Path:
     """Compile the cuBLAS runner when the expected executable is missing.
 
@@ -91,17 +109,96 @@ def _ensure_runner_built(force_rebuild: bool = False) -> Path:
     if CUDA_EXECUTABLE_PATH.exists() and not force_rebuild:
         return CUDA_EXECUTABLE_PATH
     CUDA_BUILD_DIR.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        _compile_windows_runner()
+    else:
+        _compile_posix_runner()
+    return CUDA_EXECUTABLE_PATH
+
+
+def _compile_posix_runner() -> None:
+    """Compile the cuBLAS runner on Linux/macOS where nvcc uses the host compiler directly."""
     command = [
         "nvcc",
-        "-O3",
         "-std=c++17",
+        "-O3",
         "-lcublas",
         "-o",
         str(CUDA_EXECUTABLE_PATH),
         str(CUDA_SOURCE_PATH),
+        *_GEMM_GENCODE_ARGS,
     ]
     subprocess.run(command, check=True, cwd=GEMM_METHOD_DIR)
-    return CUDA_EXECUTABLE_PATH
+
+
+def _compile_windows_runner() -> None:
+    """Compile the cuBLAS runner on Windows through a VsDevCmd-wrapped batch script.
+
+    Why: nvcc on Windows dispatches the host-side compile to ``cl.exe``. Unless
+    the shell has already sourced VsDevCmd.bat, ``cl.exe`` is not on PATH and
+    nvcc exits with ``Cannot find compiler 'cl.exe'``. conv2d's CudaBackend
+    solves this by generating a .cmd wrapper that calls VsDevCmd first and then
+    nvcc; we reuse its VsDevCmd discovery helper so both methods agree on which
+    toolchain to use.
+    """
+    # Reuse conv2d's VsDevCmd discovery so both methods find the same toolchain.
+    from compute_node.performance_metrics.conv2d.backends.cuda_backend import CudaBackend
+
+    vsdevcmd = CudaBackend._find_vsdevcmd()
+    if vsdevcmd is None:
+        raise FileNotFoundError(
+            "VsDevCmd.bat was not found; install Visual Studio Build Tools and rerun with --rebuild"
+        )
+    compile_script_path = CUDA_BUILD_DIR / "build_gemm_cuda_runner.cmd"
+    nvcc_line = " ".join(
+        [
+            "nvcc",
+            "-std=c++17",
+            "-O3",
+            "--use_fast_math",
+            "-Wno-deprecated-gpu-targets",
+            "-cudart",
+            "static",
+            "-Xcompiler",
+            "\"/MT /EHsc\"",
+            "-o",
+            CUDA_EXECUTABLE_PATH.name,
+            f"..\\{CUDA_SOURCE_PATH.name}",
+            "-lcublas",
+            *_GEMM_GENCODE_ARGS,
+        ]
+    )
+    compile_script_path.write_text(
+        "\n".join(
+            [
+                "@echo off",
+                f"call \"{vsdevcmd}\" -arch=x64 -host_arch=x64 >nul",
+                "if errorlevel 1 exit /b %errorlevel%",
+                "pushd \"%~dp0\"",
+                nvcc_line,
+                "set \"BUILD_EXIT=%ERRORLEVEL%\"",
+                "popd",
+                "exit /b %BUILD_EXIT%",
+            ]
+        )
+        + "\n",
+        encoding="ascii",
+    )
+    completed = subprocess.run(
+        ["cmd", "/c", str(compile_script_path)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        cwd=CUDA_BUILD_DIR,
+    )
+    if completed.returncode != 0:
+        raise subprocess.CalledProcessError(
+            completed.returncode,
+            completed.args,
+            output=completed.stdout,
+            stderr=completed.stderr,
+        )
 
 
 def _ensure_dataset_ready(dataset_dir: Path, variant: str) -> None:
