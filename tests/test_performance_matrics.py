@@ -93,7 +93,6 @@ from compute_node.performance_metrics.gemv.workloads import build_benchmark_spec
 import subprocess
 
 from app.constants import DX12_BACKEND_DISABLED_REASON, METHOD_GEMV, METHOD_CONV2D
-from app.compute_resource_policy import resolve_metal_headroom_policy
 from tests.support import require_integration
 
 
@@ -119,18 +118,6 @@ class _FakeNativeRunnerProcess:
 
 
 class PerformanceMatricsTests(unittest.TestCase):
-    def test_metal_headroom_policy_translates_fraction_into_chunk_and_cooldown(self) -> None:
-        policy = resolve_metal_headroom_policy(8, fraction=0.9)
-
-        self.assertEqual(policy.work_chunk_size, 7)
-        self.assertAlmostEqual(policy.cooldown_ratio, (1.0 / 0.9) - 1.0)
-
-    def test_metal_headroom_policy_keeps_full_work_when_fraction_is_one(self) -> None:
-        policy = resolve_metal_headroom_policy(8, fraction=1.0)
-
-        self.assertEqual(policy.work_chunk_size, 8)
-        self.assertEqual(policy.cooldown_ratio, 0.0)
-
     def test_linear_score_midpoint_is_half(self) -> None:
         score = linear_time_score(0.6, ideal_seconds=0.2, zero_score_seconds=1.0, max_score=100.0)
         self.assertAlmostEqual(score, 50.0)
@@ -161,15 +148,12 @@ class PerformanceMatricsTests(unittest.TestCase):
                 "small",
                 "--output-channel-batch",
                 "8",
-                "--output-channel-batch-scale",
-                "0.75",
                 "--cooldown-ms",
                 "2.5",
             ]
         )
         self.assertEqual(args.workload_mode, "small")
         self.assertEqual(args.output_channel_batch, 8)
-        self.assertEqual(args.output_channel_batch_scale, 0.75)
         self.assertEqual(args.cooldown_ms, 2.5)
 
     def test_spatial_benchmark_parser_defaults_to_full_workload(self) -> None:
@@ -569,7 +553,6 @@ class PerformanceMatricsTests(unittest.TestCase):
             stride=None,
             workload_mode="small",
             output_channel_batch=None,
-            output_channel_batch_scale=None,
             cooldown_ms=None,
             rebuild=False,
         )
@@ -911,7 +894,7 @@ class PerformanceMatricsTests(unittest.TestCase):
             )
             report = benchmark.run_benchmark(args)
 
-        self.assertEqual(report["schema_version"], 5)
+        self.assertEqual(report["schema_version"], 6)
         self.assertIn("device_overview", report)
         self.assertIn("methods", report)
         method_report = report["methods"][METHOD_GEMV]
@@ -1098,6 +1081,8 @@ class PerformanceMatricsTests(unittest.TestCase):
         self.assertEqual(command[command.index("--output-channel-batches") + 1], "8")
         self.assertIn("--cooldown-ms", command)
         self.assertEqual(command[command.index("--cooldown-ms") + 1], "2.5")
+        self.assertIn("--mode", command)
+        self.assertEqual(command[command.index("--mode") + 1], "benchmark")
 
     def test_spatial_metal_runner_command_includes_preparation_timing_flag(self) -> None:
         backend = SpatialMetalBackend()
@@ -1130,7 +1115,6 @@ class PerformanceMatricsTests(unittest.TestCase):
                 layout,
                 block_sizes=[256],
                 tile_sizes=[16],
-                headroom_fraction=0.9,
                 output_channel_batch=7,
                 autotune_repeats=1,
                 measurement_repeats=1,
@@ -1140,6 +1124,8 @@ class PerformanceMatricsTests(unittest.TestCase):
         command = captured["command"]
         self.assertIn("--include-preparation-in-metrics", command)
         self.assertEqual(command[command.index("--include-preparation-in-metrics") + 1], "1")
+        self.assertIn("--mode", command)
+        self.assertEqual(command[command.index("--mode") + 1], "benchmark")
 
     def test_metal_backend_probe_returns_status(self) -> None:
         backend = MetalBackend()

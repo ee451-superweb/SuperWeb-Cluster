@@ -121,7 +121,11 @@ vector<float> transpose_weight_for_oc_vectorization(
     return weight_dst;
 }
 
-vector<TileConfig> build_candidate_tiles(const vector<int>& block_sizes, const vector<int>& tile_sizes) {
+vector<TileConfig> build_candidate_tiles(
+    const vector<int>& block_sizes,
+    const vector<int>& tile_sizes,
+    int pinned_shared_input
+) {
     vector<TileConfig> defaults = {
         {8, 8, 0, 0.0f},
         {8, 8, 1, 0.0f},
@@ -139,7 +143,7 @@ vector<TileConfig> build_candidate_tiles(const vector<int>& block_sizes, const v
         {16, 32, 1, 0.0f},
     };
 
-    if (block_sizes.empty()) {
+    if (block_sizes.empty() && pinned_shared_input < 0) {
         return defaults;
     }
 
@@ -150,7 +154,9 @@ vector<TileConfig> build_candidate_tiles(const vector<int>& block_sizes, const v
             find(block_sizes.begin(), block_sizes.end(), threads) != block_sizes.end();
         const bool tile_matches = tile_sizes.empty() ||
             find(tile_sizes.begin(), tile_sizes.end(), candidate.tile_w) != tile_sizes.end();
-        if (block_matches && tile_matches) {
+        const bool shared_matches = pinned_shared_input < 0 ||
+            candidate.shared_input == pinned_shared_input;
+        if (block_matches && tile_matches && shared_matches) {
             filtered.push_back(candidate);
         }
     }
@@ -201,7 +207,13 @@ __device__ __forceinline__ void accumulate_output_lanes(
     int valid_outputs,
     float sums[kOutputsPerThread]
 ) {
-    if (valid_outputs == kOutputsPerThread) {
+    // valid_outputs == 4 is necessary but NOT sufficient for the float4 path:
+    // weight is laid out as [kh][kw][ic][oc] with stride c_out, so when
+    // c_out is not a multiple of 4 (e.g. c_out=122), weight_ptr is
+    // misaligned for any non-zero row — float4 loads then trap with
+    // cudaErrorMisalignedAddress (716). Gate on actual pointer alignment.
+    if (valid_outputs == kOutputsPerThread &&
+        (reinterpret_cast<uintptr_t>(weight_ptr) & 0xF) == 0) {
         const float4 weight_vec = *reinterpret_cast<const float4*>(weight_ptr);
         sums[0] += input_value * weight_vec.x;
         sums[1] += input_value * weight_vec.y;
@@ -223,7 +235,11 @@ __device__ __forceinline__ void store_output_lanes(
     int valid_outputs,
     const float sums[kOutputsPerThread]
 ) {
-    if (valid_outputs == kOutputsPerThread) {
+    // Same alignment caveat as the weight load: output stride is batch_c_out,
+    // which is min(channel_batch, c_out - oc_offset); odd channel_batch values
+    // would put output_ptr off a 16-byte boundary even when valid_outputs==4.
+    if (valid_outputs == kOutputsPerThread &&
+        (reinterpret_cast<uintptr_t>(output_ptr) & 0xF) == 0) {
         *reinterpret_cast<float4*>(output_ptr) = make_float4(sums[0], sums[1], sums[2], sums[3]);
         return;
     }
@@ -483,6 +499,8 @@ void maybe_sleep_between_batches(double cooldown_ms) {
     this_thread::sleep_for(chrono::duration<double, std::milli>(cooldown_ms));
 }
 
+enum class RunnerMode { Dispatch, Benchmark };
+
 int main(int argc, char** argv) {
     try {
         string input_path;
@@ -502,6 +520,8 @@ int main(int argc, char** argv) {
         double cooldown_ms = 0.0;
         vector<int> block_sizes;
         vector<int> tile_sizes;
+        int pinned_shared_input = -1;
+        RunnerMode mode = RunnerMode::Dispatch;
         bool verbose = false;
 
         for (int i = 1; i < argc; ++i) {
@@ -519,12 +539,23 @@ int main(int argc, char** argv) {
             else if (arg == "--stride" && i + 1 < argc) stride = stoi(argv[++i]);
             else if (arg == "--block-sizes" && i + 1 < argc) block_sizes = parse_list(argv[++i]);
             else if (arg == "--tile-sizes" && i + 1 < argc) tile_sizes = parse_list(argv[++i]);
+            else if (arg == "--shared-input" && i + 1 < argc) pinned_shared_input = stoi(argv[++i]);
             else if (arg == "--transpose-modes" && i + 1 < argc) ++i;
             else if (arg == "--autotune-repeats" && i + 1 < argc) autotune_repeats = stoi(argv[++i]);
             else if (arg == "--measurement-repeats" && i + 1 < argc) measurement_repeats = stoi(argv[++i]);
             else if (arg == "--output-channel-batch" && i + 1 < argc) requested_output_channel_batch = stoi(argv[++i]);
             else if (arg == "--output-channel-batches" && i + 1 < argc) requested_output_channel_batches = parse_list(argv[++i]);
             else if (arg == "--cooldown-ms" && i + 1 < argc) cooldown_ms = stod(argv[++i]);
+            else if (arg == "--mode" && i + 1 < argc) {
+                const string mode_value = argv[++i];
+                if (mode_value == "dispatch") mode = RunnerMode::Dispatch;
+                else if (mode_value == "benchmark") mode = RunnerMode::Benchmark;
+                else throw runtime_error("unknown --mode value: " + mode_value);
+            }
+        }
+
+        if (pinned_shared_input >= 0 && pinned_shared_input != 0 && pinned_shared_input != 1) {
+            throw runtime_error("--shared-input must be 0 or 1");
         }
 
         if (input_path.empty() || weight_path.empty()) {
@@ -591,16 +622,20 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaEventCreate(&ev_start));
         CUDA_CHECK(cudaEventCreate(&ev_stop));
 
-        vector<TileConfig> candidates = build_candidate_tiles(block_sizes, tile_sizes);
+        vector<TileConfig> candidates = build_candidate_tiles(block_sizes, tile_sizes, pinned_shared_input);
         TileConfig best_config = candidates.front();
         int best_channel_batch = channel_batch_candidates.front();
         float best_autotune_ms = FLT_MAX;
 
-        const int total_autotune_candidates =
-            static_cast<int>(candidates.size() * channel_batch_candidates.size());
+        const int total_autotune_candidates = (mode == RunnerMode::Benchmark)
+            ? static_cast<int>(candidates.size() * channel_batch_candidates.size())
+            : 0;
         vector<TrialRecord> trial_records;
-        trial_records.reserve(static_cast<size_t>(total_autotune_candidates) + 1);
+        trial_records.reserve(static_cast<size_t>(total_autotune_candidates) + 2);
         int autotune_candidate_counter = 0;
+        double autotune_seconds = 0.0;
+        double measurement_seconds = 0.0;
+        double compute_event_ms = 0.0;
 
         const double flops_per_run_plan =
             2.0 * static_cast<double>(out_h) * static_cast<double>(out_w) *
@@ -615,31 +650,16 @@ int main(int argc, char** argv) {
         const long long bytes_kernel_compulsory_plan =
             bytes_input_plan + bytes_weight_plan + bytes_output_plan;
 
-        if (verbose) {
-            fprintf(stderr,
-                "[conv2d cuda plan] phase=autotune candidates=%d autotune_repeats=%d\n",
-                total_autotune_candidates, autotune_repeats);
-            fflush(stderr);
-        }
+        if (mode == RunnerMode::Benchmark) {
+            if (verbose) {
+                fprintf(stderr,
+                    "[conv2d cuda plan] phase=autotune candidates=%d autotune_repeats=%d\n",
+                    total_autotune_candidates, autotune_repeats);
+                fflush(stderr);
+            }
 
-        for (int channel_batch : channel_batch_candidates) {
-            for (const TileConfig& candidate : candidates) {
-                for (int oc_offset = 0; oc_offset < c_out; oc_offset += channel_batch) {
-                    const int launch_c_out = min(channel_batch, c_out - oc_offset);
-                    launch_kernel(candidate, d_input, d_weight, d_output_batch, h, w, c_in, c_out, k, pad, stride, oc_offset, launch_c_out, out_h, out_w, shared_mem_limit_bytes);
-                    if (cooldown_ms > 0.0) {
-                        CUDA_CHECK(cudaDeviceSynchronize());
-                        CUDA_CHECK(cudaGetLastError());
-                        maybe_sleep_between_batches(cooldown_ms);
-                    }
-                }
-                if (cooldown_ms <= 0.0) {
-                    CUDA_CHECK(cudaDeviceSynchronize());
-                    CUDA_CHECK(cudaGetLastError());
-                }
-
-                CUDA_CHECK(cudaEventRecord(ev_start));
-                for (int repeat = 0; repeat < autotune_repeats; ++repeat) {
+            for (int channel_batch : channel_batch_candidates) {
+                for (const TileConfig& candidate : candidates) {
                     for (int oc_offset = 0; oc_offset < c_out; oc_offset += channel_batch) {
                         const int launch_c_out = min(channel_batch, c_out - oc_offset);
                         launch_kernel(candidate, d_input, d_weight, d_output_batch, h, w, c_in, c_out, k, pad, stride, oc_offset, launch_c_out, out_h, out_w, shared_mem_limit_bytes);
@@ -649,119 +669,152 @@ int main(int argc, char** argv) {
                             maybe_sleep_between_batches(cooldown_ms);
                         }
                     }
-                }
-                CUDA_CHECK(cudaEventRecord(ev_stop));
-                CUDA_CHECK(cudaEventSynchronize(ev_stop));
-                CUDA_CHECK(cudaGetLastError());
+                    if (cooldown_ms <= 0.0) {
+                        CUDA_CHECK(cudaDeviceSynchronize());
+                        CUDA_CHECK(cudaGetLastError());
+                    }
 
-                float elapsed_ms = 0.0f;
-                CUDA_CHECK(cudaEventElapsedTime(&elapsed_ms, ev_start, ev_stop));
-                const float candidate_milliseconds = elapsed_ms / static_cast<float>(autotune_repeats);
-
-                {
-                    TrialRecord record;
-                    record.phase = "autotune";
-                    record.candidate_index = autotune_candidate_counter;
-                    record.candidate_total = total_autotune_candidates;
-                    record.trial_index_within_candidate = 0;
-                    record.repeats_for_candidate = autotune_repeats;
-                    record.block_size = candidate.tile_w * candidate.tile_h;
-                    record.tile_size = candidate.tile_w;
-                    record.output_channel_batch = channel_batch;
-                    record.shared_input = candidate.shared_input;
-                    record.host_prep_seconds = 0.0;
-                    record.host_compute_seconds = static_cast<double>(candidate_milliseconds) / 1000.0;
-                    record.device_to_host_seconds = 0.0;
-                    record.host_postproc_seconds = 0.0;
-                    record.total_wall_seconds = record.host_compute_seconds;
-                    trial_records.push_back(std::move(record));
-                }
-
-                if (verbose) {
-                    const double per_run_seconds = static_cast<double>(candidate_milliseconds) / 1000.0;
-                    const double effective_gflops = per_run_seconds > 0.0
-                        ? (flops_per_run_plan / per_run_seconds / 1e9) : 0.0;
-                    fprintf(stderr,
-                        "[conv2d cuda autotune %d/%d] block=%d tile=%d channel_batch=%d shared=%d "
-                        "repeats=%d per_run=%.6fs effective_gflops=%.3f\n",
-                        autotune_candidate_counter + 1, total_autotune_candidates,
-                        candidate.tile_w * candidate.tile_h, candidate.tile_w,
-                        channel_batch, candidate.shared_input,
-                        autotune_repeats, per_run_seconds, effective_gflops);
-                    fflush(stderr);
-                }
-                ++autotune_candidate_counter;
-
-                if (candidate_milliseconds < best_autotune_ms) {
-                    best_autotune_ms = candidate_milliseconds;
-                    best_config = candidate;
-                    best_channel_batch = channel_batch;
-                }
-            }
-        }
-
-        if (verbose) {
-            fprintf(stderr,
-                "[conv2d cuda plan] phase=measurement selected_block=%d selected_tile=%d "
-                "selected_channel_batch=%d measurement_repeats=%d\n",
-                best_config.tile_w * best_config.tile_h, best_config.tile_w,
-                best_channel_batch, measurement_repeats);
-            fflush(stderr);
-        }
-
-        CUDA_CHECK(cudaEventRecord(ev_start));
-        for (int repeat = 0; repeat < measurement_repeats; ++repeat) {
-            for (int oc_offset = 0; oc_offset < c_out; oc_offset += best_channel_batch) {
-                const int launch_c_out = min(best_channel_batch, c_out - oc_offset);
-                launch_kernel(best_config, d_input, d_weight, d_output_batch, h, w, c_in, c_out, k, pad, stride, oc_offset, launch_c_out, out_h, out_w, shared_mem_limit_bytes);
-                if (cooldown_ms > 0.0) {
-                    CUDA_CHECK(cudaDeviceSynchronize());
+                    CUDA_CHECK(cudaEventRecord(ev_start));
+                    for (int repeat = 0; repeat < autotune_repeats; ++repeat) {
+                        for (int oc_offset = 0; oc_offset < c_out; oc_offset += channel_batch) {
+                            const int launch_c_out = min(channel_batch, c_out - oc_offset);
+                            launch_kernel(candidate, d_input, d_weight, d_output_batch, h, w, c_in, c_out, k, pad, stride, oc_offset, launch_c_out, out_h, out_w, shared_mem_limit_bytes);
+                            if (cooldown_ms > 0.0) {
+                                CUDA_CHECK(cudaDeviceSynchronize());
+                                CUDA_CHECK(cudaGetLastError());
+                                maybe_sleep_between_batches(cooldown_ms);
+                            }
+                        }
+                    }
+                    CUDA_CHECK(cudaEventRecord(ev_stop));
+                    CUDA_CHECK(cudaEventSynchronize(ev_stop));
                     CUDA_CHECK(cudaGetLastError());
-                    maybe_sleep_between_batches(cooldown_ms);
+
+                    float elapsed_ms = 0.0f;
+                    CUDA_CHECK(cudaEventElapsedTime(&elapsed_ms, ev_start, ev_stop));
+                    const float candidate_milliseconds = elapsed_ms / static_cast<float>(autotune_repeats);
+
+                    {
+                        TrialRecord record;
+                        record.phase = "autotune";
+                        record.candidate_index = autotune_candidate_counter;
+                        record.candidate_total = total_autotune_candidates;
+                        record.trial_index_within_candidate = 0;
+                        record.repeats_for_candidate = autotune_repeats;
+                        record.block_size = candidate.tile_w * candidate.tile_h;
+                        record.tile_size = candidate.tile_w;
+                        record.output_channel_batch = channel_batch;
+                        record.shared_input = candidate.shared_input;
+                        record.host_prep_seconds = 0.0;
+                        record.host_compute_seconds = static_cast<double>(candidate_milliseconds) / 1000.0;
+                        record.device_to_host_seconds = 0.0;
+                        record.host_postproc_seconds = 0.0;
+                        record.total_wall_seconds = record.host_compute_seconds;
+                        trial_records.push_back(std::move(record));
+                    }
+
+                    if (verbose) {
+                        const double per_run_seconds = static_cast<double>(candidate_milliseconds) / 1000.0;
+                        const double effective_gflops = per_run_seconds > 0.0
+                            ? (flops_per_run_plan / per_run_seconds / 1e9) : 0.0;
+                        fprintf(stderr,
+                            "[conv2d cuda autotune %d/%d] block=%d tile=%d channel_batch=%d shared=%d "
+                            "repeats=%d per_run=%.6fs effective_gflops=%.3f\n",
+                            autotune_candidate_counter + 1, total_autotune_candidates,
+                            candidate.tile_w * candidate.tile_h, candidate.tile_w,
+                            channel_batch, candidate.shared_input,
+                            autotune_repeats, per_run_seconds, effective_gflops);
+                        fflush(stderr);
+                    }
+                    ++autotune_candidate_counter;
+
+                    if (candidate_milliseconds < best_autotune_ms) {
+                        best_autotune_ms = candidate_milliseconds;
+                        best_config = candidate;
+                        best_channel_batch = channel_batch;
+                    }
                 }
             }
-        }
-        CUDA_CHECK(cudaEventRecord(ev_stop));
-        CUDA_CHECK(cudaEventSynchronize(ev_stop));
-        CUDA_CHECK(cudaGetLastError());
 
-        float measurement_ms_total = 0.0f;
-        CUDA_CHECK(cudaEventElapsedTime(&measurement_ms_total, ev_start, ev_stop));
-        const double measurement_seconds = (measurement_ms_total / 1000.0) / static_cast<double>(measurement_repeats);
-        const double autotune_seconds = static_cast<double>(best_autotune_ms) / 1000.0;
+            if (verbose) {
+                fprintf(stderr,
+                    "[conv2d cuda plan] phase=measurement selected_block=%d selected_tile=%d "
+                    "selected_channel_batch=%d measurement_repeats=%d\n",
+                    best_config.tile_w * best_config.tile_h, best_config.tile_w,
+                    best_channel_batch, measurement_repeats);
+                fflush(stderr);
+            }
 
-        {
-            TrialRecord record;
-            record.phase = "measurement";
-            record.candidate_index = 0;
-            record.candidate_total = 1;
-            record.trial_index_within_candidate = 0;
-            record.repeats_for_candidate = measurement_repeats;
-            record.block_size = best_config.tile_w * best_config.tile_h;
-            record.tile_size = best_config.tile_w;
-            record.output_channel_batch = best_channel_batch;
-            record.shared_input = best_config.shared_input;
-            record.host_prep_seconds = 0.0;
-            record.host_compute_seconds = measurement_seconds;
-            record.device_to_host_seconds = 0.0;
-            record.host_postproc_seconds = 0.0;
-            record.total_wall_seconds = measurement_seconds;
-            trial_records.push_back(std::move(record));
-        }
+            CUDA_CHECK(cudaEventRecord(ev_start));
+            for (int repeat = 0; repeat < measurement_repeats; ++repeat) {
+                for (int oc_offset = 0; oc_offset < c_out; oc_offset += best_channel_batch) {
+                    const int launch_c_out = min(best_channel_batch, c_out - oc_offset);
+                    launch_kernel(best_config, d_input, d_weight, d_output_batch, h, w, c_in, c_out, k, pad, stride, oc_offset, launch_c_out, out_h, out_w, shared_mem_limit_bytes);
+                    if (cooldown_ms > 0.0) {
+                        CUDA_CHECK(cudaDeviceSynchronize());
+                        CUDA_CHECK(cudaGetLastError());
+                        maybe_sleep_between_batches(cooldown_ms);
+                    }
+                }
+            }
+            CUDA_CHECK(cudaEventRecord(ev_stop));
+            CUDA_CHECK(cudaEventSynchronize(ev_stop));
+            CUDA_CHECK(cudaGetLastError());
 
-        if (verbose) {
-            const double effective_gflops = measurement_seconds > 0.0
-                ? (flops_per_run_plan / measurement_seconds / 1e9) : 0.0;
+            float measurement_ms_total = 0.0f;
+            CUDA_CHECK(cudaEventElapsedTime(&measurement_ms_total, ev_start, ev_stop));
+            measurement_seconds = (measurement_ms_total / 1000.0) / static_cast<double>(measurement_repeats);
+            autotune_seconds = static_cast<double>(best_autotune_ms) / 1000.0;
+            compute_event_ms = measurement_seconds * 1000.0;
+
+            {
+                TrialRecord record;
+                record.phase = "measurement";
+                record.candidate_index = 0;
+                record.candidate_total = 1;
+                record.trial_index_within_candidate = 0;
+                record.repeats_for_candidate = measurement_repeats;
+                record.block_size = best_config.tile_w * best_config.tile_h;
+                record.tile_size = best_config.tile_w;
+                record.output_channel_batch = best_channel_batch;
+                record.shared_input = best_config.shared_input;
+                record.host_prep_seconds = 0.0;
+                record.host_compute_seconds = measurement_seconds;
+                record.device_to_host_seconds = 0.0;
+                record.host_postproc_seconds = 0.0;
+                record.total_wall_seconds = measurement_seconds;
+                trial_records.push_back(std::move(record));
+            }
+
+            if (verbose) {
+                const double effective_gflops = measurement_seconds > 0.0
+                    ? (flops_per_run_plan / measurement_seconds / 1e9) : 0.0;
+                fprintf(stderr,
+                    "[conv2d cuda measurement 1/1] block=%d tile=%d channel_batch=%d shared=%d "
+                    "repeats=%d per_run=%.6fs effective_gflops=%.3f\n",
+                    best_config.tile_w * best_config.tile_h, best_config.tile_w,
+                    best_channel_batch, best_config.shared_input,
+                    measurement_repeats, measurement_seconds, effective_gflops);
+                fflush(stderr);
+            }
+        } else if (verbose) {
             fprintf(stderr,
-                "[conv2d cuda measurement 1/1] block=%d tile=%d channel_batch=%d shared=%d "
-                "repeats=%d per_run=%.6fs effective_gflops=%.3f\n",
+                "[conv2d cuda plan] phase=dispatch selected_block=%d selected_tile=%d "
+                "selected_channel_batch=%d shared_input=%d\n",
                 best_config.tile_w * best_config.tile_h, best_config.tile_w,
-                best_channel_batch, best_config.shared_input,
-                measurement_repeats, measurement_seconds, effective_gflops);
+                best_channel_batch, best_config.shared_input);
             fflush(stderr);
         }
 
+        // Output / checksum pass. Dispatch mode brackets the entire loop
+        // (including D2H) with cudaEvent so compute_event_ms captures the
+        // single-pass GPU work the caller actually paid for; benchmark mode
+        // has already recorded its measurement window above and here only
+        // produces the checksum + host-side output buffer.
         double checksum_value = 0.0;
+        if (mode == RunnerMode::Dispatch) {
+            CUDA_CHECK(cudaEventRecord(ev_start));
+        }
         for (int oc_offset = 0; oc_offset < c_out; oc_offset += best_channel_batch) {
             const int launch_c_out = min(best_channel_batch, c_out - oc_offset);
             const size_t batch_output_size = spatial_size * static_cast<size_t>(launch_c_out);
@@ -787,9 +840,35 @@ int main(int argc, char** argv) {
                     }
                 }
             }
-            if (cooldown_ms > 0.0 && oc_offset + best_channel_batch < c_out) {
+            if (mode == RunnerMode::Benchmark && cooldown_ms > 0.0 &&
+                oc_offset + best_channel_batch < c_out) {
                 maybe_sleep_between_batches(cooldown_ms);
             }
+        }
+        if (mode == RunnerMode::Dispatch) {
+            CUDA_CHECK(cudaEventRecord(ev_stop));
+            CUDA_CHECK(cudaEventSynchronize(ev_stop));
+            CUDA_CHECK(cudaGetLastError());
+            float elapsed_ms = 0.0f;
+            CUDA_CHECK(cudaEventElapsedTime(&elapsed_ms, ev_start, ev_stop));
+            compute_event_ms = static_cast<double>(elapsed_ms);
+            measurement_seconds = compute_event_ms / 1000.0;
+            TrialRecord record;
+            record.phase = "dispatch";
+            record.candidate_index = 0;
+            record.candidate_total = 1;
+            record.trial_index_within_candidate = 0;
+            record.repeats_for_candidate = 1;
+            record.block_size = best_config.tile_w * best_config.tile_h;
+            record.tile_size = best_config.tile_w;
+            record.output_channel_batch = best_channel_batch;
+            record.shared_input = best_config.shared_input;
+            record.host_prep_seconds = 0.0;
+            record.host_compute_seconds = measurement_seconds;
+            record.device_to_host_seconds = 0.0;
+            record.host_postproc_seconds = 0.0;
+            record.total_wall_seconds = measurement_seconds;
+            trial_records.push_back(std::move(record));
         }
 
         if (!output_path.empty()) {
@@ -808,7 +887,15 @@ int main(int argc, char** argv) {
                                      static_cast<double>(k) * static_cast<double>(k);
         const long long checksum_rounded = static_cast<long long>(checksum_value);
 
+        const size_t trials_run = (mode == RunnerMode::Benchmark)
+            ? (candidates.size() * channel_batch_candidates.size())
+            : 1;
+        const double autotune_gflops = (autotune_seconds > 0.0)
+            ? (flops_per_run / autotune_seconds / 1e9) : 0.0;
+        const double measurement_gflops = (measurement_seconds > 0.0)
+            ? (flops_per_run / measurement_seconds / 1e9) : 0.0;
         cout << "{\n"
+             << "  \"mode\": \"" << (mode == RunnerMode::Benchmark ? "benchmark" : "dispatch") << "\",\n"
              << "  \"device_name\": \"" << device_properties.name << "\",\n"
              << "  \"transpose\": 0,\n"
              << "  \"shared_input\": " << best_config.shared_input << ",\n"
@@ -818,12 +905,13 @@ int main(int argc, char** argv) {
              << "  \"cooldown_ms\": " << fixed << setprecision(3) << cooldown_ms << ",\n"
              << "  \"autotune_repeats\": " << autotune_repeats << ",\n"
              << "  \"measurement_repeats\": " << measurement_repeats << ",\n"
-             << "  \"trials_run\": " << (candidates.size() * channel_batch_candidates.size()) << ",\n"
+             << "  \"trials_run\": " << trials_run << ",\n"
+             << "  \"compute_event_ms\": " << fixed << setprecision(6) << compute_event_ms << ",\n"
              << "  \"autotune_wall_clock_latency_seconds\": " << fixed << setprecision(9) << autotune_seconds << ",\n"
-             << "  \"autotune_effective_gflops\": " << (flops_per_run / autotune_seconds / 1e9) << ",\n"
+             << "  \"autotune_effective_gflops\": " << autotune_gflops << ",\n"
              << "  \"autotune_checksum\": \"chk_" << checksum_rounded << "\",\n"
              << "  \"measurement_wall_clock_latency_seconds\": " << fixed << setprecision(9) << measurement_seconds << ",\n"
-             << "  \"measurement_effective_gflops\": " << (flops_per_run / measurement_seconds / 1e9) << ",\n"
+             << "  \"measurement_effective_gflops\": " << measurement_gflops << ",\n"
              << "  \"measurement_checksum\": \"chk_" << checksum_rounded << "\",\n"
              << "  \"flops_per_run\": " << fixed << setprecision(1) << flops_per_run << ",\n"
              << "  \"bytes_input\": " << bytes_input_plan << ",\n"

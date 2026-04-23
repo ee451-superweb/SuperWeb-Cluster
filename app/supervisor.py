@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import random
 import signal
 import subprocess
@@ -15,6 +16,7 @@ from pathlib import Path
 _PRE_DISCOVERY_STAGGER_MAX_SECONDS = 1.5
 _PRE_DISCOVERY_STAGGER_SLOTS = 1024
 _PEER_TERMINATE_TIMEOUT_SECONDS = 5.0
+_PEER_HEARTBEAT_ACCEPT_TIMEOUT_SECONDS = 30.0
 
 from adapters.firewall import cleanup_rules
 from adapters.audit_log import write_audit_event
@@ -23,6 +25,15 @@ from app.capacity import load_usable_backends
 from app.constants import (
     BACKEND_CPU,
     GPU_BACKEND_PRIORITY,
+)
+from app.peer_diagnostics import dump_python_stack
+from app.peer_heartbeat import (
+    HEARTBEAT_CLOSED,
+    HEARTBEAT_INTERVAL_SECONDS,
+    HEARTBEAT_MISS_THRESHOLD,
+    HEARTBEAT_OK,
+    HEARTBEAT_PORT_ENV,
+    SupervisorHeartbeatListener,
 )
 from common.process_exit import classify_exit_code
 from common.state import RuntimeState
@@ -80,7 +91,10 @@ class Supervisor:
         )
         self._peer_process: subprocess.Popen[bytes] | None = None
         self._peer_backend: str | None = None
+        self._peer_node_name: str | None = None
         self._peer_watcher_thread: threading.Thread | None = None
+        self._peer_heartbeat_thread: threading.Thread | None = None
+        self._peer_heartbeat_listener: SupervisorHeartbeatListener | None = None
         self._peer_terminate_requested = False
         self._validate_backend_flags()
 
@@ -240,6 +254,21 @@ class Supervisor:
             " ".join(command),
         )
         popen_kwargs = self._peer_popen_kwargs()
+        # Build the heartbeat listener BEFORE spawn so the peer can connect
+        # back on the first attempt. Failure to bind (e.g. ephemeral ports
+        # exhausted) is not fatal — peer runs without heartbeat and the
+        # exit-code watcher remains the fallback.
+        heartbeat_listener: SupervisorHeartbeatListener | None = None
+        try:
+            heartbeat_listener = SupervisorHeartbeatListener()
+        except OSError as exc:
+            self.logger.warning(
+                "Could not open peer heartbeat listener; peer will run without IPC liveness: %s",
+                exc,
+            )
+        if heartbeat_listener is not None:
+            child_env = {**os.environ, HEARTBEAT_PORT_ENV: str(heartbeat_listener.port)}
+            popen_kwargs["env"] = child_env
         try:
             self._peer_process = subprocess.Popen(command, **popen_kwargs)
         except OSError as exc:
@@ -249,14 +278,23 @@ class Supervisor:
                 exc,
             )
             self._peer_process = None
+            if heartbeat_listener is not None:
+                heartbeat_listener.close()
             return
         self._peer_backend = peer_backend
+        base_name = self.config.node_name or "node"
+        self._peer_node_name = f"{base_name}-peer-{peer_backend}"
         self._peer_terminate_requested = False
+        self._peer_heartbeat_listener = heartbeat_listener
         write_audit_event(
             f"spawned peer compute-node backend={peer_backend} pid={self._peer_process.pid}",
             logger=self.logger,
         )
         self._start_peer_watcher(self._peer_process, peer_backend)
+        if heartbeat_listener is not None:
+            self._start_peer_heartbeat_watcher(
+                heartbeat_listener, self._peer_process, peer_backend
+            )
 
     def _start_peer_watcher(
         self,
@@ -319,6 +357,115 @@ class Supervisor:
         self.logger.warning(message)
         write_audit_event(message, logger=self.logger, level=logging.WARNING)
 
+    def _start_peer_heartbeat_watcher(
+        self,
+        listener: SupervisorHeartbeatListener,
+        process: subprocess.Popen[bytes],
+        peer_backend: str,
+    ) -> None:
+        """Spawn the daemon thread that reads heartbeats from the peer.
+
+        The thread owns the ``accept`` so the main supervisor thread never
+        blocks on peer startup. See :meth:`_watch_peer_heartbeat` for the
+        detection semantics.
+        """
+        thread = threading.Thread(
+            target=self._watch_peer_heartbeat,
+            args=(listener, process, peer_backend),
+            name=f"peer-heartbeat-{peer_backend}-{process.pid}",
+            daemon=True,
+        )
+        self._peer_heartbeat_thread = thread
+        thread.start()
+
+    def _watch_peer_heartbeat(
+        self,
+        listener: SupervisorHeartbeatListener,
+        process: subprocess.Popen[bytes],
+        peer_backend: str,
+    ) -> None:
+        """Read heartbeat bytes from the peer; declare a hang on K misses.
+
+        Called on the ``peer-heartbeat-*`` daemon thread. Declares the peer
+        hung when both of the following hold at once:
+          * ``HEARTBEAT_MISS_THRESHOLD`` consecutive reads timed out.
+          * ``process.poll() is None`` (the OS process is still running).
+        On a hang, dumps py-spy and terminates the peer. The watcher returns
+        after firing, so re-entry is not possible on the same peer.
+        """
+        if not listener.accept(timeout=_PEER_HEARTBEAT_ACCEPT_TIMEOUT_SECONDS):
+            self.logger.warning(
+                "Peer compute-node backend=%s pid=%s never connected to heartbeat socket; "
+                "liveness will rely on the exit-code watcher only.",
+                peer_backend,
+                process.pid,
+            )
+            return
+        self.logger.info(
+            "Peer heartbeat connected for backend=%s pid=%s", peer_backend, process.pid
+        )
+        miss_count = 0
+        read_timeout = HEARTBEAT_INTERVAL_SECONDS * 2
+        while not self._shutdown_requested and not self._peer_terminate_requested:
+            status = listener.wait_for_heartbeat(read_timeout)
+            if status == HEARTBEAT_OK:
+                miss_count = 0
+                continue
+            if status == HEARTBEAT_CLOSED:
+                # Peer closed its side of the socket. The peer-exit path runs
+                # the socket.close() in the writer thread's ``finally``, so
+                # this is the peer's "I am exiting" signal. Defer to the
+                # exit-code watcher for logging; do NOT accumulate misses
+                # (EOF arrives in microseconds and would trip the threshold
+                # before poll() has even reaped the process).
+                self.logger.debug(
+                    "Peer heartbeat channel closed by peer (backend=%s pid=%s); "
+                    "letting exit-code watcher report the cause.",
+                    peer_backend,
+                    process.pid,
+                )
+                return
+            # status == HEARTBEAT_TIMEOUT
+            if process.poll() is not None:
+                return
+            miss_count += 1
+            self.logger.debug(
+                "Peer heartbeat miss %d/%d for backend=%s pid=%s",
+                miss_count,
+                HEARTBEAT_MISS_THRESHOLD,
+                peer_backend,
+                process.pid,
+            )
+            if miss_count < HEARTBEAT_MISS_THRESHOLD:
+                continue
+            self._dump_and_terminate_hung_peer(
+                process,
+                f"{HEARTBEAT_MISS_THRESHOLD} consecutive heartbeat misses over IPC",
+            )
+            return
+
+    def _dump_and_terminate_hung_peer(
+        self,
+        process: subprocess.Popen[bytes],
+        reason: str,
+    ) -> None:
+        """Capture a py-spy stack from a still-running peer and terminate it."""
+        self.logger.warning(
+            "Peer compute-node %s is alive but hung (pid=%s, reason=%s); "
+            "capturing py-spy stack before terminating.",
+            self._peer_node_name,
+            process.pid,
+            reason,
+        )
+        stack_dump = dump_python_stack(process.pid)
+        message = (
+            f"hung peer stack dump backend={self._peer_backend} pid={process.pid} "
+            f"node={self._peer_node_name} reason=\"{reason}\":\n{stack_dump}"
+        )
+        self.logger.warning(message)
+        write_audit_event(message, logger=self.logger, level=logging.WARNING)
+        self._terminate_peer()
+
     def _terminate_peer(self) -> None:
         """Best-effort terminate of the peer compute-node on shutdown.
 
@@ -359,6 +506,10 @@ class Supervisor:
             self.logger.warning("Failed to terminate peer compute-node: %s", exc)
         finally:
             self._peer_process = None
+            listener = self._peer_heartbeat_listener
+            self._peer_heartbeat_listener = None
+            if listener is not None:
+                listener.close()
 
     @trace_function
     def register_signal_handlers(self) -> None:

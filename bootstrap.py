@@ -618,6 +618,14 @@ def main(argv: list[str] | None = None) -> int:
         Supervisor = _load_supervisor_class()
 
         config = build_config(args)
+        # When this bootstrap was invoked as a supervisor-spawned peer, open
+        # the loopback heartbeat channel before any heavy runtime work so a
+        # hang during startup (e.g. stuck in a CUDA import) is still visible
+        # to the parent supervisor. No-op outside the peer-process path.
+        if config.peer_process:
+            from app.peer_heartbeat import start_peer_heartbeat_from_env
+
+            start_peer_heartbeat_from_env(logger=logger)
         # Firewall work is intentionally limited to discovery-phase UDP exposure.
         # Peer subprocesses inherit the parent supervisor's firewall ownership;
         # they must not touch host-global rule names because their own cleanup

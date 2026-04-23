@@ -23,10 +23,7 @@ from adapters.process import enable_utf8_mode, python_utf8_command
 
 enable_utf8_mode()
 
-from app.constants import (
-    DEFAULT_CONV2D_CUDA_COOLDOWN_MS,
-    DEFAULT_CONV2D_CUDA_OUTPUT_CHANNEL_BATCH_SCALE,
-)
+from app.constants import DEFAULT_CONV2D_CUDA_COOLDOWN_MS
 from setup import active_python_path
 from compute_node.performance_metrics.benchmark_status import emit_status
 from compute_node.performance_metrics.device_overview import detect_cpu_name
@@ -95,7 +92,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Benchmark only the small, mid, or large dataset. Default: small autotune plus mid final measurement. Use large explicitly only when you really want the large dataset.",
     )
     parser.add_argument("--output-channel-batch", type=int)
-    parser.add_argument("--output-channel-batch-scale", type=float)
     parser.add_argument("--cooldown-ms", type=float)
     parser.add_argument("--rebuild", action="store_true")
     parser.add_argument(
@@ -121,17 +117,12 @@ def _apply_cuda_cli_overrides(args: argparse.Namespace) -> None:
     """
 
     cuda_backend.CONV2D_CUDA_OUTPUT_CHANNEL_BATCH_OVERRIDE = None
-    cuda_backend.CONV2D_CUDA_OUTPUT_CHANNEL_BATCH_SCALE = DEFAULT_CONV2D_CUDA_OUTPUT_CHANNEL_BATCH_SCALE
     cuda_backend.CONV2D_CUDA_COOLDOWN_MS = DEFAULT_CONV2D_CUDA_COOLDOWN_MS
 
     if args.output_channel_batch is not None:
         if args.output_channel_batch <= 0:
             raise ValueError("--output-channel-batch must be a positive integer")
         cuda_backend.CONV2D_CUDA_OUTPUT_CHANNEL_BATCH_OVERRIDE = (args.output_channel_batch,)
-    if args.output_channel_batch_scale is not None:
-        if args.output_channel_batch_scale <= 0.0:
-            raise ValueError("--output-channel-batch-scale must be positive")
-        cuda_backend.CONV2D_CUDA_OUTPUT_CHANNEL_BATCH_SCALE = args.output_channel_batch_scale
     if args.cooldown_ms is not None:
         if args.cooldown_ms < 0:
             raise ValueError("--cooldown-ms must be non-negative")
@@ -531,7 +522,6 @@ def run_benchmark(args: argparse.Namespace) -> dict:
         pad=args.pad,
         stride=args.stride,
         output_channel_batch_candidates=cuda_backend._candidate_output_channel_batches(spec),
-        output_channel_batch_scale=cuda_backend.CONV2D_CUDA_OUTPUT_CHANNEL_BATCH_SCALE,
         cooldown_ms=cuda_backend.CONV2D_CUDA_COOLDOWN_MS,
     )
     dataset_dir = Path(args.dataset_dir).resolve()
@@ -747,7 +737,6 @@ def run_benchmark(args: argparse.Namespace) -> dict:
             "measurement_dataset_variant": measurement_dataset_variant,
             "full_runtime_measurement": measurement_dataset_variant == WORKLOAD_MODE_LARGE,
             "output_channel_batch_candidates": cuda_backend._candidate_output_channel_batches(spec),
-            "output_channel_batch_scale": cuda_backend.CONV2D_CUDA_OUTPUT_CHANNEL_BATCH_SCALE,
             "cooldown_ms": cuda_backend.CONV2D_CUDA_COOLDOWN_MS,
         },
         "hardware_inventory": hardware_inventory,

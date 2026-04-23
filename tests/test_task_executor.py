@@ -45,7 +45,7 @@ class TaskExecutorCommandTests(unittest.TestCase):
         self.assertEqual(command[command.index("--iteration-count") + 1], "7")
         self.assertEqual(command[command.index("--accumulation-precision") + 1], "fp32")
 
-    def test_cpu_task_command_caps_workers_by_global_policy(self) -> None:
+    def test_cpu_task_command_uses_benchmark_selected_workers(self) -> None:
         inventory = RuntimeProcessorInventory(
             processors=(
                 RuntimeProcessorProfile(
@@ -57,17 +57,16 @@ class TaskExecutorCommandTests(unittest.TestCase):
             )
         )
         executor = GemvTaskExecutor(inventory, dataset_root=Path("C:/tmp/generated"))
-        with mock.patch("compute_node.task_executor.resolve_capped_cpu_worker_count", return_value=9):
-            with mock.patch.object(executor, "_resolve_runtime_executable_path", return_value=Path("C:/tmp/gemv_cpu_runner")):
-                command = executor._build_runtime_command(
-                    ProcessorTaskSlice(processor=inventory.processors[0], row_start=0, row_end=4),
-                    7,
-                    Path("C:/tmp/x.bin"),
-                    Path("C:/tmp/y.bin"),
-                )
+        with mock.patch.object(executor, "_resolve_runtime_executable_path", return_value=Path("C:/tmp/gemv_cpu_runner")):
+            command = executor._build_runtime_command(
+                ProcessorTaskSlice(processor=inventory.processors[0], row_start=0, row_end=4),
+                7,
+                Path("C:/tmp/x.bin"),
+                Path("C:/tmp/y.bin"),
+            )
 
         self.assertIn("--fixed-workers", command)
-        self.assertEqual(command[command.index("--fixed-workers") + 1], "9")
+        self.assertEqual(command[command.index("--fixed-workers") + 1], "16")
 
     def test_cuda_task_command_uses_iteration_count_flag(self) -> None:
         inventory = RuntimeProcessorInventory(
@@ -121,10 +120,9 @@ class TaskExecutorCommandTests(unittest.TestCase):
         self.assertEqual(command[command.index("--block-sizes") + 1], "256")
         self.assertIn("--tile-sizes", command)
         self.assertEqual(command[command.index("--tile-sizes") + 1], "8")
-        self.assertIn("--headroom-fraction", command)
-        self.assertEqual(command[command.index("--headroom-fraction") + 1], "0.900000")
+        self.assertNotIn("--headroom-fraction", command)
         self.assertIn("--row-chunk-size", command)
-        self.assertEqual(command[command.index("--row-chunk-size") + 1], "7")
+        self.assertEqual(command[command.index("--row-chunk-size") + 1], "8")
         self.assertIn("--iteration-count", command)
         self.assertEqual(command[command.index("--iteration-count") + 1], "5")
 
@@ -235,8 +233,96 @@ class TaskExecutorCommandTests(unittest.TestCase):
         self.assertEqual(command[command.index("--output-channel-batch") + 1], "4")
         self.assertIn("--cooldown-ms", command)
         self.assertEqual(command[command.index("--cooldown-ms") + 1], "1.5")
+        # When the benchmarked best_config has no block/tile sizes, we must
+        # NOT pin them — passing 0 would deactivate the autotune loop with a
+        # bogus value. The runner falls back to its defaults.
+        self.assertNotIn("--block-sizes", command)
+        self.assertNotIn("--tile-sizes", command)
+        self.assertNotIn("--shared-input", command)
+        # Dispatch is the runner default — executor must not pass --mode.
+        self.assertNotIn("--mode", command)
 
-    def test_spatial_cpu_task_command_uses_global_worker_cap(self) -> None:
+    def test_spatial_cuda_task_command_pins_block_and_tile_when_benchmarked(self) -> None:
+        # Regression for the 2026-04-21 large-spec slowness: without --block-sizes
+        # / --tile-sizes the runner sweeps 14 default tile candidates per task,
+        # making CUDA ~30x slower than the standalone-measured throughput. When
+        # the benchmark recorded a winning (block, tile) pair, pin it.
+        spec = spatial_executor.get_test_spec()
+        expected_channels = 4
+        expected_output_bytes = spec.output_h * spec.output_w * expected_channels * 4
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            (temp_root / "small_input.bin").write_bytes(b"\0")
+            (temp_root / "large_input.bin").write_bytes(b"\0")
+            fake_runner = temp_root / "spatial_cuda_runner.exe"
+            fake_runner.write_text("runner placeholder\n", encoding="ascii")
+
+            task = TaskAssign(
+                request_id="req-1",
+                node_id="node-1",
+                task_id="task-1",
+                method=METHOD_CONV2D,
+                size="small",
+                object_id="conv2d/small",
+                stream_id="stream-1",
+                timestamp_ms=0,
+                iteration_count=3,
+                start_oc=0,
+                end_oc=expected_channels,
+                tensor_h=spec.h,
+                tensor_w=spec.w,
+                channels_in=spec.c_in,
+                channels_out=spec.c_out,
+                kernel_size=spec.k,
+                padding=spec.pad,
+                stride=spec.stride,
+                weight_data=b"\0" * (spec.k * spec.k * spec.c_in * expected_channels * 4),
+            )
+
+            captured: dict[str, list[str]] = {}
+
+            def fake_run(command, **kwargs):
+                captured["command"] = list(command)
+                output_path = Path(command[command.index("--output") + 1])
+                output_path.write_bytes(b"\0" * expected_output_bytes)
+                return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+            executor = spatial_executor.Conv2dTaskExecutor(
+                result_path=temp_root / "result.json",
+                dataset_root=temp_root,
+            )
+
+            with (
+                mock.patch.object(
+                    spatial_executor,
+                    "_best_backend_profile",
+                    return_value=RuntimeProcessorProfile(
+                        hardware_type="cuda",
+                        effective_gflops=200.0,
+                        rank=1,
+                        best_config={
+                            "output_channel_batch": 8,
+                            "block_size": 128,
+                            "tile_size": 16,
+                            "shared_input": 1,
+                        },
+                    ),
+                ),
+                mock.patch.object(spatial_executor, "_prepare_runner_path", return_value=fake_runner),
+                mock.patch("compute_node.compute_methods.conv2d.executor.subprocess.run", side_effect=fake_run),
+            ):
+                executor.execute_task(task)
+
+        command = captured["command"]
+        self.assertIn("--block-sizes", command)
+        self.assertEqual(command[command.index("--block-sizes") + 1], "128")
+        self.assertIn("--tile-sizes", command)
+        self.assertEqual(command[command.index("--tile-sizes") + 1], "16")
+        self.assertIn("--shared-input", command)
+        self.assertEqual(command[command.index("--shared-input") + 1], "1")
+
+    def test_spatial_cpu_task_command_uses_benchmark_selected_workers(self) -> None:
         spec = spatial_executor.get_test_spec()
         expected_channels = 4
         expected_output_bytes = spec.output_h * spec.output_w * expected_channels * 4
@@ -295,19 +381,15 @@ class TaskExecutorCommandTests(unittest.TestCase):
                     ),
                 ),
                 mock.patch.object(spatial_executor, "_prepare_runner_path", return_value=fake_runner),
-                mock.patch(
-                    "compute_node.compute_methods.conv2d.executor.resolve_capped_cpu_worker_count",
-                    return_value=9,
-                ),
                 mock.patch("compute_node.compute_methods.conv2d.executor.subprocess.run", side_effect=fake_run),
             ):
                 executor.execute_task(task)
 
         command = captured["command"]
         self.assertIn("--workers", command)
-        self.assertEqual(command[command.index("--workers") + 1], "9")
+        self.assertEqual(command[command.index("--workers") + 1], "16")
 
-    def test_spatial_metal_task_command_translates_headroom_fraction(self) -> None:
+    def test_spatial_metal_task_command_passes_benchmark_config(self) -> None:
         spec = spatial_executor.get_test_spec()
         expected_channels = 5
         expected_output_bytes = spec.output_h * spec.output_w * expected_channels * 4
@@ -362,7 +444,11 @@ class TaskExecutorCommandTests(unittest.TestCase):
                         hardware_type="metal",
                         effective_gflops=120.0,
                         rank=1,
-                        best_config={"headroom_fraction": 0.5},
+                        best_config={
+                            "block_size": 256,
+                            "tile_size": 16,
+                            "output_channel_batch": 3,
+                        },
                     ),
                 ),
                 mock.patch.object(spatial_executor, "_prepare_runner_path", return_value=fake_runner),
@@ -371,14 +457,13 @@ class TaskExecutorCommandTests(unittest.TestCase):
                 executor.execute_task(task)
 
         command = captured["command"]
-        self.assertIn("--headroom-fraction", command)
-        self.assertEqual(command[command.index("--headroom-fraction") + 1], "0.500000")
+        self.assertNotIn("--headroom-fraction", command)
         self.assertIn("--block-sizes", command)
         self.assertEqual(command[command.index("--block-sizes") + 1], "256")
         self.assertIn("--tile-sizes", command)
         self.assertEqual(command[command.index("--tile-sizes") + 1], "16")
         self.assertIn("--output-channel-batch", command)
-        self.assertEqual(command[command.index("--output-channel-batch") + 1], "2")
+        self.assertEqual(command[command.index("--output-channel-batch") + 1], "3")
 
     def test_spatial_prepare_runner_path_builds_metal_when_binary_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

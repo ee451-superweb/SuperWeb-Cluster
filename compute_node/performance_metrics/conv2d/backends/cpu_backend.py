@@ -15,7 +15,6 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from app.compute_resource_policy import resolve_capped_cpu_worker_count
 from compute_node.compute_methods.conv2d import (
     CPU_MACOS_BUILD_DIR,
     CPU_MACOS_EXECUTABLE_PATH,
@@ -209,15 +208,16 @@ def _extract_raw_report(metrics: dict[str, object]) -> dict[str, object]:
 
 
 def _default_worker_candidates(logical_cpu_count: int | None = None) -> list[int]:
-    """Return worker-count candidates under the shared CPU resource cap.
+    """Return worker-count candidates rooted at this machine's logical CPU count.
 
     Args:
         logical_cpu_count: Optional explicit logical CPU count override.
 
     Returns:
-        Worker counts that respect the shared compute-resource policy.
+        Worker counts derived from the binary-tree sweep around the logical CPU count.
     """
-    return _binary_tree_worker_candidates(resolve_capped_cpu_worker_count(logical_cpu_count))
+    resolved = logical_cpu_count if logical_cpu_count is not None else os.cpu_count()
+    return _binary_tree_worker_candidates(max(1, int(resolved or 1)))
 
 
 class CpuBackend:
@@ -235,12 +235,11 @@ class CpuBackend:
             A dictionary describing worker and tile search settings.
         """
         logical_cpu_count = os.cpu_count() or 1
-        hardware_workers = resolve_capped_cpu_worker_count(logical_cpu_count)
         cout = 1 if spec is None else spec.c_out
         return {
             "logical_cpu_count": logical_cpu_count,
-            "hardware_workers": hardware_workers,
-            "worker_search_order": _binary_tree_worker_candidates(hardware_workers),
+            "hardware_workers": logical_cpu_count,
+            "worker_search_order": _binary_tree_worker_candidates(logical_cpu_count),
             "tile_size_candidates": _candidate_tile_sizes(cout),
             "autotune_repeats": _autotune_repeats(spec),
             "measurement_repeats": _measurement_repeats(spec),

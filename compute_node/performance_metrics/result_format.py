@@ -794,7 +794,7 @@ def build_report(
         The final report dictionary written by the top-level CLI.
     """
     return {
-        "schema_version": 5,
+        "schema_version": 6,
         "generated_at_unix": time.time(),
         "benchmark_elapsed_seconds": total_elapsed,
         "device_overview": device_overview,

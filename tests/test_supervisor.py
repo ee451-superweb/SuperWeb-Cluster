@@ -15,7 +15,7 @@ from app.supervisor import Supervisor
 def _write_result_json(path: Path, *, usable_backends_by_method: dict[str, list[str]]) -> None:
     """Create a minimal result.json with the requested per-method backend lists."""
     payload = {
-        "schema_version": 5,
+        "schema_version": 6,
         "methods": {
             method_name: {"usable_backends": list(backends)}
             for method_name, backends in usable_backends_by_method.items()
@@ -551,6 +551,235 @@ class SupervisorCapacityPlanningTests(unittest.TestCase):
         self.assertNotIn("stdout", kwargs)
         self.assertNotIn("stderr", kwargs)
         self.assertEqual(kwargs.get("creationflags"), 0x00000010)  # CREATE_NEW_CONSOLE
+
+    def _spawned_supervisor(self, *, node_name: str = "main-node") -> Supervisor:
+        """Build a supervisor with a fake spawned peer wired up.
+
+        Why this helper: every eviction test needs the same shape — a supervisor
+        that has called ``_spawn_peer`` so ``_peer_node_name`` and
+        ``_peer_process`` are populated. Inlining this in each test obscured the
+        thing the test actually exercises.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result_path = Path(temp_dir) / "result.json"
+            _write_result_json(
+                result_path,
+                usable_backends_by_method={"gemv": ["cpu", "cuda"]},
+            )
+            supervisor = self._build_supervisor(
+                config=AppConfig(node_name=node_name),
+                result_path=result_path,
+                bootstrap_script_path=Path("/tmp/bootstrap.py"),
+            )
+        return supervisor
+
+class SupervisorPeerHeartbeatTests(SupervisorCapacityPlanningTests):
+    """Validate the loopback heartbeat hang detector.
+
+    The heartbeat is the supervisor's local hang detector: it works for any
+    supervisor (including a second one that does not own a main-node
+    registry) and fires on the first missed interval without waiting for any
+    cluster-level signal. The tests here cover the supervisor side only —
+    the listener and peer writer contracts are covered by
+    ``test_peer_heartbeat.py``.
+    """
+
+    def _fake_listener(
+        self, *, accept_result: bool, heartbeats: list[str]
+    ) -> mock.Mock:
+        """Return a ``SupervisorHeartbeatListener`` mock with scripted reads.
+
+        Each entry in ``heartbeats`` is one of the tri-state constants
+        (``HEARTBEAT_OK`` / ``HEARTBEAT_TIMEOUT`` / ``HEARTBEAT_CLOSED``).
+        Once exhausted, further calls return ``HEARTBEAT_CLOSED`` so the
+        watcher exits cleanly rather than spinning forever in tests.
+        """
+        from app.peer_heartbeat import HEARTBEAT_CLOSED
+
+        listener = mock.Mock()
+        listener.accept.return_value = accept_result
+        remaining = list(heartbeats)
+
+        def _wait(_timeout: float) -> str:
+            return remaining.pop(0) if remaining else HEARTBEAT_CLOSED
+
+        listener.wait_for_heartbeat.side_effect = _wait
+        listener.port = 0
+        return listener
+
+    def _spawn_with_fake_listener(
+        self, listener: mock.Mock
+    ) -> tuple[Supervisor, mock.Mock]:
+        """Build a supervisor that already has a peer_process and fake listener.
+
+        Skips the real ``_spawn_peer`` because the heartbeat watcher's
+        behavior is what we're testing; wiring up env vars and Popen kwargs
+        is covered by the dedicated spawn test.
+        """
+        supervisor = self._spawned_supervisor()
+        fake_process = mock.Mock(pid=4242)
+        fake_process.wait.return_value = 0
+        fake_process.poll.return_value = None  # alive
+        supervisor._peer_process = fake_process
+        supervisor._peer_backend = "cuda"
+        supervisor._peer_node_name = "main-node-peer-cuda"
+        supervisor._peer_heartbeat_listener = listener
+        return supervisor, fake_process
+
+    def test_spawn_peer_sets_env_var_and_starts_watcher(self) -> None:
+        # Operators and the peer side both depend on the env var being set;
+        # if it is missing, the peer silently runs without heartbeat and we
+        # lose the hang detector. Pin both the var name and the port linkage.
+        supervisor = self._spawned_supervisor()
+        fake_process = mock.Mock(pid=9999)
+        fake_process.wait.return_value = 0
+        with mock.patch("app.supervisor.subprocess.Popen", return_value=fake_process) as popen_mock:
+            supervisor._spawn_peer("cuda")
+        # Keep the watcher from dangling on accept for the full 30s timeout.
+        if supervisor._peer_heartbeat_listener is not None:
+            supervisor._peer_heartbeat_listener.close()
+        if supervisor._peer_heartbeat_thread is not None:
+            supervisor._peer_heartbeat_thread.join(timeout=2.0)
+        if supervisor._peer_watcher_thread is not None:
+            supervisor._peer_watcher_thread.join(timeout=2.0)
+        kwargs = popen_mock.call_args.kwargs
+        self.assertIn("env", kwargs)
+        self.assertIn("SUPERWEB_PEER_HEARTBEAT_PORT", kwargs["env"])
+        port_str = kwargs["env"]["SUPERWEB_PEER_HEARTBEAT_PORT"]
+        self.assertEqual(int(port_str), int(port_str))  # parses as int
+        self.assertGreater(int(port_str), 0)
+
+    def test_watcher_exits_silently_when_peer_never_connects(self) -> None:
+        # Legacy peer builds and peers that crash before bootstrap will never
+        # connect. The watcher must log once and get out of the way — it
+        # must NOT kill the peer just because the heartbeat never established.
+        listener = self._fake_listener(accept_result=False, heartbeats=[])
+        supervisor, fake_process = self._spawn_with_fake_listener(listener)
+        supervisor._watch_peer_heartbeat(listener, fake_process, "cuda")
+        fake_process.terminate.assert_not_called()
+        listener.wait_for_heartbeat.assert_not_called()
+
+    def test_watcher_declares_hang_after_miss_threshold(self) -> None:
+        # The load-bearing test: four consecutive TIMEOUT misses while
+        # poll()==None is the definition of "hung", and the supervisor must
+        # dump+kill. Note: TIMEOUT (not CLOSED) — the hang signal is the
+        # silence of a peer whose socket is still open.
+        from app.peer_heartbeat import HEARTBEAT_OK, HEARTBEAT_TIMEOUT
+
+        listener = self._fake_listener(
+            accept_result=True,
+            heartbeats=[
+                HEARTBEAT_OK,
+                HEARTBEAT_TIMEOUT,
+                HEARTBEAT_TIMEOUT,
+                HEARTBEAT_TIMEOUT,
+                HEARTBEAT_TIMEOUT,
+            ],
+        )
+        supervisor, fake_process = self._spawn_with_fake_listener(listener)
+        with mock.patch(
+            "app.supervisor.dump_python_stack",
+            return_value="Thread 0x1: blocked in cuda_dispatch",
+        ) as dump_mock:
+            supervisor._watch_peer_heartbeat(listener, fake_process, "cuda")
+        dump_mock.assert_called_once_with(4242)
+        fake_process.terminate.assert_called_once()
+
+    def test_watcher_exits_silently_on_peer_socket_close(self) -> None:
+        # Regression for the 2026-04-21 CUDA-runner incident: native runner
+        # returned exit 1, peer exited, socket closed. The watcher used to
+        # read four EOFs in the same millisecond and declare a hang. Must
+        # now treat CLOSED as "peer is going away" and hand off to the
+        # exit-code watcher without dumping or terminating.
+        from app.peer_heartbeat import HEARTBEAT_CLOSED, HEARTBEAT_OK
+
+        listener = self._fake_listener(
+            accept_result=True,
+            heartbeats=[HEARTBEAT_OK, HEARTBEAT_CLOSED],
+        )
+        supervisor, fake_process = self._spawn_with_fake_listener(listener)
+        with mock.patch("app.supervisor.dump_python_stack") as dump_mock:
+            supervisor._watch_peer_heartbeat(listener, fake_process, "cuda")
+        dump_mock.assert_not_called()
+        fake_process.terminate.assert_not_called()
+
+    def test_watcher_resets_miss_count_on_resumed_heartbeat(self) -> None:
+        # A transient GC pause or CPU spike can miss one or two heartbeats;
+        # a recovery byte must clear the counter so transient stalls do not
+        # kill otherwise-healthy peers.
+        from app.peer_heartbeat import HEARTBEAT_OK, HEARTBEAT_TIMEOUT
+
+        listener = mock.Mock()
+        listener.accept.return_value = True
+        supervisor, fake_process = self._spawn_with_fake_listener(listener)
+        listener.wait_for_heartbeat.side_effect = _make_draining_side_effect(
+            [
+                HEARTBEAT_OK,
+                HEARTBEAT_TIMEOUT,
+                HEARTBEAT_TIMEOUT,
+                HEARTBEAT_OK,
+                HEARTBEAT_TIMEOUT,
+                HEARTBEAT_TIMEOUT,
+                HEARTBEAT_OK,
+            ],
+            supervisor,
+        )
+        with mock.patch("app.supervisor.dump_python_stack") as dump_mock:
+            supervisor._watch_peer_heartbeat(listener, fake_process, "cuda")
+        dump_mock.assert_not_called()
+        fake_process.terminate.assert_not_called()
+
+    def test_watcher_does_not_fire_when_peer_exits_mid_sequence(self) -> None:
+        # Covers the case where recv times out (socket still open) but the
+        # process has in the meantime exited. poll() returning non-None
+        # means "the exit-code watcher is about to / already has logged the
+        # cause" — no dump, no terminate.
+        from app.peer_heartbeat import HEARTBEAT_OK, HEARTBEAT_TIMEOUT
+
+        listener = self._fake_listener(
+            accept_result=True,
+            heartbeats=[HEARTBEAT_OK, HEARTBEAT_TIMEOUT],
+        )
+        supervisor, fake_process = self._spawn_with_fake_listener(listener)
+        fake_process.poll.side_effect = [None, 0]
+        with mock.patch("app.supervisor.dump_python_stack") as dump_mock:
+            supervisor._watch_peer_heartbeat(listener, fake_process, "cuda")
+        dump_mock.assert_not_called()
+        fake_process.terminate.assert_not_called()
+
+    def test_terminate_peer_closes_heartbeat_listener(self) -> None:
+        # Leaking a listening socket on shutdown would pin a loopback port
+        # across restart and make the next spawn fail to bind on that port.
+        listener = self._fake_listener(accept_result=True, heartbeats=[])
+        supervisor, fake_process = self._spawn_with_fake_listener(listener)
+        supervisor._terminate_peer()
+        listener.close.assert_called_once()
+
+
+def _make_draining_side_effect(script: list[str], supervisor: Supervisor):
+    """Build a ``wait_for_heartbeat`` side effect that exits the watcher after the script drains.
+
+    Why this helper: the watcher loop is infinite by design (it would run
+    until the supervisor shuts down in production). In a unit test we need
+    it to exit deterministically once the scripted sequence is consumed;
+    flipping ``_shutdown_requested`` after the last scripted call is the
+    smallest signal that matches the real exit path. ``script`` contains
+    tri-state values from :mod:`app.peer_heartbeat`.
+    """
+    from app.peer_heartbeat import HEARTBEAT_CLOSED
+
+    remaining = list(script)
+
+    def _wait(_timeout: float) -> str:
+        if not remaining:
+            supervisor._shutdown_requested = True
+            return HEARTBEAT_CLOSED
+        value = remaining.pop(0)
+        if not remaining:
+            supervisor._shutdown_requested = True
+        return value
+
+    return _wait
 
 
 if __name__ == "__main__":

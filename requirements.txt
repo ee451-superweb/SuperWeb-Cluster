@@ -4,3 +4,6 @@ protobuf>=6.31.1
 grpcio-tools>=1.74.0
 pyzmq>=27.1.0
 tqdm>=4.67.0
+# py-spy lets the supervisor capture a Python stack from a peer the registry
+# evicted while the OS process is still alive (i.e. hung, not crashed).
+py-spy>=0.4.0

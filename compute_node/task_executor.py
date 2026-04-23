@@ -9,6 +9,7 @@ from __future__ import annotations
 import atexit
 import json
 import logging
+import os
 import subprocess
 import sys
 import tempfile
@@ -21,7 +22,6 @@ from pathlib import Path
 from common.process_exit import classify_exit_code
 
 from app.constants import DX12_BACKEND_DISABLED_REASON
-from app.compute_resource_policy import resolve_capped_cpu_worker_count, resolve_metal_headroom_policy
 from common.work_partition import partition_contiguous_range
 from compute_node.compute_methods.gemv import (
     CUDA_EXECUTABLE_PATH,
@@ -60,6 +60,36 @@ def _tail_stream(payload: str | bytes | None, *, limit: int = _RUNNER_STDERR_TAI
     if len(text) <= limit:
         return text
     return f"...<truncated {len(text) - limit} bytes>...{text[-limit:]}"
+
+
+def _parse_compute_event_ms(stdout: str | bytes | None) -> int | None:
+    """Return `compute_event_ms` from a runner's JSON stdout, or None.
+
+    The gemv runners in task mode emit a JSON record with
+    `compute_event_ms = wall_clock_latency_seconds × iteration_count × 1000`,
+    i.e. the steady-state kernel time aggregated across all iterations, with
+    file I/O and process startup excluded. The executor prefers this over
+    subprocess wall-clock so the reported computation_ms scales with
+    iteration_count instead of being dominated by one-time matrix load.
+    """
+    if not stdout:
+        return None
+    if isinstance(stdout, bytes):
+        stdout = stdout.decode("utf-8", errors="replace")
+    try:
+        payload = json.loads(stdout)
+    except (ValueError, TypeError):
+        return None
+    value = payload.get("compute_event_ms") if isinstance(payload, dict) else None
+    if value is None:
+        return None
+    try:
+        ms = float(value)
+    except (TypeError, ValueError):
+        return None
+    if ms < 0.0:
+        return None
+    return int(round(ms))
 
 
 def _log_gemv_runner_failure(
@@ -313,7 +343,7 @@ class GemvTaskExecutor:
 
             def _run_and_time(processor_slice):
                 slice_started_at = time.monotonic()
-                chunk = self._run_processor_slice(
+                chunk, compute_event_ms = self._run_processor_slice(
                     processor_slice,
                     task.iteration_count,
                     vector_path,
@@ -322,7 +352,14 @@ class GemvTaskExecutor:
                     dataset_layout=dataset_layout,
                     task_id=task.task_id,
                 )
-                slice_ms = max(0, int((time.monotonic() - slice_started_at) * 1000))
+                subprocess_wall_ms = max(0, int((time.monotonic() - slice_started_at) * 1000))
+                # Prefer the runner-reported kernel time (per-iter latency ×
+                # iteration_count) over subprocess wall; the latter is dominated
+                # by one-time matrix load and would hide iteration_count scaling.
+                if compute_event_ms is not None:
+                    slice_ms = min(subprocess_wall_ms, compute_event_ms)
+                else:
+                    slice_ms = subprocess_wall_ms
                 return processor_slice.row_start, chunk, slice_ms
 
             with ThreadPoolExecutor(max_workers=len(processor_slices), thread_name_prefix="local-processor") as executor:
@@ -430,8 +467,8 @@ class GemvTaskExecutor:
         spec,
         dataset_layout,
         task_id: str = "?",
-    ) -> bytes:
-        """Run one processor-specific GEMV slice and return raw output bytes.
+    ) -> tuple[bytes, int | None]:
+        """Run one processor-specific GEMV slice.
 
         Args:
             processor_slice: Local processor slice to execute.
@@ -442,11 +479,15 @@ class GemvTaskExecutor:
             dataset_layout: Resolved GEMV dataset layout for this task size.
 
         Returns:
-            Raw float32 output bytes for the requested row slice.
+            A tuple of ``(raw_output_bytes, compute_event_ms)``. The second
+            element is the runner-reported kernel time in milliseconds or
+            ``None`` when the runner did not provide one (e.g. DX12 resident
+            runner).
         """
         output_path = temp_root / (
             f"{processor_slice.processor.hardware_type}_{processor_slice.row_start}_{processor_slice.row_end}.bin"
         )
+        compute_event_ms: int | None = None
         if processor_slice.processor.hardware_type == "dx12" and self._dx12_runner is not None:
             self._dx12_runner.run_slice(
                 vector_path=vector_path,
@@ -505,13 +546,14 @@ class GemvTaskExecutor:
                     f"{processor_slice.processor.hardware_type} runtime executable completed without writing {output_path.name}: "
                     f"{stdout}"
                 )
+            compute_event_ms = _parse_compute_event_ms(completed.stdout)
         raw = output_path.read_bytes()
         expected_bytes = (processor_slice.row_end - processor_slice.row_start) * 4
         if len(raw) != expected_bytes:
             raise ValueError(
                 f"{processor_slice.processor.hardware_type} runtime output has {len(raw)} bytes, expected {expected_bytes}"
             )
-        return raw
+        return raw, compute_event_ms
 
     def _build_dx12_resident_runner(self) -> _Dx12ResidentRunner | None:
         """Create the DX12 resident runner when the local inventory supports it.
@@ -561,9 +603,9 @@ class GemvTaskExecutor:
             configured_workers = int(
                 processor.best_config.get("workers")
                 or processor.best_config.get("requested_workers")
-                or resolve_capped_cpu_worker_count()
+                or (os.cpu_count() or 1)
             )
-            workers = max(1, min(resolve_capped_cpu_worker_count(), configured_workers))
+            workers = max(1, configured_workers)
             tile_size = int(processor.best_config.get("tile_size") or spec.cols)
             accumulation_precision = str(processor.best_config.get("accumulation_precision") or "fp32")
             return [
@@ -598,16 +640,8 @@ class GemvTaskExecutor:
             executable_path = self._resolve_runtime_executable_path("metal")
             block_size = int(processor.best_config.get("block_size") or 256)
             tile_size = int(processor.best_config.get("tile_size") or 1)
-            headroom_fraction = processor.best_config.get("headroom_fraction")
-            if headroom_fraction is None:
-                headroom_policy = resolve_metal_headroom_policy(
-                    processor_slice.row_end - processor_slice.row_start,
-                )
-            else:
-                headroom_policy = resolve_metal_headroom_policy(
-                    processor_slice.row_end - processor_slice.row_start,
-                    fraction=float(headroom_fraction),
-                )
+            slice_rows = processor_slice.row_end - processor_slice.row_start
+            row_chunk_size = int(processor.best_config.get("row_chunk_size") or slice_rows)
             return [
                 str(executable_path),
                 "--matrix",
@@ -628,10 +662,8 @@ class GemvTaskExecutor:
                 str(block_size),
                 "--tile-sizes",
                 str(tile_size),
-                "--headroom-fraction",
-                f"{headroom_policy.headroom_fraction:.6f}",
                 "--row-chunk-size",
-                str(headroom_policy.work_chunk_size),
+                str(row_chunk_size),
                 "--autotune-repeats",
                 "1",
                 "--iteration-count",

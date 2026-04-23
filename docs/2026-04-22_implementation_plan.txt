@@ -1,0 +1,223 @@
+SuperWeb-Cluster 目录与命名重构计划
+时间戳: 2026-04-22
+关联工作: Client 端 (ee451/Client/python/) 已完成 superweb_client/ wrapper 拆分（commit fe77f8c）
+背景: Client 端 restructure 期间审视了 Cluster 端做镜像，发现 Cluster 自身的目录结构对陌生人并不直观，
+      app/+common/ 划分含混、runtime 命名重载、main_node/heartbeat.py 是 Sprint 1 留下的 placeholder 等。
+      本计划仅做改名/搬迁/删除占位符，不动任何业务逻辑。
+
+判断标准: "陌生人能不能一眼看懂在哪导航？" 把通过该测试当作每次改动的验收。
+
+================================================================
+Tier 1（高确定性，低风险，先做）
+================================================================
+
+目标:
+  消除明显的占位符、单文件包嵌套、冗余后缀；语义不变。
+
+具体动作:
+
+  1. wire/discovery_protocol/discovery.py → wire/discovery_protocol.py
+       理由: 文件夹里只有一个同名文件，文件夹本身就是噪音。
+       影响: 改 import 路径，无逻辑变更。
+
+  2. main_node/heartbeat.py → 删除
+       理由: 文件 docstring 写着 "Placeholder module for future standalone heartbeat
+             monitoring logic. Use this module only as a stub during development."
+             真实流程在 main_node/heartbeat_service.py。Sprint 1 留下的占位文件，再
+             不删就会越攒越多。
+       影响: 无 import 引用（要 grep 确认）。
+
+  3. app/recovery.py → 删除
+       理由: 7 行占位符 def recover_stale_state(): pass。要么实现要么删除，
+             不要让 stub 烂在代码里。
+       影响: 无 import 引用（要 grep 确认）；如有调用方，先调用方决定保留与否。
+
+  4. main_node/heartbeat_service.py → main_node/heartbeat.py
+       前置: Tier 1 step 2 删除占位符之后做。
+       理由: 占位符删了之后 _service 后缀就多余了，文件名也和
+             compute_node/heartbeat.py 对齐。
+
+  5. app/peer_heartbeat.py → app/supervisor_heartbeat.py
+       理由: 当前名字暗示是节点之间的 heartbeat（cluster 概念），实际是
+             supervisor↔子进程的 IPC heartbeat（OS 概念）。改名让边界
+             一眼可辨。
+
+  6. app/trace_utils.py → app/tracing.py
+       理由: 与 client 的 core/tracing.py 对齐，且 app/ 下其他文件都没有
+             _utils 后缀。
+
+  7. scripts/ → benchmarks/
+       理由: 当前只装 bench_aggregate_io.py 和 benchmark_conv2d_mid_time.py，
+             scripts 这名字会让人以为是杂项运维工具。
+
+提交策略: Tier 1 全部塞进一个 commit；review 容易，回滚成本低。
+
+================================================================
+Tier 2（中等风险，触及 main_node + compute_node 全部 import）
+================================================================
+
+目标: 解决 "runtime" 词义重载。
+
+  当前 runtime 出现 5 次，每次含义都不同：
+    app/runtime_environment.py        — 项目 venv 偏好
+    main_node/runtime.py              — main 节点长时控制循环 (675 LOC)
+    main_node/runtime_mailbox.py      — 单连接 mailbox (147 LOC)
+    compute_node/runtime.py           — worker 长时控制循环 (367 LOC)
+    compute_node/runtime_services.py  — worker 状态/消息 helper (607 LOC)
+    wire/internal_protocol/runtime_transport.py — 内部 protobuf 传输
+
+具体动作:
+
+  1. app/runtime_environment.py → app/venv.py（或 core/venv.py，见 Tier 5）
+       理由: 它的唯一职责是 "prefer the project virtual environment at runtime"。
+
+  2. main_node/runtime.py → main_node/control_loop.py
+  3. main_node/runtime_mailbox.py → main_node/mailbox.py
+       理由: 在 main_node/ 包内 "runtime" 已是隐含上下文，前缀冗余。
+
+  4. compute_node/runtime.py → compute_node/worker_loop.py
+       理由: 与 main_node/control_loop.py 镜像命名。
+
+  5. compute_node/runtime_services.py → 视情况
+       option A: 合并进 worker_loop.py（如果只是被 runtime.py 调用）
+       option B: 改名为 worker_services.py
+       决策依据: helper (607 LOC) 比入口 (367 LOC) 还大本身就是 smell；
+                需要先打开两个文件，确认拆分的真实理由。
+
+  6. wire/internal_protocol/runtime_transport.py → wire/internal_protocol/transport.py
+       理由: 在 internal_protocol/ 内部 runtime 是隐含上下文。
+
+提交策略: 1 个 commit per 包（app/, main_node/, compute_node/, wire/）共 4 个 commit。
+         每个 commit 之间跑一次 tests/ 全套。
+
+================================================================
+Tier 3（中等风险）
+================================================================
+
+目标: 解决 main_node/handlers.py 与 compute_node/handlers.py 同名的问题。
+
+具体动作:
+  1. main_node/handlers.py → main_node/main_handlers.py
+       或拆分为 main_node/handlers/{client.py, worker.py, discovery.py}/。
+       两种方案的取舍取决于当前 286 行内部是否已按消息类型自然分块。
+
+  2. compute_node/handlers.py → compute_node/worker_handlers.py
+
+  其余同名兄弟（如 main_node/heartbeat.py 与 compute_node/heartbeat.py）
+  在 Tier 1 之后已经天然分开（一个是控制器，一个是状态持有），命名语义
+  就够；不强行改名。
+
+================================================================
+Tier 4（package 内部微调）
+================================================================
+
+每个改动单独 commit。
+
+  wire/ 内部:
+    - 已在 Tier 1 step 1 把 discovery_protocol/ 拍扁。
+    - 检查 wire/internal_protocol/_model_utils.py 的下划线前缀是否符合实际：
+      * 如果只在本目录内 import，保留 _ 前缀。
+      * 如果跨目录 import，去掉 _ 前缀。
+
+  compute_node/ 内部:
+    - executor.py (36 LOC) vs task_executor.py (693 LOC)：
+      * 36 行的 executor.py 太小不该和 693 行的 task_executor.py 平级；
+        要么合并要么改名为 executor_pool.py 等表意名。
+      * 打开两个文件后再决定。
+    - artifacts/ 文件夹是否仍为空？空就删；预留就放一个 README.md
+      说明 reserved for X。
+    - performance_summary.py (326 LOC) 应当移入 performance_metrics/ 子包，
+      与同主题文件聚合。
+
+  adapters/ 改名:
+    - adapters/ → platform_integration/ 或 platform/。
+      "adapters" 太泛。如果选 platform/，则把 adapters/platform.py 一并改名
+      （比如 → platform/os_info.py），避免 platform/platform.py 这种愚蠢嵌套。
+
+================================================================
+Tier 5（最大风险，最后做）
+================================================================
+
+目标: 消解 app/ 与 common/ 的虚假分隔，并把 supervisor 提升为顶层 role。
+
+当前问题:
+  app/ 装 constants/config/logging_setup/supervisor/capacity/recovery/runtime_environment
+  common/ 装 errors/types/float32_codec/hardware/messages/state/work_partition
+  两者都是"哪都用得到"的横切代码，边界是历史性的，不是原则性的。
+  陌生人想找一个 helper 必须把两个目录都翻一遍。
+
+新结构:
+
+  core/   ← 合并 app/ 和 common/ 中真正的横切 helper:
+    constants.py
+    config.py
+    logging_setup.py
+    tracing.py             （由 app/trace_utils.py 改名而来，见 Tier 1）
+    venv.py                （由 app/runtime_environment.py 改名而来，见 Tier 2）
+    types.py
+    errors.py
+    state.py
+    messages.py
+    float32_codec.py
+    hardware.py
+    process_exit.py
+    work_partition.py
+
+  supervision/   ← 把 app/ 中真正属于 supervisor 角色的搬出来:
+    supervisor.py             (700 LOC，从 app/ 移出，单文件不该被
+                                 cross-cutting helper 包围)
+    supervisor_heartbeat.py   (Tier 1 改名而来)
+    peer_diagnostics.py
+    capacity.py
+    compute_resource_policy.py
+
+  supervision/ 与 main_node/、compute_node/ 平级。Cluster 真正的角色
+  分布是 supervisor + main_node + compute_node 三件，不是 app + 各角色。
+
+执行策略:
+  - 这是单 commit 中最大的一笔（动几乎所有 import）。
+  - 必须等 Tier 1-4 全部 land 之后再做，避免改动叠加。
+  - 自动化建议: 先列出所有 from app.X import Y 与 from common.X import Y，
+    对应到新路径，然后用 sed/搜索替换批量改。
+  - commit 完立刻跑一次 tests/ 全套，再跑一次端到端 smoke（main+worker+client
+    联调），因为 import 改动量大，单元测试可能漏掉接线错误。
+
+================================================================
+开放问题（执行前需 user 决定）
+================================================================
+
+  Q1. app/recovery.py: 删除还是真正实现？
+        - 删除省心，未来需要时再加。
+        - 实现的话需要先给出 stale-state cleanup 的具体语义。
+
+  Q2. compute_node/runtime_services.py (607 LOC) 比 compute_node/runtime.py
+      (367 LOC) 大，这个拆分是有意的还是历史遗留？
+        - 合并 vs 改名两种处理路径取决于答案。
+
+  Q3. compute_node/executor.py vs task_executor.py 的真实边界是什么？
+        - 决定 Tier 4 是合并还是改名。
+
+  Q4. compute_node/artifacts/ 是否真的空？
+        - 真空则删；预留就放 README 说明用途。
+
+  Q5. Tier 5（app/+common/ → core/+supervision/）是否真的要做？
+        - 替代方案: 只做 Tier 1-4，留 app/+common/ 不动。
+        - 收益: 解决最深层的"陌生人看不懂"问题。
+        - 成本: 一次性大改 import；若 cluster 仍在 sprint 中，与并行 PR 冲突
+                风险高。
+
+================================================================
+执行顺序总结
+================================================================
+
+  Commit 1: Tier 1 全部
+  Commit 2-5: Tier 2，每个包一个 commit
+  Commit 6-7: Tier 3 (handlers 拆分 main_node + compute_node)
+  Commit 8+: Tier 4，每个 package 内部微调一个 commit
+  Commit N (最后): Tier 5（如果 user 同意做）
+
+  每个 commit 之间执行:
+    - python -m unittest discover -s tests
+    - 视情况执行 cluster 端到端 smoke（main+worker+client 三方联调）
+
+  禁止把多个 Tier 塞进一个 commit。Diff 看不动等于 review 不了。

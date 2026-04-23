@@ -34,6 +34,8 @@
 
 namespace {
 
+enum class RunnerMode { Dispatch, Benchmark };
+
 struct Options {
     std::string library_path;
     std::string input_path;
@@ -53,6 +55,7 @@ struct Options {
     int output_channel_batch = 0;
     int autotune_repeats = 1;
     int measurement_repeats = 1;
+    RunnerMode mode = RunnerMode::Dispatch;
     bool verbose = false;
 };
 
@@ -161,6 +164,14 @@ Options parse_args(int argc, char** argv) {
             options.autotune_repeats = std::stoi(value);
         } else if (key == "--measurement-repeats" || key == "--iteration-count") {
             options.measurement_repeats = std::stoi(value);
+        } else if (key == "--mode") {
+            if (value == "dispatch") {
+                options.mode = RunnerMode::Dispatch;
+            } else if (value == "benchmark") {
+                options.mode = RunnerMode::Benchmark;
+            } else {
+                throw std::runtime_error("unknown --mode value: " + value);
+            }
         } else {
             throw std::runtime_error("unknown flag: " + key);
         }
@@ -609,82 +620,132 @@ int main(int argc, char** argv) {
                 const long long bytes_kernel_compulsory_plan =
                     bytes_input_plan + bytes_weight_plan + bytes_output_plan;
 
-                if (options.verbose) {
-                    std::fprintf(stderr,
-                        "[conv2d metal plan] phase=autotune autotune_repeats=%d output_channel_batch=%zu\n",
-                        options.autotune_repeats, output_channel_batch);
-                    std::fflush(stderr);
-                }
+                if (options.mode == RunnerMode::Benchmark) {
+                    if (options.verbose) {
+                        std::fprintf(stderr,
+                            "[conv2d metal plan] phase=autotune autotune_repeats=%d output_channel_batch=%zu\n",
+                            options.autotune_repeats, output_channel_batch);
+                        std::fflush(stderr);
+                    }
 
-                best_metrics.autotune = run_mpsgraph_conv2d(
-                    command_queue,
-                    options,
-                    transposed_weight,
-                    host_output,
-                    options.autotune_repeats
-                );
+                    best_metrics.autotune = run_mpsgraph_conv2d(
+                        command_queue,
+                        options,
+                        transposed_weight,
+                        host_output,
+                        options.autotune_repeats
+                    );
 
-                {
-                    TrialRecord record;
-                    record.phase = "autotune";
-                    record.candidate_index = 0;
-                    record.candidate_total = 1;
-                    record.trial_index_within_candidate = 0;
-                    record.repeats_for_candidate = options.autotune_repeats;
-                    record.output_channel_batch = static_cast<int>(output_channel_batch);
-                    record.host_prep_seconds = 0.0;
-                    record.host_compute_seconds = best_metrics.autotune.wall_clock_latency_seconds;
-                    record.device_to_host_seconds = 0.0;
-                    record.host_postproc_seconds = 0.0;
-                    record.total_wall_seconds = best_metrics.autotune.wall_clock_latency_seconds;
-                    trial_records.push_back(std::move(record));
-                }
+                    {
+                        TrialRecord record;
+                        record.phase = "autotune";
+                        record.candidate_index = 0;
+                        record.candidate_total = 1;
+                        record.trial_index_within_candidate = 0;
+                        record.repeats_for_candidate = options.autotune_repeats;
+                        record.output_channel_batch = static_cast<int>(output_channel_batch);
+                        record.host_prep_seconds = 0.0;
+                        record.host_compute_seconds = best_metrics.autotune.wall_clock_latency_seconds;
+                        record.device_to_host_seconds = 0.0;
+                        record.host_postproc_seconds = 0.0;
+                        record.total_wall_seconds = best_metrics.autotune.wall_clock_latency_seconds;
+                        trial_records.push_back(std::move(record));
+                    }
 
-                if (options.verbose) {
-                    std::fprintf(stderr,
-                        "[conv2d metal autotune 1/1] output_channel_batch=%zu repeats=%d "
-                        "per_run=%.6fs effective_gflops=%.3f\n",
-                        output_channel_batch, options.autotune_repeats,
-                        best_metrics.autotune.wall_clock_latency_seconds,
-                        best_metrics.autotune.effective_gflops);
-                    std::fprintf(stderr,
-                        "[conv2d metal plan] phase=measurement measurement_repeats=%d\n",
-                        options.measurement_repeats);
-                    std::fflush(stderr);
-                }
+                    if (options.verbose) {
+                        std::fprintf(stderr,
+                            "[conv2d metal autotune 1/1] output_channel_batch=%zu repeats=%d "
+                            "per_run=%.6fs effective_gflops=%.3f\n",
+                            output_channel_batch, options.autotune_repeats,
+                            best_metrics.autotune.wall_clock_latency_seconds,
+                            best_metrics.autotune.effective_gflops);
+                        std::fprintf(stderr,
+                            "[conv2d metal plan] phase=measurement measurement_repeats=%d\n",
+                            options.measurement_repeats);
+                        std::fflush(stderr);
+                    }
 
-                best_metrics.measurement = run_mpsgraph_conv2d(
-                    command_queue,
-                    options,
-                    transposed_weight,
-                    host_output,
-                    options.measurement_repeats
-                );
+                    best_metrics.measurement = run_mpsgraph_conv2d(
+                        command_queue,
+                        options,
+                        transposed_weight,
+                        host_output,
+                        options.measurement_repeats
+                    );
 
-                {
-                    TrialRecord record;
-                    record.phase = "measurement";
-                    record.candidate_index = 0;
-                    record.candidate_total = 1;
-                    record.trial_index_within_candidate = 0;
-                    record.repeats_for_candidate = options.measurement_repeats;
-                    record.output_channel_batch = static_cast<int>(output_channel_batch);
-                    record.host_prep_seconds = 0.0;
-                    record.host_compute_seconds = best_metrics.measurement.wall_clock_latency_seconds;
-                    record.device_to_host_seconds = 0.0;
-                    record.host_postproc_seconds = 0.0;
-                    record.total_wall_seconds = best_metrics.measurement.wall_clock_latency_seconds;
-                    trial_records.push_back(std::move(record));
-                }
+                    {
+                        TrialRecord record;
+                        record.phase = "measurement";
+                        record.candidate_index = 0;
+                        record.candidate_total = 1;
+                        record.trial_index_within_candidate = 0;
+                        record.repeats_for_candidate = options.measurement_repeats;
+                        record.output_channel_batch = static_cast<int>(output_channel_batch);
+                        record.host_prep_seconds = 0.0;
+                        record.host_compute_seconds = best_metrics.measurement.wall_clock_latency_seconds;
+                        record.device_to_host_seconds = 0.0;
+                        record.host_postproc_seconds = 0.0;
+                        record.total_wall_seconds = best_metrics.measurement.wall_clock_latency_seconds;
+                        trial_records.push_back(std::move(record));
+                    }
 
-                if (options.verbose) {
-                    std::fprintf(stderr,
-                        "[conv2d metal measurement 1/1] output_channel_batch=%zu repeats=%d "
-                        "per_run=%.6fs effective_gflops=%.3f\n",
-                        output_channel_batch, options.measurement_repeats,
-                        best_metrics.measurement.wall_clock_latency_seconds,
-                        best_metrics.measurement.effective_gflops);
-                    std::fflush(stderr);
+                    if (options.verbose) {
+                        std::fprintf(stderr,
+                            "[conv2d metal measurement 1/1] output_channel_batch=%zu repeats=%d "
+                            "per_run=%.6fs effective_gflops=%.3f\n",
+                            output_channel_batch, options.measurement_repeats,
+                            best_metrics.measurement.wall_clock_latency_seconds,
+                            best_metrics.measurement.effective_gflops);
+                        std::fflush(stderr);
+                    }
+                } else {
+                    // Dispatch: single MPSGraph submission using the
+                    // benchmark-pinned config. The timing window includes
+                    // D2H + scatter because MPSGraph runs to completion
+                    // inside run_mpsgraph_conv2d's std::chrono bracket,
+                    // which is the best we have without MTLCounterSampleBuffer
+                    // support. compute_event_ms stays comparable to the
+                    // benchmark's measurement latency.
+                    if (options.verbose) {
+                        std::fprintf(stderr,
+                            "[conv2d metal plan] phase=dispatch output_channel_batch=%zu\n",
+                            output_channel_batch);
+                        std::fflush(stderr);
+                    }
+
+                    best_metrics.measurement = run_mpsgraph_conv2d(
+                        command_queue,
+                        options,
+                        transposed_weight,
+                        host_output,
+                        1
+                    );
+
+                    {
+                        TrialRecord record;
+                        record.phase = "dispatch";
+                        record.candidate_index = 0;
+                        record.candidate_total = 1;
+                        record.trial_index_within_candidate = 0;
+                        record.repeats_for_candidate = 1;
+                        record.output_channel_batch = static_cast<int>(output_channel_batch);
+                        record.host_prep_seconds = 0.0;
+                        record.host_compute_seconds = best_metrics.measurement.wall_clock_latency_seconds;
+                        record.device_to_host_seconds = 0.0;
+                        record.host_postproc_seconds = 0.0;
+                        record.total_wall_seconds = best_metrics.measurement.wall_clock_latency_seconds;
+                        trial_records.push_back(std::move(record));
+                    }
+
+                    if (options.verbose) {
+                        std::fprintf(stderr,
+                            "[conv2d metal dispatch 1/1] output_channel_batch=%zu "
+                            "per_run=%.6fs effective_gflops=%.3f\n",
+                            output_channel_batch,
+                            best_metrics.measurement.wall_clock_latency_seconds,
+                            best_metrics.measurement.effective_gflops);
+                        std::fflush(stderr);
+                    }
                 }
 
                 best_output_values = host_output;
@@ -693,7 +754,13 @@ int main(int argc, char** argv) {
                     write_float32_file(options.output_path, best_output_values);
                 }
 
+                const char* mode_str =
+                    (options.mode == RunnerMode::Benchmark) ? "benchmark" : "dispatch";
+                const double compute_event_ms_value =
+                    best_metrics.measurement.wall_clock_latency_seconds * 1000.0;
+
                 std::cout << "{"
+                          << "\"mode\":\"" << mode_str << "\","
                           << "\"backend\":\"metal\","
                           << "\"implementation\":\"mpsgraph\","
                           << "\"device_name\":\"" << escape_json(nsstring_to_string([device name])) << "\","
@@ -703,6 +770,8 @@ int main(int argc, char** argv) {
                           << "\"autotune_repeats\":" << best_metrics.autotune.repeats << ","
                           << "\"measurement_repeats\":" << best_metrics.measurement.repeats << ","
                           << "\"trials_run\":1,"
+                          << "\"compute_event_ms\":" << std::fixed << std::setprecision(6)
+                          << compute_event_ms_value << ","
                           << "\"autotune_wall_clock_latency_seconds\":" << std::fixed << std::setprecision(9)
                           << best_metrics.autotune.wall_clock_latency_seconds << ","
                           << "\"autotune_effective_gflops\":" << std::fixed << std::setprecision(9)

@@ -46,7 +46,7 @@ class LoadUsableBackendsTests(unittest.TestCase):
     def test_missing_methods_section_returns_empty_set(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             result_path = Path(temp_dir) / "result.json"
-            _write(result_path, {"schema_version": 5})
+            _write(result_path, {"schema_version": 6})
             self.assertEqual(load_usable_backends(result_path), set())
 
     def test_non_string_backend_entries_are_ignored(self) -> None:

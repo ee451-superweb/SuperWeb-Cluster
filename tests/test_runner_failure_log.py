@@ -72,6 +72,33 @@ class Conv2dRunnerFailureLogTests(unittest.TestCase):
         self.assertEqual(executor._tail_stream(""), "<empty>")
         self.assertEqual(executor._tail_stream(b""), "<empty>")
 
+    def test_runner_process_error_carries_stderr_through_pickle(self) -> None:
+        # ProcessPoolExecutor pickles exceptions to send them back to the
+        # parent. The 2026-04-21 incident showed CalledProcessError losing its
+        # stderr in transit; RunnerProcessError must carry stderr inside its
+        # str() so the parent's TASK_FAIL builder and worker logger surface it.
+        import pickle
+
+        from compute_node.compute_methods.conv2d import executor
+
+        task = mock.Mock()
+        task.task_id = "conv2d-task-2"
+        message = executor._format_runner_failure_message(
+            method="conv2d",
+            backend_name="cuda",
+            task=task,
+            returncode=1,
+            stderr="cudaMalloc failed: out of memory",
+            stdout="",
+            elapsed_ms=2000,
+        )
+        original = executor.RunnerProcessError(message)
+        revived = pickle.loads(pickle.dumps(original))
+        self.assertIsInstance(revived, executor.RunnerProcessError)
+        self.assertIn("cudaMalloc failed", str(revived))
+        self.assertIn("task_id=conv2d-task-2", str(revived))
+        self.assertIn("returncode=1", str(revived))
+
 
 class GemvRunnerFailureLogTests(unittest.TestCase):
     """Exercise the gemv task executor's native-runner failure helpers."""

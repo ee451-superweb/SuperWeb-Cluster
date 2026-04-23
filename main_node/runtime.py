@@ -63,7 +63,8 @@ class MainNodeRuntime:
     ) -> None:
         """Create the services that the main node needs for runtime orchestration.
 
-        Args: config runtime settings, logger diagnostics sink, and should_stop optional shutdown predicate.
+        Args: config runtime settings, logger diagnostics sink, should_stop optional
+            shutdown predicate.
         Returns: None after the runtime wires registry, dispatcher, transfer, and session services together.
         """
         self.config = config

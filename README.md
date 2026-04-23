@@ -135,6 +135,47 @@ home devices usually have much less RAM than disk capacity, and widespread SSD
 adoption means sequential disk I/O is now fast enough that a disk-first artifact
 path is often the safer choice when we are forced to choose.
 
+## Dropped Approach: Payload Compression
+
+Early in Sprint 4 we evaluated whether compressing large `FP32` matrix
+artifacts on the data plane would shorten end-to-end transfer time.
+The benchmark target was a representative `4 GiB` (`32768 x 32768` float32)
+matrix from `Client/download`, with the constraint that compression must
+finish in under `30s` on the sender (which may have a GPU) and that the
+receiver is only guaranteed to have a CPU.
+
+Tested categories:
+
+- general lossless: `gzip`, `bz2`, `lzma`
+- numeric-array lossless: `blosc2 + zstd / lz4 + shuffle / bitshuffle`
+- scientific float: `zfp / zfpy`, `fpzip`, `SZ3`
+- structural approximation: randomized `SVD`, `HODLR / H-matrix`
+
+The best lossless candidate, `blosc2_zstd_shuffle_c1`, compressed in
+`6.64s`, decompressed on CPU in `4.84s`, and saved `15.52%` of bytes
+with full SHA256 equality. The best low-error candidate,
+`zfpy_tolerance_1e-4`, saved `25.42%` at `2.86e-05` max absolute error.
+
+The deciding question was not the compression ratio but the end-to-end
+model `compress + send-side checksum + transfer + recv-side checksum + decompress`,
+which gave these speedups:
+
+| Method | 300 Mbps WiFi | 1 Gbps Ethernet |
+|---|---:|---:|
+| `blosc2_zstd_shuffle_c1` | `1.064x` | `0.886x` |
+| `zfpy_tolerance_1e-4`    | `0.876x` | `0.519x` |
+| `zfpy_tolerance_5e-4`    | `0.984x` | `0.575x` |
+
+The break-even point for the best lossless option lands at roughly
+`506 Mbps`. On the LAN this cluster actually runs on (`1 Gbps`
+Ethernet, often higher), every candidate was a net regression.
+We dropped compression from the data-plane path: at LAN speeds the
+compress + decompress cost exceeds the byte savings. The full
+methodology, dependency manifest, and per-method numbers are archived
+under [`docs/compression_solution_report.md`](docs/compression_solution_report.md).
+If a future deployment is bandwidth-limited (sub-`500 Mbps` WAN, mobile
+uplink), `blosc2_zstd_shuffle_c1` is the candidate to reach for first.
+
 ## Progress Through Sprint 3
 
 Sprint 1 delivered:

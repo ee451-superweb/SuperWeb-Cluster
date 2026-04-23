@@ -165,6 +165,8 @@ static inline double seconds_between(
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
+enum class RunnerMode { Dispatch, Benchmark };
+
 int main(int argc, char** argv) {
     string input_path, weight_path;
     int h = 0, w = 0, c_in = 0, total_c_out = 0, k = 0, pad = 0, stride = 1;
@@ -172,6 +174,7 @@ int main(int argc, char** argv) {
     vector<int> workers, tile_sizes;
     string output_path;
     int autotune_repeats = 1, measurement_repeats = 1;
+    RunnerMode mode = RunnerMode::Dispatch;
     bool verbose = false;
 
     for (int i = 1; i < argc; ++i) {
@@ -193,6 +196,12 @@ int main(int argc, char** argv) {
         else if (arg == "--measurement-repeats" && i + 1 < argc) measurement_repeats = stoi(argv[++i]);
         else if (arg == "--output" && i + 1 < argc) output_path = argv[++i];
         else if (arg == "--verbose") verbose = true;
+        else if (arg == "--mode" && i + 1 < argc) {
+            string mode_value = argv[++i];
+            if (mode_value == "dispatch") mode = RunnerMode::Dispatch;
+            else if (mode_value == "benchmark") mode = RunnerMode::Benchmark;
+            else { cerr << "Error: unknown --mode value: " << mode_value << endl; return 1; }
+        }
     }
 
     if (end_oc == 0) end_oc = total_c_out;
@@ -255,38 +264,83 @@ int main(int argc, char** argv) {
         fflush(stderr);
     };
 
-    int autotune_total = (int)workers.size() * autotune_repeats;
-    int emitted_autotune = 0;
-    if (verbose) {
-        fprintf(stderr,
-                "[conv2d cpu plan] phase=autotune worker_candidates=%zu "
-                "autotune_repeats=%d total_trials=%d\n",
-                workers.size(), autotune_repeats, autotune_total);
-        fflush(stderr);
-    }
-
-    // ─── Autotune: sweep all worker counts, record per-trial details ──────
     int best_worker = workers[0];
-    double best_autotune_mean_seconds = 1e30;
+    double best_autotune_mean_seconds = 0.0;
+    double measure_sum_seconds = 0.0;
+    double measure_time = 0.0;
 
-    for (size_t ci = 0; ci < workers.size(); ++ci) {
-        int w_count = workers[ci];
-        double candidate_sum_seconds = 0.0;
-        for (int r = 0; r < autotune_repeats; ++r) {
+    if (mode == RunnerMode::Benchmark) {
+        int autotune_total = (int)workers.size() * autotune_repeats;
+        int emitted_autotune = 0;
+        if (verbose) {
+            fprintf(stderr,
+                    "[conv2d cpu plan] phase=autotune worker_candidates=%zu "
+                    "autotune_repeats=%d total_trials=%d\n",
+                    workers.size(), autotune_repeats, autotune_total);
+            fflush(stderr);
+        }
+
+        best_autotune_mean_seconds = 1e30;
+        for (size_t ci = 0; ci < workers.size(); ++ci) {
+            int w_count = workers[ci];
+            double candidate_sum_seconds = 0.0;
+            for (int r = 0; r < autotune_repeats; ++r) {
+                auto t_trial_start = chrono::high_resolution_clock::now();
+                auto t_compute_start = chrono::high_resolution_clock::now();
+                run_multithreaded(input_data.data(), weight_t.data(), output_data.data(),
+                                  h, w, c_in, slice_c_out, k, pad, stride, out_h, out_w, w_count);
+                auto t_compute_end = chrono::high_resolution_clock::now();
+                auto t_trial_end = chrono::high_resolution_clock::now();
+
+                TrialRecord tr;
+                tr.phase = "autotune";
+                tr.candidate_index = (int)ci;
+                tr.candidate_total = (int)workers.size();
+                tr.trial_index_within_candidate = r;
+                tr.repeats_for_candidate = autotune_repeats;
+                tr.workers = w_count;
+                tr.tile_size = default_tile;
+                tr.host_prep_seconds        = seconds_between(t_trial_start, t_compute_start);
+                tr.host_compute_seconds     = seconds_between(t_compute_start, t_compute_end);
+                tr.device_to_host_seconds   = 0.0;
+                tr.host_postproc_seconds    = 0.0;
+                tr.total_wall_seconds       = seconds_between(t_trial_start, t_trial_end);
+
+                candidate_sum_seconds += tr.host_compute_seconds;
+                ++emitted_autotune;
+                emit_verbose_trial(tr, emitted_autotune, autotune_total);
+                trials.push_back(std::move(tr));
+            }
+            double candidate_mean_seconds = candidate_sum_seconds / max(1, autotune_repeats);
+            if (candidate_mean_seconds < best_autotune_mean_seconds) {
+                best_autotune_mean_seconds = candidate_mean_seconds;
+                best_worker = w_count;
+            }
+        }
+
+        if (verbose) {
+            fprintf(stderr,
+                    "[conv2d cpu plan] phase=measurement selected_workers=%d "
+                    "measurement_repeats=%d\n",
+                    best_worker, measurement_repeats);
+            fflush(stderr);
+        }
+
+        for (int r = 0; r < measurement_repeats; ++r) {
             auto t_trial_start = chrono::high_resolution_clock::now();
             auto t_compute_start = chrono::high_resolution_clock::now();
             run_multithreaded(input_data.data(), weight_t.data(), output_data.data(),
-                              h, w, c_in, slice_c_out, k, pad, stride, out_h, out_w, w_count);
+                              h, w, c_in, slice_c_out, k, pad, stride, out_h, out_w, best_worker);
             auto t_compute_end = chrono::high_resolution_clock::now();
             auto t_trial_end = chrono::high_resolution_clock::now();
 
             TrialRecord tr;
-            tr.phase = "autotune";
-            tr.candidate_index = (int)ci;
-            tr.candidate_total = (int)workers.size();
+            tr.phase = "measurement";
+            tr.candidate_index = 0;
+            tr.candidate_total = 1;
             tr.trial_index_within_candidate = r;
-            tr.repeats_for_candidate = autotune_repeats;
-            tr.workers = w_count;
+            tr.repeats_for_candidate = measurement_repeats;
+            tr.workers = best_worker;
             tr.tile_size = default_tile;
             tr.host_prep_seconds        = seconds_between(t_trial_start, t_compute_start);
             tr.host_compute_seconds     = seconds_between(t_compute_start, t_compute_end);
@@ -294,29 +348,22 @@ int main(int argc, char** argv) {
             tr.host_postproc_seconds    = 0.0;
             tr.total_wall_seconds       = seconds_between(t_trial_start, t_trial_end);
 
-            candidate_sum_seconds += tr.host_compute_seconds;
-            ++emitted_autotune;
-            emit_verbose_trial(tr, emitted_autotune, autotune_total);
+            measure_sum_seconds += tr.host_compute_seconds;
+            emit_verbose_trial(tr, r + 1, measurement_repeats);
             trials.push_back(std::move(tr));
         }
-        double candidate_mean_seconds = candidate_sum_seconds / max(1, autotune_repeats);
-        if (candidate_mean_seconds < best_autotune_mean_seconds) {
-            best_autotune_mean_seconds = candidate_mean_seconds;
-            best_worker = w_count;
+        measure_time = measure_sum_seconds / max(1, measurement_repeats);
+    } else {
+        // Dispatch: single compute pass with the worker count the caller
+        // pinned (executor passes the benchmark-selected value), timed so
+        // the JSON emits a compute_event_ms aligned with the benchmark's
+        // measurement window.
+        if (verbose) {
+            fprintf(stderr,
+                    "[conv2d cpu plan] phase=dispatch selected_workers=%d\n",
+                    best_worker);
+            fflush(stderr);
         }
-    }
-
-    // ─── Measurement: run with best config ────────────────────────────────
-    if (verbose) {
-        fprintf(stderr,
-                "[conv2d cpu plan] phase=measurement selected_workers=%d "
-                "measurement_repeats=%d\n",
-                best_worker, measurement_repeats);
-        fflush(stderr);
-    }
-
-    double measure_sum_seconds = 0.0;
-    for (int r = 0; r < measurement_repeats; ++r) {
         auto t_trial_start = chrono::high_resolution_clock::now();
         auto t_compute_start = chrono::high_resolution_clock::now();
         run_multithreaded(input_data.data(), weight_t.data(), output_data.data(),
@@ -325,11 +372,11 @@ int main(int argc, char** argv) {
         auto t_trial_end = chrono::high_resolution_clock::now();
 
         TrialRecord tr;
-        tr.phase = "measurement";
+        tr.phase = "dispatch";
         tr.candidate_index = 0;
         tr.candidate_total = 1;
-        tr.trial_index_within_candidate = r;
-        tr.repeats_for_candidate = measurement_repeats;
+        tr.trial_index_within_candidate = 0;
+        tr.repeats_for_candidate = 1;
         tr.workers = best_worker;
         tr.tile_size = default_tile;
         tr.host_prep_seconds        = seconds_between(t_trial_start, t_compute_start);
@@ -338,11 +385,10 @@ int main(int argc, char** argv) {
         tr.host_postproc_seconds    = 0.0;
         tr.total_wall_seconds       = seconds_between(t_trial_start, t_trial_end);
 
-        measure_sum_seconds += tr.host_compute_seconds;
-        emit_verbose_trial(tr, r + 1, measurement_repeats);
+        measure_sum_seconds = tr.host_compute_seconds;
+        measure_time = tr.host_compute_seconds;
         trials.push_back(std::move(tr));
     }
-    double measure_time = measure_sum_seconds / max(1, measurement_repeats);
 
     // ─── Write output file if requested ────────────────────────────────
     if (!output_path.empty()) {
@@ -357,18 +403,28 @@ int main(int argc, char** argv) {
 
     int best_tile = default_tile;
 
+    double autotune_gflops = best_autotune_mean_seconds > 0.0
+        ? (flops_per_run / best_autotune_mean_seconds / 1e9) : 0.0;
+    double measurement_gflops = measure_time > 0.0
+        ? (flops_per_run / measure_time / 1e9) : 0.0;
+    double compute_event_ms = measure_time * 1000.0;
+    const char* mode_str = (mode == RunnerMode::Benchmark) ? "benchmark" : "dispatch";
+    size_t trials_run = (mode == RunnerMode::Benchmark) ? workers.size() : 1;
+
     cout << "{\n"
+         << "  \"mode\": \"" << mode_str << "\",\n"
          << "  \"actual_workers\": " << best_worker << ",\n"
          << "  \"requested_workers\": " << workers[0] << ",\n"
          << "  \"tile_size\": " << best_tile << ",\n"
          << "  \"autotune_repeats\": " << autotune_repeats << ",\n"
          << "  \"measurement_repeats\": " << measurement_repeats << ",\n"
-         << "  \"trials_run\": " << workers.size() << ",\n"
+         << "  \"trials_run\": " << trials_run << ",\n"
+         << "  \"compute_event_ms\": " << fixed << setprecision(6) << compute_event_ms << ",\n"
          << "  \"autotune_wall_clock_latency_seconds\": " << fixed << setprecision(9) << best_autotune_mean_seconds << ",\n"
-         << "  \"autotune_effective_gflops\": " << (flops_per_run / best_autotune_mean_seconds / 1e9) << ",\n"
+         << "  \"autotune_effective_gflops\": " << autotune_gflops << ",\n"
          << "  \"autotune_checksum\": \"" << checksum << "\",\n"
          << "  \"measurement_wall_clock_latency_seconds\": " << fixed << setprecision(9) << measure_time << ",\n"
-         << "  \"measurement_effective_gflops\": " << (flops_per_run / measure_time / 1e9) << ",\n"
+         << "  \"measurement_effective_gflops\": " << measurement_gflops << ",\n"
          << "  \"measurement_checksum\": \"" << checksum << "\",\n"
          << "  \"flops_per_run\": " << fixed << setprecision(1) << flops_per_run << ",\n"
          << "  \"bytes_input\": " << bytes_input << ",\n"
