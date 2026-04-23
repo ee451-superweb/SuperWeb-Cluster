@@ -32,6 +32,15 @@ DEFAULT_TCP_CONNECT_TIMEOUT = 5.0
 DEFAULT_HEARTBEAT_INTERVAL = 10.0
 DEFAULT_HEARTBEAT_RETRY_COUNT = 3
 DEFAULT_MAX_PROTOBUF_MESSAGE_SIZE = 4 * 1024 * 1024
+# Headroom reserved for protobuf envelope fields (request_id, node_id, timing
+# blocks, per-worker entries, ...) when deciding whether a payload should be
+# inlined into one message or published as a fetched artifact instead. An
+# ``output_vector`` exactly equal to ``max_message_size`` serialises past the
+# limit once the surrounding fields are encoded — GEMM small (m=n=k=1024
+# produces exactly 4 MiB) hits this edge. 64 KiB accommodates hundreds of
+# per-worker timing entries with long runtime_ids and keeps the boundary
+# comfortably below the receiver's guard.
+INLINE_RESPONSE_ENVELOPE_MARGIN = 64 * 1024
 DEFAULT_ARTIFACT_CHUNK_SIZE = 512 * 1024
 DEFAULT_ARTIFACT_TRANSFER_TIMEOUT = 30.0
 DEFAULT_COMPUTE_ARTIFACT_TTL_SECONDS = 600.0

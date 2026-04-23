@@ -15,6 +15,7 @@ from pathlib import Path
 
 from adapters.audit_log import write_audit_event
 from core.constants import (
+    INLINE_RESPONSE_ENVELOPE_MARGIN,
     METHOD_GEMM,
     METHOD_GEMV,
     METHOD_CONV2D,
@@ -309,7 +310,7 @@ class WorkerTaskRuntimeService:
                     )
                     output_vector = b""
                 elif (
-                    len(output_vector) > self.config.max_message_size
+                    len(output_vector) + INLINE_RESPONSE_ENVELOPE_MARGIN > self.config.max_message_size
                     or task.transfer_mode == TransferMode.ARTIFACT_REQUIRED
                 ):
                     result_artifact = artifact_manager.publish_bytes(

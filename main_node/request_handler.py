@@ -19,6 +19,7 @@ from adapters.audit_log import write_audit_event, write_diag_event
 from core.constants import (
     CONV2D_CLIENT_RESPONSE_STATS_ONLY,
     CONV2D_STATS_MAX_SAMPLES,
+    INLINE_RESPONSE_ENVELOPE_MARGIN,
     MAIN_NODE_NAME,
     METHOD_FREE_CONTENT,
     METHOD_GEMM,
@@ -733,7 +734,7 @@ class ClientRequestHandler:
                 )
                 output_length = gemv_spec.rows
                 result_artifact = None
-                if len(output_vector) > self.config.max_message_size:
+                if len(output_vector) + INLINE_RESPONSE_ENVELOPE_MARGIN > self.config.max_message_size:
                     result_artifact = self.artifact_manager.publish_bytes(
                         output_vector,
                         producer_node_id=MAIN_NODE_NAME,
@@ -762,20 +763,23 @@ class ClientRequestHandler:
                     results=task_results,
                 )
                 output_length = gemm_spec.m * gemm_spec.n
-                result_artifact = None
-                if len(output_vector) > self.config.max_message_size:
-                    if self.artifact_manager is None:
-                        raise RuntimeError("artifact manager is required to publish oversized GEMM results")
-                    result_artifact = self.artifact_manager.publish_bytes(
-                        output_vector,
-                        producer_node_id=MAIN_NODE_NAME,
-                        content_type="application/octet-stream",
-                        artifact_id=request.request_id,
-                    )
-                    output_vector = b""
+                if self.artifact_manager is None:
+                    raise RuntimeError("artifact manager is required to publish GEMM results")
+                # GEMM results always go through the data plane, never inline:
+                # even the smallest variant (m=n=k=1024) produces a 4 MiB C
+                # matrix that matches the max_message_size budget exactly, so
+                # inline encoding always risks tripping the receiver's size
+                # guard once the envelope fields are serialised. Mirrors
+                # conv2d's unconditional-artifact behaviour.
+                result_artifact = self.artifact_manager.publish_bytes(
+                    output_vector,
+                    producer_node_id=MAIN_NODE_NAME,
+                    content_type="application/octet-stream",
+                    artifact_id=request.request_id,
+                )
                 response_payload = GemmResponsePayload(
                     output_length=output_length,
-                    output_vector=output_vector,
+                    output_vector=b"",
                 )
             else:
                 spec, _variant = load_named_workload_spec(request.object_id, size=request.size)
