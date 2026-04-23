@@ -13,11 +13,12 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from core.constants import METHOD_GEMM, STATUS_OK
+from core.constants import BACKEND_CPU, BACKEND_CUDA, METHOD_GEMM, STATUS_OK
 from core.process_exit import classify_exit_code
 from compute_node.compute_methods.gemm.paths import (
     CUDA_EXECUTABLE_PATH,
@@ -96,15 +97,29 @@ class _ResolvedTask:
 class GemmTaskExecutor:
     """Execute one GEMM task on the local compute node (cuBLAS or CPU)."""
 
-    def __init__(self, *, dataset_root: Path | None = None) -> None:
-        """Store the dataset root used at runtime.
+    def __init__(
+        self,
+        *,
+        dataset_root: Path | None = None,
+        pinned_backend: str | None = None,
+    ) -> None:
+        """Store the dataset root and optional backend pin used at runtime.
 
         Args:
             dataset_root: Optional GEMM dataset directory override. When
                 ``None``, the canonical dataset directory under
                 ``compute_node/input_matrix/gemm/generated`` is used.
+            pinned_backend: Optional ``"cpu"`` or ``"cuda"`` restriction.
+                Peer subprocesses advertising a specific backend must not
+                dispatch to a different backend's runner just because the
+                binary happens to exist on the shared parent-host filesystem
+                — without this pin a peer-cpu subprocess co-located with a
+                peer-cuda subprocess would happily pick the cuBLAS runner,
+                contend for the same GPU, and skew the ``cpu:N GFLOPS`` line
+                the main node saw at registration time.
         """
         self.dataset_root = DEFAULT_DATASET_DIR if dataset_root is None else Path(dataset_root)
+        self.pinned_backend = pinned_backend
 
     def execute_task(self, task: TaskAssign) -> TaskResult:
         """Run one assigned GEMM M-axis slice and return its output bytes.
@@ -121,8 +136,18 @@ class GemmTaskExecutor:
 
         executable_path, backend_label = self._select_runner_executable()
 
-        output_path = self.dataset_root / f".task_{task.task_id}_C.bin"
-        try:
+        # Each concurrent slice on this host gets its own temp directory so
+        # peer subprocesses (peer-cuda, standalone cuda, peer-cpu all on the
+        # same box in dual-purpose mode) can't clobber one another's C output
+        # file. Earlier revisions derived the output path from task_id alone
+        # — which collides across peers because task_id is request-scoped,
+        # not worker-scoped — and the last writer on a heterogeneous cluster
+        # (the CPU peer finishing its few-row slice after the CUDA peers)
+        # would silently truncate the CUDA output, tripping the size-check
+        # here and killing both CUDA workers via failover. Mirrors the
+        # tempfile pattern gemv's task_executor already uses.
+        with tempfile.TemporaryDirectory(prefix="gemm-task-") as temp_dir:
+            output_path = Path(temp_dir) / "C.bin"
             command = self._build_runtime_command(
                 task,
                 spec=resolved.spec,
@@ -188,11 +213,6 @@ class GemmTaskExecutor:
                 raise ValueError(
                     f"GEMM {backend_label} runner output has {len(output_bytes)} bytes, expected {expected_bytes}"
                 )
-        finally:
-            try:
-                output_path.unlink()
-            except FileNotFoundError:
-                pass
 
         output_length = slice_rows * resolved.spec.n
         wall_ms = max(0, int((time.monotonic() - task_started_at) * 1000))
@@ -255,12 +275,46 @@ class GemmTaskExecutor:
     def _select_runner_executable(self) -> tuple[Path, str]:
         """Return ``(executable_path, backend_label)`` for the GEMM runner.
 
-        cuBLAS wins whenever the CUDA binary is built, since it's an order of
-        magnitude faster than the CPU fallback. When it isn't built (either
-        the host has no CUDA toolchain, or the ``--rebuild`` benchmark pass
-        hasn't run yet) we fall back to the self-contained CPU runner so
-        non-NVIDIA hosts can still join the cluster as GEMM workers.
+        Selection rules:
+
+        - If ``pinned_backend == "cpu"``: always use the CPU runner. A peer
+          process that advertises CPU capacity must never fall through to
+          the cuBLAS binary even when it's present on the shared filesystem
+          — doing so would dispatch against a GPU the peer is not supposed
+          to be using, and the host's CPU GFLOPS line in the registry would
+          no longer match the capacity actually being consumed.
+        - If ``pinned_backend == "cuda"`` (or unpinned): prefer the cuBLAS
+          binary when it's built (an order of magnitude faster than CPU).
+          When the cuBLAS binary isn't present — host without NVIDIA
+          toolchain, or first run before ``--rebuild`` — fall back to the
+          CPU runner so non-NVIDIA hosts can still join the cluster as
+          GEMM workers.
         """
+        pinned = self.pinned_backend
+        if pinned == BACKEND_CPU:
+            try:
+                cpu_path = current_cpu_executable_path()
+            except RuntimeError as exc:
+                raise FileNotFoundError(
+                    f"no GEMM CPU runner is available: this worker is pinned to cpu but no "
+                    f"CPU runner is configured for this platform ({exc})"
+                ) from exc
+            if not cpu_path.exists():
+                raise FileNotFoundError(
+                    f"no GEMM CPU runner is available: pinned to cpu but CPU binary is missing "
+                    f"at {cpu_path}; run performance_metrics/gemm to build one"
+                )
+            return cpu_path, "cpu"
+
+        if pinned == BACKEND_CUDA:
+            if not CUDA_EXECUTABLE_PATH.exists():
+                raise FileNotFoundError(
+                    f"no GEMM CUDA runner is available: pinned to cuda but cuBLAS binary is "
+                    f"missing at {CUDA_EXECUTABLE_PATH}; run performance_metrics/gemm with "
+                    f"--rebuild to build one"
+                )
+            return CUDA_EXECUTABLE_PATH, "cuda"
+
         if CUDA_EXECUTABLE_PATH.exists():
             return CUDA_EXECUTABLE_PATH, "cuda"
         try:

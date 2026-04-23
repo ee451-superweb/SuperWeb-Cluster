@@ -1,4 +1,4 @@
-"""Thin compute-node handler for the cuBLAS GEMM method.
+"""Thin compute-node handler for the GEMM method (cuBLAS + CPU fallback).
 
 Use this module when the compute node wants a simple handler wrapper around
 the GEMM task executor for registry-based dispatch.
@@ -10,7 +10,7 @@ from compute_node.compute_methods.gemm.executor import GemmTaskExecutor
 
 
 class GemmMethodHandler:
-    """Thin handler wrapper around the cuBLAS GEMM task executor."""
+    """Thin handler wrapper around the GEMM task executor (cuBLAS or CPU)."""
 
     method_name = "gemm"
 
@@ -18,14 +18,15 @@ class GemmMethodHandler:
         """Create the shared GEMM task executor for this handler.
 
         Args:
-            pinned_backend: Optional backend name. GEMM is cuBLAS-only, so the
-                only meaningful value is ``"cuda"``; any other non-None value
-                is accepted but ignored because the executor never advertises
-                another backend. Kept in the signature for parity with
-                ``GemvMethodHandler`` and ``Conv2dMethodHandler``.
+            pinned_backend: Optional backend name. When set the executor is
+                restricted to that backend's runner so a peer-cpu subprocess
+                (which advertises CPU capacity) cannot accidentally dispatch
+                to the cuBLAS runner just because the binary happens to exist
+                on the shared filesystem of the parent host. Accepted values
+                are ``"cpu"`` and ``"cuda"``; any other value is ignored.
         """
         self._pinned_backend = pinned_backend
-        self._executor = GemmTaskExecutor()
+        self._executor = GemmTaskExecutor(pinned_backend=pinned_backend)
 
     def execute_task(self, task):
         """Execute one GEMM task through the shared executor.
