@@ -20,7 +20,7 @@ from app.constants import (
     RUNTIME_ROLE_WORKER,
 )
 from app.tracing import trace_function
-from main_node.runtime_mailbox import RuntimeConnectionMailbox
+from main_node.mailbox import RuntimeConnectionMailbox
 
 
 @dataclass(slots=True)

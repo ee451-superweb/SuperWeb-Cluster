@@ -12,7 +12,7 @@ import threading
 import time
 from collections import defaultdict, deque
 
-from wire.internal_protocol.runtime_transport import MessageKind
+from wire.internal_protocol.transport import MessageKind
 
 
 class RuntimeConnectionMailbox:

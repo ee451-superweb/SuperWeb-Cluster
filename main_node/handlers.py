@@ -22,7 +22,7 @@ from app.constants import (
     RUNTIME_ROLE_WORKER,
 )
 from app.tracing import trace_function
-from wire.internal_protocol.runtime_transport import MessageKind, build_client_info_reply, recv_message, send_message
+from wire.internal_protocol.transport import MessageKind, build_client_info_reply, recv_message, send_message
 
 
 class RuntimeConnectionHandler:

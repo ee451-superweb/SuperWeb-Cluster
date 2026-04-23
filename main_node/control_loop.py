@@ -40,7 +40,7 @@ from main_node.request_handler import ClientRequestHandler
 from main_node.registry import ClusterRegistry, RuntimePeerConnection
 from main_node.task_exchange import WorkerTaskExchange
 from transport.artifact_manager import ArtifactManager
-from wire.internal_protocol.runtime_transport import (
+from wire.internal_protocol.transport import (
     MessageKind,
     build_client_response,
     build_register_ok,

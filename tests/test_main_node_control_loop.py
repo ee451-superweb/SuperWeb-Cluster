@@ -21,10 +21,10 @@ from app.constants import (
     SUPERWEB_CLIENT_NAME,
 )
 from main_node.dispatcher import WorkerTaskSlice
-from main_node.runtime_mailbox import RuntimeConnectionMailbox
-from main_node.runtime import MainNodeRuntime
+from main_node.mailbox import RuntimeConnectionMailbox
+from main_node.control_loop import MainNodeRuntime
 from wire.discovery_protocol import build_discover_message
-from wire.internal_protocol.runtime_transport import (
+from wire.internal_protocol.transport import (
     ArtifactDescriptor,
     GemvTaskPayload,
     Heartbeat,
@@ -46,17 +46,17 @@ from wire.internal_protocol.runtime_transport import (
 class MainNodeRuntimeTests(unittest.TestCase):
     """Validate the promoted main-node loop."""
 
-    @mock.patch("main_node.runtime.write_audit_event")
-    @mock.patch("main_node.runtime.network.safe_close")
-    @mock.patch("main_node.runtime.MainNodeRuntime._close_runtime_connections")
-    @mock.patch("main_node.runtime.threading.Thread")
-    @mock.patch("main_node.runtime.MainNodeRuntime._create_tcp_listener")
-    @mock.patch("main_node.runtime.multicast.close")
-    @mock.patch("main_node.runtime.multicast.recv_packet")
-    @mock.patch("main_node.runtime.network.get_local_mac_address")
-    @mock.patch("main_node.runtime.network.resolve_local_ip")
-    @mock.patch("main_node.runtime.network.set_socket_timeout")
-    @mock.patch("main_node.runtime.multicast.create_receiver")
+    @mock.patch("main_node.control_loop.write_audit_event")
+    @mock.patch("main_node.control_loop.network.safe_close")
+    @mock.patch("main_node.control_loop.MainNodeRuntime._close_runtime_connections")
+    @mock.patch("main_node.control_loop.threading.Thread")
+    @mock.patch("main_node.control_loop.MainNodeRuntime._create_tcp_listener")
+    @mock.patch("main_node.control_loop.multicast.close")
+    @mock.patch("main_node.control_loop.multicast.recv_packet")
+    @mock.patch("main_node.control_loop.network.get_local_mac_address")
+    @mock.patch("main_node.control_loop.network.resolve_local_ip")
+    @mock.patch("main_node.control_loop.network.set_socket_timeout")
+    @mock.patch("main_node.control_loop.multicast.create_receiver")
     def test_run_starts_loop_and_returns_success_on_shutdown(
         self,
         create_receiver_mock: mock.Mock,
@@ -119,7 +119,7 @@ class MainNodeRuntimeTests(unittest.TestCase):
             )
         )
 
-    @mock.patch("main_node.runtime.multicast.send_announce")
+    @mock.patch("main_node.control_loop.multicast.send_announce")
     def test_handle_packet_replies_to_discover(
         self,
         send_announce_mock: mock.Mock,
@@ -140,9 +140,9 @@ class MainNodeRuntimeTests(unittest.TestCase):
         runtime.logger.info.assert_called()
 
     @mock.patch("builtins.print")
-    @mock.patch("main_node.runtime.MainNodeRuntime._start_runtime_connection_reader")
-    @mock.patch("main_node.runtime.send_message")
-    @mock.patch("main_node.runtime.recv_message")
+    @mock.patch("main_node.control_loop.MainNodeRuntime._start_runtime_connection_reader")
+    @mock.patch("main_node.control_loop.send_message")
+    @mock.patch("main_node.control_loop.recv_message")
     def test_register_runtime_connection_accepts_register_worker(
         self,
         recv_message_mock: mock.Mock,
@@ -204,10 +204,10 @@ class MainNodeRuntimeTests(unittest.TestCase):
         self.assertTrue(print_mock.called)
 
     @mock.patch("builtins.print")
-    @mock.patch("main_node.runtime.MainNodeRuntime._start_runtime_connection_reader")
-    @mock.patch("main_node.runtime.threading.Thread")
-    @mock.patch("main_node.runtime.send_message")
-    @mock.patch("main_node.runtime.recv_message")
+    @mock.patch("main_node.control_loop.MainNodeRuntime._start_runtime_connection_reader")
+    @mock.patch("main_node.control_loop.threading.Thread")
+    @mock.patch("main_node.control_loop.send_message")
+    @mock.patch("main_node.control_loop.recv_message")
     def test_register_runtime_connection_accepts_client_join(
         self,
         recv_message_mock: mock.Mock,
@@ -255,9 +255,9 @@ class MainNodeRuntimeTests(unittest.TestCase):
         self.assertTrue(print_mock.called)
 
     @mock.patch("builtins.print")
-    @mock.patch("main_node.runtime.network.safe_close")
-    @mock.patch("main_node.runtime.send_message")
-    @mock.patch("main_node.runtime.recv_message")
+    @mock.patch("main_node.control_loop.network.safe_close")
+    @mock.patch("main_node.control_loop.send_message")
+    @mock.patch("main_node.control_loop.recv_message")
     def test_serve_client_connection_dispatches_task_and_replies_with_aggregated_result(
         self,
         recv_message_mock: mock.Mock,
@@ -305,7 +305,7 @@ class MainNodeRuntimeTests(unittest.TestCase):
             output_vector=pack_float32_values([1.0] * runtime.gemv_spec.rows),
             iteration_count=4,
         )
-        from wire.internal_protocol.runtime_transport import WorkerTiming
+        from wire.internal_protocol.transport import WorkerTiming
         runtime._run_worker_task_slice = mock.Mock(
             return_value=(
                 task_result,
@@ -378,9 +378,9 @@ class MainNodeRuntimeTests(unittest.TestCase):
         self.assertTrue(print_mock.called)
 
     @mock.patch("builtins.print")
-    @mock.patch("main_node.runtime.network.safe_close")
-    @mock.patch("main_node.runtime.send_message")
-    @mock.patch("main_node.runtime.recv_message")
+    @mock.patch("main_node.control_loop.network.safe_close")
+    @mock.patch("main_node.control_loop.send_message")
+    @mock.patch("main_node.control_loop.recv_message")
     def test_serve_client_connection_replies_to_free_content_with_system_overview(
         self,
         recv_message_mock: mock.Mock,
@@ -957,7 +957,7 @@ class MainNodeRuntimeTests(unittest.TestCase):
         self.assertEqual(mailbox_calls[1].kwargs["timeout"], None)
         self.assertEqual(send_message_mock.call_count, 1)
 
-    @mock.patch("main_node.runtime.network.safe_close")
+    @mock.patch("main_node.control_loop.network.safe_close")
     @mock.patch("main_node.heartbeat.send_message")
     def test_send_heartbeat_once_retries_and_removes_timed_out_worker(
         self,

@@ -38,12 +38,12 @@ from app.supervisor_heartbeat import (
 from common.process_exit import classify_exit_code
 from common.state import RuntimeState
 from common.types import DiscoveryResult, FirewallStatus, PlatformInfo
-from compute_node.runtime import ComputeNodeRuntime
+from compute_node.worker_loop import ComputeNodeRuntime
 from app.config import AppConfig
 from app.logging_setup import rebind_logging_role
 from discovery.fallback import prompt_manual_address
 from discovery.pairing import run_pairing
-from main_node.runtime import MainNodeRuntime
+from main_node.control_loop import MainNodeRuntime
 from app.tracing import trace_function
 
 

@@ -15,8 +15,8 @@ from adapters.audit_log import write_audit_event
 from app.constants import METHOD_CONV2D, RUNTIME_MSG_CLIENT_REQUEST, RUNTIME_MSG_CLIENT_RESPONSE, STATUS_OK
 from app.tracing import trace_function
 from compute_node.compute_methods.conv2d.executor import load_named_workload_spec
-from main_node.runtime_mailbox import RuntimeConnectionMailbox
-from wire.internal_protocol.runtime_transport import (
+from main_node.mailbox import RuntimeConnectionMailbox
+from wire.internal_protocol.transport import (
     MessageKind,
     build_client_request_ok,
     describe_message_kind,

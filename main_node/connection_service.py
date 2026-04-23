@@ -13,7 +13,7 @@ from adapters import network
 from adapters.audit_log import write_audit_event
 from app.constants import MAIN_NODE_NAME, STATUS_OK
 from app.tracing import trace_function
-from wire.internal_protocol.runtime_transport import (
+from wire.internal_protocol.transport import (
     MessageKind,
     build_client_response,
     build_register_ok,
