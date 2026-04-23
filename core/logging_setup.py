@@ -160,6 +160,16 @@ def _configure_logger_tree(*, role: str, verbose: bool) -> logging.Logger:
     return logger
 
 
+def is_verbose() -> bool:
+    """Return whether the current logging configuration is in verbose mode.
+
+    Use this when a callsite wants to gate extra operator-visible output on the
+    ``--verbose`` flag without threading the flag through every function.
+    """
+
+    return _CURRENT_VERBOSE
+
+
 @trace_function
 def configure_logging(verbose: bool = False, *, role: str = "bootstrap") -> logging.Logger:
     """Configure file logging for the current process and return the app logger."""

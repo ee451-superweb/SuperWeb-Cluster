@@ -15,7 +15,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
-from adapters.audit_log import write_audit_event
+from adapters.audit_log import write_audit_event, write_diag_event
 from core.constants import (
     CONV2D_CLIENT_RESPONSE_STATS_ONLY,
     CONV2D_STATS_MAX_SAMPLES,
@@ -346,10 +346,23 @@ class ClientRequestHandler:
             return executor.submit(self.run_worker_task_slice, request, slice_)
 
         max_workers = max(len(assignments), 1) * 2
+        dispatch_started_at = time.monotonic()
+        total_dispatched = len(assignments)
         with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="task-dispatch") as executor:
             for assignment in assignments:
                 future = executor.submit(self.run_worker_task_slice, request, assignment)
                 pending[future] = assignment
+            distinct_initial_workers = {
+                assignment.connection.runtime_id for assignment in assignments
+            }
+            write_diag_event(
+                f"[DIAG] all initial assignments submitted request_id={request.request_id} "
+                f"slice_count={len(assignments)} "
+                f"dispatched_workers={len(distinct_initial_workers)} "
+                f"cluster_workers={self.registry.count_workers()} "
+                f"submit_elapsed_ms={max(0, int((time.monotonic() - dispatch_started_at) * 1000))}",
+                logger=self.logger,
+            )
 
             while pending:
                 done, _ = concurrent.futures.wait(
@@ -359,7 +372,24 @@ class ClientRequestHandler:
                 for future in done:
                     failed_assignment = pending.pop(future)
                     try:
-                        outcomes.append(future.result())
+                        task_result, timing = future.result()
+                        outcomes.append((task_result, timing))
+                        artifact_bytes = (
+                            task_result.result_artifact.size_bytes
+                            if task_result.result_artifact is not None
+                            else 0
+                        )
+                        write_diag_event(
+                            f"[DIAG] worker outcome collected request_id={request.request_id} "
+                            f"received={len(outcomes)}/{total_dispatched} "
+                            f"remaining={len(pending)} "
+                            f"task_id={failed_assignment.task_id} "
+                            f"runtime_id={failed_assignment.connection.runtime_id} "
+                            f"wall_ms={timing.wall_ms} artifact_fetch_ms={timing.artifact_fetch_ms} "
+                            f"computation_ms={timing.computation_ms} peripheral_ms={timing.peripheral_ms} "
+                            f"artifact_bytes={artifact_bytes}",
+                            logger=self.logger,
+                        )
                         continue
                     except (OSError, ValueError, ConnectionError, RuntimeError) as exc:
                         peer_id = _peer_id(failed_assignment)
@@ -396,7 +426,14 @@ class ClientRequestHandler:
                             )
                             future = _submit_retry(retry_slice)
                             pending[future] = retry_slice
+                            total_dispatched += 1
 
+        write_diag_event(
+            f"[DIAG] all worker outcomes collected request_id={request.request_id} "
+            f"outcome_count={len(outcomes)}/{total_dispatched} "
+            f"total_elapsed_ms={max(0, int((time.monotonic() - dispatch_started_at) * 1000))}",
+            logger=self.logger,
+        )
         return outcomes
 
     @trace_function
@@ -561,9 +598,17 @@ class ClientRequestHandler:
                 )
 
             if allocation.upload_future is not None:
+                upload_wait_started_at = time.monotonic()
                 try:
                     weight_path = allocation.upload_future.result(
                         timeout=float(self.config.compute_artifact_ttl_seconds),
+                    )
+                    write_diag_event(
+                        f"[DIAG] client weight upload received task_id={task_id} "
+                        f"upload_id={allocation.upload_id} "
+                        f"local_path={weight_path} "
+                        f"wait_ms={max(0, int((time.monotonic() - upload_wait_started_at) * 1000))}",
+                        logger=self.logger,
                     )
                 except concurrent.futures.TimeoutError as exc:
                     self.artifact_manager.cancel_upload_slot(allocation.upload_id)
@@ -632,6 +677,41 @@ class ClientRequestHandler:
                 client_id="",
                 iteration_count=request.iteration_count,
             )
+
+        total_effective_gflops = sum(
+            float(a.effective_gflops or 0.0) for a in assignments
+        )
+        assignment_descriptions: list[str] = []
+        for assignment in assignments:
+            if request.method == METHOD_CONV2D:
+                scope = f"oc={assignment.start_oc}:{assignment.end_oc} span={assignment.end_oc - assignment.start_oc}"
+            elif request.method == METHOD_GEMM:
+                scope = f"m_rows={assignment.m_start}:{assignment.m_end} span={assignment.m_end - assignment.m_start}"
+            else:
+                scope = f"rows={assignment.row_start}:{assignment.row_end} span={assignment.row_end - assignment.row_start}"
+            weight_frac = (
+                float(assignment.effective_gflops or 0.0) / total_effective_gflops
+                if total_effective_gflops > 0
+                else 0.0
+            )
+            assignment_descriptions.append(
+                f"[runtime_id={assignment.connection.runtime_id} "
+                f"gflops={float(assignment.effective_gflops or 0.0):.3f} "
+                f"frac={weight_frac:.3f} {scope}]"
+            )
+        distinct_worker_runtime_ids = {
+            assignment.connection.runtime_id for assignment in assignments
+        }
+        write_diag_event(
+            f"[DIAG] request accepted task_id={task_id} method={request.method} "
+            f"size={request.size or 'large'} "
+            f"cluster_workers={self.registry.count_workers()} "
+            f"dispatched_workers={len(distinct_worker_runtime_ids)} "
+            f"slice_count={len(assignments)} "
+            f"total_effective_gflops={total_effective_gflops:.3f} "
+            f"assignments={' '.join(assignment_descriptions)}",
+            logger=self.logger,
+        )
 
         try:
             completion_conv2d_stats_only = False
@@ -783,6 +863,13 @@ class ClientRequestHandler:
                         result_artifact_id=result_artifact.artifact_id if result_artifact is not None else "",
                     )
             aggregate_done_at = time.monotonic()
+            write_diag_event(
+                f"[DIAG] aggregator finished task_id={task_id} method={request.method} "
+                f"aggregate_ms={max(0, int((aggregate_done_at - task_window_done_at) * 1000))} "
+                f"output_length={output_length} "
+                f"result_artifact={'yes' if result_artifact is not None else 'no'}",
+                logger=self.logger,
+            )
             timing = ResponseTiming(
                 dispatch_ms=max(0, int((dispatch_done_at - started_at) * 1000)),
                 task_window_ms=max(0, int((task_window_done_at - task_window_started_at) * 1000)),

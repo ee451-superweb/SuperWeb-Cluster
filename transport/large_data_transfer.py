@@ -231,6 +231,13 @@ class LargeDataTransferServer:
         if artifact is None or not artifact.local_path.exists():
             conn.sendall(encode_error(f"artifact not found: {artifact_id}"))
             return
+        serve_started_at = time.perf_counter_ns()
+        logger.info(
+            "[DIAG] serve starting artifact_id=%s total_bytes=%s chunk_size=%s",
+            artifact_id,
+            artifact.descriptor.size_bytes,
+            artifact.descriptor.chunk_size,
+        )
         conn.sendall(
             encode_init(
                 size_bytes=artifact.descriptor.size_bytes,
@@ -240,14 +247,47 @@ class LargeDataTransferServer:
             )
         )
         offset = 0
+        read_ns = 0
+        send_ns = 0
+        progress_bucket_bytes = 64 * 1024 * 1024
+        progress_next_threshold = progress_bucket_bytes
         with artifact.local_path.open("rb") as handle:
             while True:
+                _t = time.perf_counter_ns()
                 chunk = handle.read(self.chunk_size)
+                read_ns += time.perf_counter_ns() - _t
                 if not chunk:
                     break
+                _t = time.perf_counter_ns()
                 conn.sendall(encode_chunk(offset=offset, data=chunk))
+                send_ns += time.perf_counter_ns() - _t
                 offset += len(chunk)
+                if offset >= progress_next_threshold:
+                    elapsed_ms = (time.perf_counter_ns() - serve_started_at) // 1_000_000
+                    rate_mbps = (offset / max(1, elapsed_ms)) * 1000.0 / (1024 * 1024)
+                    logger.info(
+                        "[DIAG] serve progress artifact_id=%s bytes=%s/%s elapsed_ms=%d rate_MBps=%.2f read_ms=%d send_ms=%d",
+                        artifact_id,
+                        offset,
+                        artifact.descriptor.size_bytes,
+                        elapsed_ms,
+                        rate_mbps,
+                        read_ns // 1_000_000,
+                        send_ns // 1_000_000,
+                    )
+                    progress_next_threshold += progress_bucket_bytes
         conn.sendall(encode_end(size_bytes=artifact.descriptor.size_bytes))
+        total_ms = (time.perf_counter_ns() - serve_started_at) // 1_000_000
+        rate_mbps = (offset / max(1, total_ms)) * 1000.0 / (1024 * 1024)
+        logger.info(
+            "[DIAG] serve complete artifact_id=%s bytes=%s elapsed_ms=%d rate_MBps=%.2f read_ms=%d send_ms=%d",
+            artifact_id,
+            offset,
+            total_ms,
+            rate_mbps,
+            read_ns // 1_000_000,
+            send_ns // 1_000_000,
+        )
 
     def _serve_upload(self, conn: socket.socket, deliver_header: bytes) -> bool:
         """Use this internal helper to accept a DELIVER-initiated upload stream.
@@ -378,6 +418,16 @@ def fetch_artifact_to_file(
     recv_ns = 0
     write_ns = 0
     digest_ns = 0
+    fetch_started_at = time.perf_counter_ns()
+    progress_bucket_bytes = 64 * 1024 * 1024
+    progress_next_threshold = progress_bucket_bytes
+    logger.info(
+        "[DIAG] fetch starting artifact_id=%s host=%s port=%s expected_bytes=%s",
+        descriptor.artifact_id,
+        descriptor.transfer_host,
+        descriptor.transfer_port,
+        descriptor.size_bytes,
+    )
 
     with socket.create_connection((descriptor.transfer_host, descriptor.transfer_port), timeout=timeout) as sock:
         sock.settimeout(timeout)
@@ -417,6 +467,21 @@ def fetch_artifact_to_file(
                     digest.update(payload)
                     digest_ns += time.perf_counter_ns() - _t
                     bytes_written += len(payload)
+                    if bytes_written >= progress_next_threshold:
+                        elapsed_ms = (time.perf_counter_ns() - fetch_started_at) // 1_000_000
+                        rate_mbps = (bytes_written / max(1, elapsed_ms)) * 1000.0 / (1024 * 1024)
+                        logger.info(
+                            "[DIAG] fetch progress artifact_id=%s bytes=%s/%s elapsed_ms=%d rate_MBps=%.2f recv_ms=%d write_ms=%d digest_ms=%d",
+                            descriptor.artifact_id,
+                            bytes_written,
+                            descriptor.size_bytes,
+                            elapsed_ms,
+                            rate_mbps,
+                            recv_ns // 1_000_000,
+                            write_ns // 1_000_000,
+                            digest_ns // 1_000_000,
+                        )
+                        progress_next_threshold += progress_bucket_bytes
                 elif message_type == 4:
                     rest = _recv_exactly(sock, END_HEADER.size - 6)
                     end_header = header + rest
