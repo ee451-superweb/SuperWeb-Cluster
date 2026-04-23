@@ -14,7 +14,7 @@ from typing import Any
 from core.constants import METHOD_GEMV
 from core.types import ComputeHardwarePerformance, ComputePerformanceSummary, MethodPerformanceSummary
 
-DEFAULT_RESULT_PATH = Path(__file__).resolve().parent / "performance_metrics" / "result.json"
+DEFAULT_RESULT_PATH = Path(__file__).resolve().parent / "result.json"
 WEAK_PROCESSOR_THRESHOLD = 0.5
 DISABLED_RUNTIME_BACKENDS = frozenset({"dx12"})
 
