@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from core.constants import METHOD_GEMV, METHOD_CONV2D
+from core.constants import METHOD_GEMM, METHOD_GEMV, METHOD_CONV2D
 from core.work_partition import partition_contiguous_range
 from main_node.registry import RuntimePeerConnection, WorkerHardwareCapability
 
@@ -27,6 +27,8 @@ class WorkerTaskSlice:
     method: str = METHOD_GEMV
     start_oc: int = 0
     end_oc: int = 0
+    m_start: int = 0
+    m_end: int = 0
 
 
 class TaskDispatcher:
@@ -71,6 +73,54 @@ class TaskDispatcher:
                     method=METHOD_GEMV,
                     row_start=partition.start,
                     row_end=partition.end,
+                    effective_gflops=worker_gflops[worker.peer_id],
+                )
+            )
+        return assignments
+
+    def dispatch_gemm(
+        self,
+        *,
+        request_id: str,
+        rows: int,
+        workers: list[RuntimePeerConnection],
+        worker_hardware: list[WorkerHardwareCapability],
+    ) -> list[WorkerTaskSlice]:
+        """Use this when one GEMM request needs M-axis partitions across workers.
+
+        Args: request_id logical task id, rows total M dimension, workers live
+        workers, worker_hardware GEMM performance entries.
+        Returns: Weighted M-axis slices, or an empty list when no worker has
+        usable GEMM capacity (i.e. no cuBLAS-capable host in the cluster).
+        """
+        worker_gflops: dict[str, float] = {worker.peer_id: 0.0 for worker in workers}
+        for hardware in worker_hardware:
+            worker_gflops[hardware.worker_peer_id] = worker_gflops.get(hardware.worker_peer_id, 0.0) + hardware.effective_gflops
+
+        schedulable_workers = [worker for worker in workers if worker_gflops.get(worker.peer_id, 0.0) > 0.0]
+        if not schedulable_workers:
+            return []
+
+        partitions = partition_contiguous_range(
+            0,
+            rows,
+            [worker_gflops[worker.peer_id] for worker in schedulable_workers],
+        )
+
+        assignments: list[WorkerTaskSlice] = []
+        for partition, worker in zip(partitions, schedulable_workers):
+            if partition.end <= partition.start:
+                continue
+            assignments.append(
+                WorkerTaskSlice(
+                    connection=worker,
+                    task_id=request_id,
+                    artifact_id=f"{request_id}:{worker.runtime_id}",
+                    method=METHOD_GEMM,
+                    row_start=0,
+                    row_end=0,
+                    m_start=partition.start,
+                    m_end=partition.end,
                     effective_gflops=worker_gflops[worker.peer_id],
                 )
             )

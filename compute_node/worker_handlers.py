@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from core.constants import METHOD_GEMV, METHOD_CONV2D
+from core.constants import METHOD_GEMM, METHOD_GEMV, METHOD_CONV2D
+from compute_node.compute_methods.gemm.handler import GemmMethodHandler
 from compute_node.compute_methods.gemv.handler import GemvMethodHandler
 from compute_node.compute_methods.conv2d.handler import Conv2dMethodHandler
 
@@ -59,5 +60,6 @@ def build_default_method_handlers(
         handlers={
             METHOD_GEMV: GemvMethodHandler(pinned_backend=pinned_backend),
             METHOD_CONV2D: Conv2dMethodHandler(pinned_backend=pinned_backend),
+            METHOD_GEMM: GemmMethodHandler(pinned_backend=pinned_backend),
         }
     )
