@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from adapters.process import python_utf8_command
-from app.constants import LOGGER_NAME
+from core.constants import LOGGER_NAME
 from setup import current_python_uses_project_venv, project_python_path
 
 

@@ -12,7 +12,7 @@ import socket
 import struct
 import time
 
-from app.constants import (
+from core.constants import (
     MAIN_NODE_NAME,
     RUNTIME_MSG_ARTIFACT_RELEASE,
     RUNTIME_MSG_CLIENT_INFO_REPLY,
@@ -32,8 +32,8 @@ from app.constants import (
     RUNTIME_MSG_WORKER_UPDATE,
     SUPERWEB_CLIENT_NAME,
 )
-from app.tracing import trace_function
-from common.types import ComputePerformanceSummary, HardwareProfile
+from core.tracing import trace_function
+from core.types import ComputePerformanceSummary, HardwareProfile
 from wire.external_protocol.control_plane import (
     ClientInfoReply,
     ClientInfoRequest,

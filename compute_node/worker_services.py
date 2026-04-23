@@ -14,7 +14,7 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
 
 from adapters.audit_log import write_audit_event
-from app.constants import (
+from core.constants import (
     METHOD_GEMV,
     METHOD_CONV2D,
     RUNTIME_MSG_ARTIFACT_RELEASE,
@@ -27,7 +27,7 @@ from app.constants import (
     STATUS_ACCEPTED,
     STATUS_INTERNAL_ERROR,
 )
-from common.types import ComputePerformanceSummary
+from core.types import ComputePerformanceSummary
 from wire.internal_protocol.transport import (
     GemvResultPayload,
     MessageKind,

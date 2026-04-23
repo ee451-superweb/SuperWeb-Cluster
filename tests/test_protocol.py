@@ -2,7 +2,7 @@
 
 import unittest
 
-from app.constants import (
+from core.constants import (
     COMPUTE_NODE_NAME,
     DEFAULT_TCP_PORT,
     MAIN_NODE_NAME,

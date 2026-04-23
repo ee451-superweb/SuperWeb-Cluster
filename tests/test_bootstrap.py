@@ -13,7 +13,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 import bootstrap
-from common.types import DiscoveryResult, FirewallStatus, PlatformInfo
+from core.types import DiscoveryResult, FirewallStatus, PlatformInfo
 from setup import ProjectEnvironmentStatus
 
 

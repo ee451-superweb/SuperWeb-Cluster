@@ -4,9 +4,9 @@ import socket
 import unittest
 from unittest import mock
 
-from common.float32_codec import pack_float32_values, unpack_float32_bytes
-from common.types import ComputeHardwarePerformance, ComputePerformanceSummary, HardwareProfile
-from app.constants import (
+from core.float32_codec import pack_float32_values, unpack_float32_bytes
+from core.types import ComputeHardwarePerformance, ComputePerformanceSummary, HardwareProfile
+from core.constants import (
     COMPUTE_NODE_NAME,
     CONV2D_CLIENT_RESPONSE_STATS_ONLY,
     MAIN_NODE_NAME,

@@ -15,13 +15,13 @@ from collections.abc import Callable
 
 from adapters import network
 from adapters.audit_log import write_audit_event
-from common.types import DiscoveryResult
+from core.types import DiscoveryResult
 from compute_node.compute_methods.conv2d import (
     DEFAULT_DATASET_DIR as CONV2D_DATASET_DIR,
 )
 from compute_node.input_matrix import build_input_matrix_spec
-from app.config import AppConfig
-from app.constants import (
+from core.config import AppConfig
+from core.constants import (
     MAIN_NODE_NAME,
     METHOD_GEMV,
     METHOD_CONV2D,
@@ -48,7 +48,7 @@ from wire.internal_protocol.transport import (
     recv_message,
     send_message,
 )
-from app.tracing import trace_function
+from core.tracing import trace_function
 
 
 class MainNodeRuntime:

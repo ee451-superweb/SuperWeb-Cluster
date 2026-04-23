@@ -11,8 +11,8 @@ import socket
 import time
 
 from adapters.audit_log import write_audit_event
-from app.constants import MAIN_NODE_NAME, RUNTIME_MSG_HEARTBEAT, RUNTIME_MSG_HEARTBEAT_OK
-from app.tracing import trace_function
+from core.constants import MAIN_NODE_NAME, RUNTIME_MSG_HEARTBEAT, RUNTIME_MSG_HEARTBEAT_OK
+from core.tracing import trace_function
 from main_node.mailbox import RuntimeConnectionMailbox
 from wire.internal_protocol.transport import MessageKind, build_heartbeat, describe_message_kind, recv_message, send_message
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.constants import METHOD_GEMV, METHOD_CONV2D
+from core.constants import METHOD_GEMV, METHOD_CONV2D
 from compute_node.compute_methods.gemv.handler import GemvMethodHandler
 from compute_node.compute_methods.conv2d.handler import Conv2dMethodHandler
 

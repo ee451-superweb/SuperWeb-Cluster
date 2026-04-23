@@ -11,7 +11,7 @@ import unittest
 from concurrent.futures import Future
 from unittest import mock
 
-from app.config import AppConfig
+from core.config import AppConfig
 from compute_node.worker_services import WorkerTaskRuntimeService
 
 

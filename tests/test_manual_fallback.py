@@ -3,7 +3,7 @@
 import unittest
 from unittest import mock
 
-from app.constants import DEFAULT_TCP_PORT
+from core.constants import DEFAULT_TCP_PORT
 from discovery.fallback import prompt_manual_address
 
 

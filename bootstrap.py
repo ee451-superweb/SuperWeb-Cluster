@@ -13,7 +13,7 @@ from adapters.process import enable_utf8_mode, python_utf8_command
 enable_utf8_mode()
 
 from adapters.firewall import ensure_rules
-from common.types import FirewallStatus
+from core.types import FirewallStatus
 from adapters.host import (
     detach_from_current_console,
     detect_os,
@@ -21,8 +21,8 @@ from adapters.host import (
     relaunch_as_admin,
 )
 from adapters.audit_log import write_audit_event
-from app.config import AppConfig
-from app.constants import (
+from core.config import AppConfig
+from core.constants import (
     APP_NAME,
     BACKEND_CHOICES,
     COMPUTE_NODE_NAME,
@@ -36,8 +36,8 @@ from app.constants import (
     DEFAULT_DATA_PLANE_PORT,
     MAIN_NODE_NAME,
 )
-from app.logging_setup import archive_existing_logs, cleanse_existing_logs, configure_logging
-from app.tracing import trace_function
+from core.logging_setup import archive_existing_logs, cleanse_existing_logs, configure_logging
+from core.tracing import trace_function
 from setup import REQUIREMENTS_STAMP_PATH, active_python_path, inspect_project_environment, project_python_path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -286,7 +286,7 @@ def ensure_bootstrap_runtime_environment(logger, argv: list[str]) -> int | None:
 def _load_supervisor_class():
     """Import Supervisor only after the runtime environment is ready."""
 
-    from app.supervisor import Supervisor
+    from supervision.supervisor import Supervisor
 
     return Supervisor
 
@@ -623,7 +623,7 @@ def main(argv: list[str] | None = None) -> int:
         # hang during startup (e.g. stuck in a CUDA import) is still visible
         # to the parent supervisor. No-op outside the peer-process path.
         if config.peer_process:
-            from app.supervisor_heartbeat import start_peer_heartbeat_from_env
+            from supervision.supervisor_heartbeat import start_peer_heartbeat_from_env
 
             start_peer_heartbeat_from_env(logger=logger)
         # Firewall work is intentionally limited to discovery-phase UDP exposure.

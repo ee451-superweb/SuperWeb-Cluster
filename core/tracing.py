@@ -6,7 +6,7 @@ import functools
 import logging
 from typing import Callable, ParamSpec, TypeVar
 
-from app.constants import LOGGER_NAME
+from core.constants import LOGGER_NAME
 
 P = ParamSpec("P")
 R = TypeVar("R")

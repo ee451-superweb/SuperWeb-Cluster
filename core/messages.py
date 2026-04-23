@@ -1,6 +1,6 @@
 ﻿"""Shared message labels used across discovery and runtime flows."""
 
-from app.constants import (
+from core.constants import (
     MSG_DISCOVERY_TIMEOUT,
     MSG_MANUAL_CANCELLED,
     RUNTIME_MSG_CLIENT_JOIN,

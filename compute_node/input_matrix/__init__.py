@@ -5,7 +5,7 @@ packages under `gemv/` and `conv2d/`
 provide symmetric dataset generation flows.
 """
 
-from app.constants import METHOD_GEMV, METHOD_CONV2D
+from core.constants import METHOD_GEMV, METHOD_CONV2D
 
 from .gemv import (
     DEFAULT_CHUNK_VALUES,

@@ -19,7 +19,7 @@ from pathlib import Path
 
 from adapters.audit_log import write_audit_event
 from adapters.process import python_utf8_command
-from app.constants import (
+from core.constants import (
     CONV2D_CLIENT_RESPONSE_STATS_ONLY,
     MAIN_NODE_NAME,
     RUNTIME_MSG_ARTIFACT_RELEASE,
@@ -29,7 +29,7 @@ from app.constants import (
     RUNTIME_MSG_TASK_FAIL,
     RUNTIME_MSG_TASK_RESULT,
 )
-from app.tracing import trace_function
+from core.tracing import trace_function
 from compute_node.compute_methods.conv2d import DATASET_GENERATE_SCRIPT_PATH as CONV2D_DATASET_GENERATE_SCRIPT_PATH
 from compute_node.compute_methods.conv2d.executor import load_named_workload_spec
 from main_node.dispatcher import WorkerTaskSlice

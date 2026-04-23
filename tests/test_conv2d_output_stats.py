@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.constants import CONV2D_STATS_MAX_SAMPLES, STATUS_OK
+from core.constants import CONV2D_STATS_MAX_SAMPLES, STATUS_OK
 from main_node.aggregator import ResultAggregator, summarize_conv2d_output_file
 from wire.internal_protocol.control_plane import Conv2dResultPayload
 from wire.internal_protocol.transport import TaskResult

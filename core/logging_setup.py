@@ -8,13 +8,13 @@ from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from app.constants import (
+from core.constants import (
     DEFAULT_LOG_FILE_BACKUP_COUNT,
     DEFAULT_LOG_FILE_MAX_BYTES,
     LOGGER_NAME,
     LOG_DIRECTORY_NAME,
 )
-from app.tracing import trace_function
+from core.tracing import trace_function
 
 _SESSION_TIMESTAMP = datetime.now().strftime("%Y%m%d-%H%M%S")
 _CURRENT_VERBOSE = False

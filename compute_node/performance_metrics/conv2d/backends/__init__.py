@@ -24,7 +24,7 @@ import os
 import shutil
 import sys
 
-from app.constants import DX12_BACKEND_DISABLED_REASON
+from core.constants import DX12_BACKEND_DISABLED_REASON
 from .cpu_backend import CpuBackend
 from .cuda_backend import CudaBackend
 from .metal_backend import MetalBackend

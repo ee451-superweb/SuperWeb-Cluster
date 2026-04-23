@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 
-from app.constants import (
+from core.constants import (
     DEFAULT_BUFFER_SIZE,
     DEFAULT_DISCOVERY_ATTEMPTS,
     DEFAULT_DISCOVERY_PORT,

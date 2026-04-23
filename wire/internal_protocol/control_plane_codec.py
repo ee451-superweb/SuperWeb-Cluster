@@ -7,7 +7,7 @@ main node.
 
 from __future__ import annotations
 
-from common.types import (
+from core.types import (
     ComputeHardwarePerformance,
     ComputePerformanceSummary,
     HardwareProfile,

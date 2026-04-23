@@ -15,7 +15,7 @@ import time
 from functools import lru_cache
 from typing import Any
 
-from app.constants import METHOD_GEMV, METHOD_CONV2D
+from core.constants import METHOD_GEMV, METHOD_CONV2D
 from compute_node.performance_metrics.gemv.config import DISPLAY_NAME as GEMV_DISPLAY_NAME
 from compute_node.performance_metrics.conv2d.config import DISPLAY_NAME as CONV2D_DISPLAY_NAME
 _DEVICE_NOTE_PATTERN = re.compile(r"device=(.+)")

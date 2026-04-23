@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import socket
 
-from common.types import ComputePerformanceSummary, HardwareProfile
-from app.constants import RUNTIME_MSG_REGISTER_OK
+from core.types import ComputePerformanceSummary, HardwareProfile
+from core.constants import RUNTIME_MSG_REGISTER_OK
 from wire.internal_protocol.transport import (
     MessageKind,
     RegisterOk,
@@ -18,7 +18,7 @@ from wire.internal_protocol.transport import (
     recv_message,
     send_message,
 )
-from app.tracing import trace_function
+from core.tracing import trace_function
 
 
 class WorkerSession:

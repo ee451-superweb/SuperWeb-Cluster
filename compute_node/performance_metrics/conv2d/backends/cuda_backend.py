@@ -18,8 +18,8 @@ import time
 from functools import lru_cache
 from pathlib import Path
 
-from app.constants import DEFAULT_CONV2D_CUDA_COOLDOWN_MS
-from app.compute_resource_policy import (
+from core.constants import DEFAULT_CONV2D_CUDA_COOLDOWN_MS
+from supervision.compute_resource_policy import (
     build_conv2d_cuda_output_channel_batch_candidates,
 )
 from compute_node.compute_methods.conv2d import (

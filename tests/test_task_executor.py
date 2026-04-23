@@ -9,7 +9,7 @@ from unittest import mock
 
 import subprocess
 
-from app.constants import DX12_BACKEND_DISABLED_REASON, METHOD_CONV2D
+from core.constants import DX12_BACKEND_DISABLED_REASON, METHOD_CONV2D
 from compute_node.compute_methods.conv2d import executor as spatial_executor
 from compute_node.performance_metrics.conv2d.models import BenchmarkSpec as SpatialBenchmarkSpec
 from compute_node.performance_metrics.performance_summary import RuntimeProcessorInventory, RuntimeProcessorProfile

@@ -14,8 +14,8 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from app.constants import DEFAULT_LOG_FILE_MAX_BYTES
-from app.logging_setup import archive_existing_logs, cleanse_existing_logs, configure_logging, rebind_logging_role
+from core.constants import DEFAULT_LOG_FILE_MAX_BYTES
+from core.logging_setup import archive_existing_logs, cleanse_existing_logs, configure_logging, rebind_logging_role
 
 
 class LoggingSetupTests(unittest.TestCase):
@@ -36,8 +36,8 @@ class LoggingSetupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             log_dir = Path(temp_dir)
             with (
-                mock.patch("app.logging_setup._SESSION_TIMESTAMP", "20260417-120000"),
-                mock.patch("app.logging_setup._log_directory", return_value=log_dir),
+                mock.patch("core.logging_setup._SESSION_TIMESTAMP", "20260417-120000"),
+                mock.patch("core.logging_setup._log_directory", return_value=log_dir),
             ):
                 logger = configure_logging(role="main")
                 logger.info("hello from main")
@@ -54,8 +54,8 @@ class LoggingSetupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             log_dir = Path(temp_dir)
             with (
-                mock.patch("app.logging_setup._SESSION_TIMESTAMP", "20260417-120100"),
-                mock.patch("app.logging_setup._log_directory", return_value=log_dir),
+                mock.patch("core.logging_setup._SESSION_TIMESTAMP", "20260417-120100"),
+                mock.patch("core.logging_setup._log_directory", return_value=log_dir),
             ):
                 configure_logging(role="bootstrap")
                 logger = rebind_logging_role("worker")
@@ -75,8 +75,8 @@ class LoggingSetupTests(unittest.TestCase):
             (log_dir / "scratch.bin").write_bytes(b"binary")
 
             with (
-                mock.patch("app.logging_setup._SESSION_TIMESTAMP", "20260417-120200"),
-                mock.patch("app.logging_setup._log_directory", return_value=log_dir),
+                mock.patch("core.logging_setup._SESSION_TIMESTAMP", "20260417-120200"),
+                mock.patch("core.logging_setup._log_directory", return_value=log_dir),
             ):
                 archive_path, archived_count = archive_existing_logs()
 
@@ -104,7 +104,7 @@ class LoggingSetupTests(unittest.TestCase):
             (log_dir / "logs-archive-older.zip").write_bytes(b"zip")
             (log_dir / "scratch.bin").write_bytes(b"binary")
 
-            with mock.patch("app.logging_setup._log_directory", return_value=log_dir):
+            with mock.patch("core.logging_setup._log_directory", return_value=log_dir):
                 removed_count = cleanse_existing_logs()
 
             self.assertEqual(removed_count, 3)

@@ -4,8 +4,8 @@ import unittest
 from unittest import mock
 
 from adapters import network
-from app.config import AppConfig
-from app.constants import (
+from core.config import AppConfig
+from core.constants import (
     COMPUTE_NODE_NAME,
     DEFAULT_BUFFER_SIZE,
     DEFAULT_DISCOVERY_PORT,

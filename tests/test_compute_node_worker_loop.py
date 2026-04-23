@@ -5,12 +5,12 @@ import unittest
 from unittest import mock
 
 import compute_node.worker_loop as runtime_module
-from common.float32_codec import pack_float32_values
-from common.types import ComputePerformanceSummary, DiscoveryResult, HardwareProfile
+from core.float32_codec import pack_float32_values
+from core.types import ComputePerformanceSummary, DiscoveryResult, HardwareProfile
 from compute_node.performance_metrics.performance_summary import RuntimeProcessorInventory, RuntimeProcessorProfile
 from compute_node.worker_loop import ComputeNodeRuntime
-from app.config import AppConfig
-from app.constants import (
+from core.config import AppConfig
+from core.constants import (
     COMPUTE_NODE_NAME,
     MAIN_NODE_NAME,
     METHOD_GEMV,

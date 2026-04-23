@@ -13,7 +13,7 @@ from contextlib import nullcontext
 
 from adapters import network
 from adapters.audit_log import write_audit_event
-from app.constants import (
+from core.constants import (
     DEFAULT_CLIENT_INFO_TIMEOUT,
     RUNTIME_MSG_CLIENT_INFO_REPLY,
     RUNTIME_MSG_CLIENT_INFO_REQUEST,
@@ -21,7 +21,7 @@ from app.constants import (
     RUNTIME_ROLE_CLIENT,
     RUNTIME_ROLE_WORKER,
 )
-from app.tracing import trace_function
+from core.tracing import trace_function
 from wire.internal_protocol.transport import MessageKind, build_client_info_reply, recv_message, send_message
 
 

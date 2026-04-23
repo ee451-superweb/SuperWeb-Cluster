@@ -12,14 +12,14 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-from common.types import ComputePerformanceSummary, HardwareProfile, MethodPerformanceSummary
-from app.constants import (
+from core.types import ComputePerformanceSummary, HardwareProfile, MethodPerformanceSummary
+from core.constants import (
     METHOD_GEMV,
     METHOD_CONV2D,
     RUNTIME_ROLE_CLIENT,
     RUNTIME_ROLE_WORKER,
 )
-from app.tracing import trace_function
+from core.tracing import trace_function
 from main_node.mailbox import RuntimeConnectionMailbox
 
 

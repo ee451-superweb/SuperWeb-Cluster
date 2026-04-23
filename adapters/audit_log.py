@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from app.constants import LOGGER_NAME
+from core.constants import LOGGER_NAME
 
 _AUDIT_LOGGER_NAME = f"{LOGGER_NAME}.audit"
 

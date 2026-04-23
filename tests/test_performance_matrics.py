@@ -92,7 +92,7 @@ from compute_node.performance_metrics.gemv.scoring import linear_time_score
 from compute_node.performance_metrics.gemv.workloads import build_benchmark_spec
 import subprocess
 
-from app.constants import DX12_BACKEND_DISABLED_REASON, METHOD_GEMV, METHOD_CONV2D
+from core.constants import DX12_BACKEND_DISABLED_REASON, METHOD_GEMV, METHOD_CONV2D
 from tests.support import require_integration
 
 

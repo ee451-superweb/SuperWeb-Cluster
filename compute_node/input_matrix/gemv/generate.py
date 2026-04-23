@@ -20,7 +20,7 @@ from adapters.process import enable_utf8_mode
 
 enable_utf8_mode()
 
-from app.venv import relaunch_with_project_python_if_needed
+from core.venv import relaunch_with_project_python_if_needed
 from compute_node.performance_metrics.gemv.config import DATASET_DIR
 from compute_node.input_matrix.gemv import (
     build_dataset_layout,

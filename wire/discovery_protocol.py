@@ -10,7 +10,7 @@ import socket
 import struct
 from dataclasses import dataclass
 
-from app.constants import (
+from core.constants import (
     MAIN_NODE_NAME,
     MDNS_QUERY_UNICAST_RESPONSE,
     MDNS_RECORD_TTL,

@@ -1,11 +1,11 @@
-"""Tests for ``app.capacity.load_usable_backends``."""
+"""Tests for ``supervision.capacity.load_usable_backends``."""
 
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from app.capacity import load_usable_backends
+from supervision.capacity import load_usable_backends
 
 
 def _write(path: Path, payload: object) -> None:

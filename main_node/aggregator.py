@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
-from app.constants import CONV2D_STATS_MAX_SAMPLES
+from core.constants import CONV2D_STATS_MAX_SAMPLES
 from wire.internal_protocol.transport import TaskResult
 
 logger = logging.getLogger("superweb_cluster")

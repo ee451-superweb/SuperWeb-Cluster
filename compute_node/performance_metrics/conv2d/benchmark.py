@@ -23,7 +23,7 @@ from adapters.process import enable_utf8_mode, python_utf8_command
 
 enable_utf8_mode()
 
-from app.constants import DEFAULT_CONV2D_CUDA_COOLDOWN_MS
+from core.constants import DEFAULT_CONV2D_CUDA_COOLDOWN_MS
 from setup import active_python_path
 from compute_node.performance_metrics.benchmark_status import emit_status
 from compute_node.performance_metrics.device_overview import detect_cpu_name

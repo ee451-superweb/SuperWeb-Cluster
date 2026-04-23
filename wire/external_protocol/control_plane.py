@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import InitVar, dataclass
 
-from app.constants import METHOD_GEMV, METHOD_CONV2D
+from core.constants import METHOD_GEMV, METHOD_CONV2D
 from wire.external_protocol.data_plane import ArtifactDescriptor
 from wire.internal_protocol.model_utils import initvar_or_default
 

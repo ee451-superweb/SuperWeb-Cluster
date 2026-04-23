@@ -10,7 +10,7 @@ import subprocess
 import unittest
 from unittest import mock
 
-from app import peer_diagnostics
+from supervision import peer_diagnostics
 
 
 class ResolvePySpyExecutableTests(unittest.TestCase):

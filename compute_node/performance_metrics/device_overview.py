@@ -12,7 +12,7 @@ import platform
 import subprocess
 from typing import Any
 
-from common.hardware import _detect_total_memory_bytes, detect_processor_name
+from core.hardware import _detect_total_memory_bytes, detect_processor_name
 from compute_node.performance_metrics.gemv.backends.windows_gpu_inventory import (
     list_windows_display_adapters,
 )

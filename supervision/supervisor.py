@@ -21,13 +21,13 @@ _PEER_HEARTBEAT_ACCEPT_TIMEOUT_SECONDS = 30.0
 from adapters.firewall import cleanup_rules
 from adapters.audit_log import write_audit_event
 from adapters.process import python_utf8_command
-from app.capacity import load_usable_backends
-from app.constants import (
+from supervision.capacity import load_usable_backends
+from core.constants import (
     BACKEND_CPU,
     GPU_BACKEND_PRIORITY,
 )
-from app.peer_diagnostics import dump_python_stack
-from app.supervisor_heartbeat import (
+from supervision.peer_diagnostics import dump_python_stack
+from supervision.supervisor_heartbeat import (
     HEARTBEAT_CLOSED,
     HEARTBEAT_INTERVAL_SECONDS,
     HEARTBEAT_MISS_THRESHOLD,
@@ -35,16 +35,16 @@ from app.supervisor_heartbeat import (
     HEARTBEAT_PORT_ENV,
     SupervisorHeartbeatListener,
 )
-from common.process_exit import classify_exit_code
-from common.state import RuntimeState
-from common.types import DiscoveryResult, FirewallStatus, PlatformInfo
+from core.process_exit import classify_exit_code
+from core.state import RuntimeState
+from core.types import DiscoveryResult, FirewallStatus, PlatformInfo
 from compute_node.worker_loop import ComputeNodeRuntime
-from app.config import AppConfig
-from app.logging_setup import rebind_logging_role
+from core.config import AppConfig
+from core.logging_setup import rebind_logging_role
 from discovery.fallback import prompt_manual_address
 from discovery.pairing import run_pairing
 from main_node.control_loop import MainNodeRuntime
-from app.tracing import trace_function
+from core.tracing import trace_function
 
 
 class Supervisor:

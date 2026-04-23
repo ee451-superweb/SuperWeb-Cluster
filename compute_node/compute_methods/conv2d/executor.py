@@ -18,9 +18,9 @@ from pathlib import Path
 
 import numpy as np
 
-from common.process_exit import classify_exit_code
+from core.process_exit import classify_exit_code
 
-from app.constants import (
+from core.constants import (
     CONV2D_CLIENT_RESPONSE_STATS_ONLY,
     CONV2D_STATS_MAX_SAMPLES,
     DEFAULT_CONV2D_CUDA_COOLDOWN_MS,

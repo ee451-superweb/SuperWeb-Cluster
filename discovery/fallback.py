@@ -6,10 +6,10 @@ allowed to type a host or ``host:port`` pair manually.
 
 from __future__ import annotations
 
-from common.types import DiscoveryResult
-from app.constants import MSG_MANUAL_CANCELLED, MSG_MANUAL_PROMPT
+from core.types import DiscoveryResult
+from core.constants import MSG_MANUAL_CANCELLED, MSG_MANUAL_PROMPT
 from wire.discovery_protocol import normalize_manual_address
-from app.tracing import trace_function
+from core.tracing import trace_function
 
 
 @trace_function

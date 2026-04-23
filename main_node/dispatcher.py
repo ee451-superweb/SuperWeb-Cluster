@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.constants import METHOD_GEMV, METHOD_CONV2D
-from common.work_partition import partition_contiguous_range
+from core.constants import METHOD_GEMV, METHOD_CONV2D
+from core.work_partition import partition_contiguous_range
 from main_node.registry import RuntimePeerConnection, WorkerHardwareCapability
 
 

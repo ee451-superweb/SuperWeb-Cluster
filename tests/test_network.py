@@ -6,7 +6,7 @@ import unittest
 from unittest import mock
 
 from adapters import network
-from app.constants import DEFAULT_DISCOVERY_PORT, DEFAULT_MULTICAST_GROUP, DEFAULT_MULTICAST_TTL
+from core.constants import DEFAULT_DISCOVERY_PORT, DEFAULT_MULTICAST_GROUP, DEFAULT_MULTICAST_TTL
 from tests.support import require_integration
 
 

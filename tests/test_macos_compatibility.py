@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 from unittest import mock
 
-from common.hardware import collect_hardware_profile
+from core.hardware import collect_hardware_profile
 from compute_node.performance_metrics import device_overview
 from compute_node.performance_metrics.result_format import _extract_device_name
 
@@ -53,15 +53,15 @@ class MacOsCompatibilityTests(unittest.TestCase):
 
     def test_collect_hardware_profile_uses_friendly_processor_name(self) -> None:
         with (
-            mock.patch("common.hardware.network.resolve_local_ip", return_value="10.0.0.2"),
-            mock.patch("common.hardware.network.get_local_mac_address", return_value="aa:bb:cc:dd:ee:ff"),
-            mock.patch("common.hardware.socket.gethostname", return_value="worker-a"),
-            mock.patch("common.hardware.platform.system", return_value="Darwin"),
-            mock.patch("common.hardware.platform.release", return_value="25.2.0"),
-            mock.patch("common.hardware.platform.machine", return_value="arm64"),
-            mock.patch("common.hardware.detect_processor_name", return_value="Apple M1 Pro"),
-            mock.patch("common.hardware._detect_total_memory_bytes", return_value=17179869184),
-            mock.patch("common.hardware.os.cpu_count", return_value=10),
+            mock.patch("core.hardware.network.resolve_local_ip", return_value="10.0.0.2"),
+            mock.patch("core.hardware.network.get_local_mac_address", return_value="aa:bb:cc:dd:ee:ff"),
+            mock.patch("core.hardware.socket.gethostname", return_value="worker-a"),
+            mock.patch("core.hardware.platform.system", return_value="Darwin"),
+            mock.patch("core.hardware.platform.release", return_value="25.2.0"),
+            mock.patch("core.hardware.platform.machine", return_value="arm64"),
+            mock.patch("core.hardware.detect_processor_name", return_value="Apple M1 Pro"),
+            mock.patch("core.hardware._detect_total_memory_bytes", return_value=17179869184),
+            mock.patch("core.hardware.os.cpu_count", return_value=10),
         ):
             profile = collect_hardware_profile("10.0.0.5", 52020)
 

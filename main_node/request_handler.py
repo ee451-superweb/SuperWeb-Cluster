@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from adapters.audit_log import write_audit_event
-from app.constants import (
+from core.constants import (
     CONV2D_CLIENT_RESPONSE_STATS_ONLY,
     CONV2D_STATS_MAX_SAMPLES,
     MAIN_NODE_NAME,
@@ -28,8 +28,8 @@ from app.constants import (
     STATUS_NOT_FOUND,
     STATUS_OK,
 )
-from app.tracing import trace_function
-from common.work_partition import partition_contiguous_range
+from core.tracing import trace_function
+from core.work_partition import partition_contiguous_range
 from compute_node.input_matrix.gemv import build_input_matrix_spec as build_gemv_input_matrix_spec
 from compute_node.compute_methods.conv2d.executor import load_named_workload_spec
 from main_node.dispatcher import WorkerTaskSlice

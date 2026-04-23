@@ -9,8 +9,8 @@ import socket
 import subprocess
 
 from adapters import network
-from common.types import HardwareProfile
-from app.tracing import trace_function
+from core.types import HardwareProfile
+from core.tracing import trace_function
 
 
 def _detect_total_memory_bytes() -> int:

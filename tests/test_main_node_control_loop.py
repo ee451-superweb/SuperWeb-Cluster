@@ -6,10 +6,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from common.float32_codec import pack_float32_values, unpack_float32_bytes
-from common.types import ComputeHardwarePerformance, ComputePerformanceSummary, DiscoveryResult, HardwareProfile
-from app.config import AppConfig
-from app.constants import (
+from core.float32_codec import pack_float32_values, unpack_float32_bytes
+from core.types import ComputeHardwarePerformance, ComputePerformanceSummary, DiscoveryResult, HardwareProfile
+from core.config import AppConfig
+from core.constants import (
     COMPUTE_NODE_NAME,
     DEFAULT_TCP_PORT,
     MAIN_NODE_NAME,

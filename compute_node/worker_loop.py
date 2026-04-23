@@ -16,10 +16,10 @@ from functools import partial
 from pathlib import Path
 
 from adapters.audit_log import write_audit_event
-from app.config import AppConfig
-from app.tracing import trace_function
-from common.hardware import collect_hardware_profile
-from common.types import DiscoveryResult
+from core.config import AppConfig
+from core.tracing import trace_function
+from core.hardware import collect_hardware_profile
+from core.types import DiscoveryResult
 from compute_node.task_router import TaskExecutionRouter
 from compute_node.worker_handlers import build_default_method_handlers
 from compute_node.heartbeat import WorkerHeartbeat

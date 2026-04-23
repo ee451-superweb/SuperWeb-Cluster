@@ -23,7 +23,7 @@ import time
 import unittest
 from unittest import mock
 
-from app import supervisor_heartbeat
+from supervision import supervisor_heartbeat
 
 
 def _connect_writer(port: int) -> socket.socket:

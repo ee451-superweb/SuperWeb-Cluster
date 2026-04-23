@@ -19,10 +19,10 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
-from common.process_exit import classify_exit_code
+from core.process_exit import classify_exit_code
 
-from app.constants import DX12_BACKEND_DISABLED_REASON
-from common.work_partition import partition_contiguous_range
+from core.constants import DX12_BACKEND_DISABLED_REASON
+from core.work_partition import partition_contiguous_range
 from compute_node.compute_methods.gemv import (
     CUDA_EXECUTABLE_PATH,
     GEMV_METHOD_DIR,
@@ -36,7 +36,7 @@ from compute_node.input_matrix.gemv import (
 )
 from compute_node.performance_metrics.gemv.config import DATASET_DIR as GEMV_DATASET_DIR
 from compute_node.performance_metrics.performance_summary import RuntimeProcessorInventory, RuntimeProcessorProfile, load_runtime_processor_inventory
-from app.constants import METHOD_GEMV
+from core.constants import METHOD_GEMV
 from wire.internal_protocol.transport import TaskAssign, TaskResult
 
 ROOT_DIR = Path(__file__).resolve().parent

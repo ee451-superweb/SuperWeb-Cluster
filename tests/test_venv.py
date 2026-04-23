@@ -11,13 +11,13 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from app import venv
+from core import venv
 
 
 class RuntimeEnvironmentTests(unittest.TestCase):
     def test_relaunch_skips_when_project_python_is_missing(self) -> None:
         with mock.patch(
-            "app.venv.project_python_path",
+            "core.venv.project_python_path",
             return_value=Path("C:/missing/.venv/Scripts/python.exe"),
         ):
             result = venv.relaunch_with_project_python_if_needed(["--help"])
@@ -27,11 +27,11 @@ class RuntimeEnvironmentTests(unittest.TestCase):
     def test_relaunch_skips_when_already_using_project_python(self) -> None:
         with (
             mock.patch(
-                "app.venv.project_python_path",
+                "core.venv.project_python_path",
                 return_value=Path("C:/repo/.venv/Scripts/python.exe"),
             ),
             mock.patch(
-                "app.venv.current_python_uses_project_venv",
+                "core.venv.current_python_uses_project_venv",
                 return_value=True,
             ),
         ):
@@ -42,11 +42,11 @@ class RuntimeEnvironmentTests(unittest.TestCase):
     def test_relaunch_uses_project_python_when_available(self) -> None:
         with (
             mock.patch(
-                "app.venv.project_python_path",
+                "core.venv.project_python_path",
                 return_value=Path("C:/repo/.venv/Scripts/python.exe"),
             ),
             mock.patch(
-                "app.venv.current_python_uses_project_venv",
+                "core.venv.current_python_uses_project_venv",
                 return_value=False,
             ),
             mock.patch(
@@ -54,7 +54,7 @@ class RuntimeEnvironmentTests(unittest.TestCase):
                 return_value=True,
             ),
             mock.patch(
-                "app.venv.subprocess.run",
+                "core.venv.subprocess.run",
                 return_value=mock.Mock(returncode=0),
             ) as run_mock,
         ):

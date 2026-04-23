@@ -11,8 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from app.constants import METHOD_GEMV
-from common.types import ComputeHardwarePerformance, ComputePerformanceSummary, MethodPerformanceSummary
+from core.constants import METHOD_GEMV
+from core.types import ComputeHardwarePerformance, ComputePerformanceSummary, MethodPerformanceSummary
 
 DEFAULT_RESULT_PATH = Path(__file__).resolve().parent / "performance_metrics" / "result.json"
 WEAK_PROCESSOR_THRESHOLD = 0.5

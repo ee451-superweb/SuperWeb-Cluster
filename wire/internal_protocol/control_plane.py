@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from dataclasses import InitVar, dataclass
 
-from app.constants import METHOD_GEMV, METHOD_CONV2D
-from common.types import (
+from core.constants import METHOD_GEMV, METHOD_CONV2D
+from core.types import (
     ComputePerformanceSummary,
     HardwareProfile,
 )

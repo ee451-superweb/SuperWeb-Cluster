@@ -7,9 +7,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from common.types import DiscoveryResult, FirewallStatus, PlatformInfo
-from app.config import AppConfig
-from app.supervisor import Supervisor
+from core.types import DiscoveryResult, FirewallStatus, PlatformInfo
+from core.config import AppConfig
+from supervision.supervisor import Supervisor
 
 
 def _write_result_json(path: Path, *, usable_backends_by_method: dict[str, list[str]]) -> None:
@@ -50,9 +50,9 @@ class SupervisorTests(unittest.TestCase):
             logger=mock.Mock(),
         )
 
-    @mock.patch("app.supervisor.Supervisor.register_signal_handlers")
-    @mock.patch("app.supervisor.Supervisor._join_main_node")
-    @mock.patch("app.supervisor.Supervisor._discover_with_retries")
+    @mock.patch("supervision.supervisor.Supervisor.register_signal_handlers")
+    @mock.patch("supervision.supervisor.Supervisor._join_main_node")
+    @mock.patch("supervision.supervisor.Supervisor._discover_with_retries")
     def test_discover_success_enters_compute_runtime(
         self,
         discover_with_retries_mock: mock.Mock,
@@ -75,8 +75,8 @@ class SupervisorTests(unittest.TestCase):
         self.assertTrue(result.success)
         join_main_node_mock.assert_called_once()
 
-    @mock.patch("app.supervisor.Supervisor.register_signal_handlers")
-    @mock.patch("app.supervisor.Supervisor._promote_to_main_node")
+    @mock.patch("supervision.supervisor.Supervisor.register_signal_handlers")
+    @mock.patch("supervision.supervisor.Supervisor._promote_to_main_node")
     def test_announce_role_enters_main_node_runtime(
         self,
         promote_to_main_node_mock: mock.Mock,
@@ -91,9 +91,9 @@ class SupervisorTests(unittest.TestCase):
         self.assertTrue(result.success)
         promote_to_main_node_mock.assert_called_once()
 
-    @mock.patch("app.supervisor.time.sleep")
-    @mock.patch("app.supervisor.random.uniform", return_value=1.75)
-    @mock.patch("app.supervisor.run_pairing")
+    @mock.patch("supervision.supervisor.time.sleep")
+    @mock.patch("supervision.supervisor.random.uniform", return_value=1.75)
+    @mock.patch("supervision.supervisor.run_pairing")
     def test_discover_with_retries_uses_jittered_sleep_between_attempts(
         self,
         run_pairing_mock: mock.Mock,
@@ -325,7 +325,7 @@ class SupervisorCapacityPlanningTests(unittest.TestCase):
             )
         fake_process = mock.Mock(pid=4242)
         fake_process.wait.return_value = 0
-        with mock.patch("app.supervisor.subprocess.Popen", return_value=fake_process) as popen_mock:
+        with mock.patch("supervision.supervisor.subprocess.Popen", return_value=fake_process) as popen_mock:
             supervisor._spawn_peer("cpu")
         if supervisor._peer_watcher_thread is not None:
             supervisor._peer_watcher_thread.join(timeout=2.0)
@@ -401,8 +401,8 @@ class SupervisorCapacityPlanningTests(unittest.TestCase):
             )
         fake_process = mock.Mock(pid=1)
         fake_process.wait.return_value = 0
-        with mock.patch("app.supervisor.subprocess.Popen", return_value=fake_process) as popen_mock, \
-             mock.patch("app.supervisor.sys.platform", "win32"):
+        with mock.patch("supervision.supervisor.subprocess.Popen", return_value=fake_process) as popen_mock, \
+             mock.patch("supervision.supervisor.sys.platform", "win32"):
             supervisor._spawn_peer("cuda")
         if supervisor._peer_watcher_thread is not None:
             supervisor._peer_watcher_thread.join(timeout=2.0)
@@ -438,7 +438,7 @@ class SupervisorCapacityPlanningTests(unittest.TestCase):
         supervisor = self._build_supervisor(
             config=AppConfig(peer_process=True),
         )
-        with mock.patch("app.supervisor.cleanup_rules") as cleanup_mock:
+        with mock.patch("supervision.supervisor.cleanup_rules") as cleanup_mock:
             status = supervisor.shutdown()
         cleanup_mock.assert_not_called()
         self.assertFalse(status.applied)
@@ -448,7 +448,7 @@ class SupervisorCapacityPlanningTests(unittest.TestCase):
         supervisor = self._build_supervisor(
             config=AppConfig(peer_process=False),
         )
-        with mock.patch("app.supervisor.cleanup_rules") as cleanup_mock:
+        with mock.patch("supervision.supervisor.cleanup_rules") as cleanup_mock:
             cleanup_mock.return_value = FirewallStatus(
                 supported=True,
                 applied=True,
@@ -478,7 +478,7 @@ class SupervisorCapacityPlanningTests(unittest.TestCase):
         fake_proc = mock.Mock()
         fake_proc.pid = 4242
         fake_proc.wait.return_value = -11  # SIGSEGV equivalent on posix; classifier handles it
-        with mock.patch("app.supervisor.subprocess.Popen", return_value=fake_proc):
+        with mock.patch("supervision.supervisor.subprocess.Popen", return_value=fake_proc):
             supervisor._spawn_peer("cuda")
         watcher = supervisor._peer_watcher_thread
         self.assertIsNotNone(watcher)
@@ -516,7 +516,7 @@ class SupervisorCapacityPlanningTests(unittest.TestCase):
         fake_proc.pid = 4243
         fake_proc.wait.side_effect = _blocking_wait
         fake_proc.poll.return_value = None
-        with mock.patch("app.supervisor.subprocess.Popen", return_value=fake_proc):
+        with mock.patch("supervision.supervisor.subprocess.Popen", return_value=fake_proc):
             supervisor._spawn_peer("cuda")
         # Mark terminate requested before unblocking wait, mirroring shutdown().
         supervisor._peer_terminate_requested = True
@@ -542,8 +542,8 @@ class SupervisorCapacityPlanningTests(unittest.TestCase):
             )
         fake_process = mock.Mock(pid=1)
         fake_process.wait.return_value = 0
-        with mock.patch("app.supervisor.subprocess.Popen", return_value=fake_process) as popen_mock, \
-             mock.patch("app.supervisor.sys.platform", "win32"):
+        with mock.patch("supervision.supervisor.subprocess.Popen", return_value=fake_process) as popen_mock, \
+             mock.patch("supervision.supervisor.sys.platform", "win32"):
             supervisor._spawn_peer("cuda")
         if supervisor._peer_watcher_thread is not None:
             supervisor._peer_watcher_thread.join(timeout=2.0)
@@ -594,7 +594,7 @@ class SupervisorPeerHeartbeatTests(SupervisorCapacityPlanningTests):
         Once exhausted, further calls return ``HEARTBEAT_CLOSED`` so the
         watcher exits cleanly rather than spinning forever in tests.
         """
-        from app.supervisor_heartbeat import HEARTBEAT_CLOSED
+        from supervision.supervisor_heartbeat import HEARTBEAT_CLOSED
 
         listener = mock.Mock()
         listener.accept.return_value = accept_result
@@ -633,7 +633,7 @@ class SupervisorPeerHeartbeatTests(SupervisorCapacityPlanningTests):
         supervisor = self._spawned_supervisor()
         fake_process = mock.Mock(pid=9999)
         fake_process.wait.return_value = 0
-        with mock.patch("app.supervisor.subprocess.Popen", return_value=fake_process) as popen_mock:
+        with mock.patch("supervision.supervisor.subprocess.Popen", return_value=fake_process) as popen_mock:
             supervisor._spawn_peer("cuda")
         # Keep the watcher from dangling on accept for the full 30s timeout.
         if supervisor._peer_heartbeat_listener is not None:
@@ -664,7 +664,7 @@ class SupervisorPeerHeartbeatTests(SupervisorCapacityPlanningTests):
         # poll()==None is the definition of "hung", and the supervisor must
         # dump+kill. Note: TIMEOUT (not CLOSED) — the hang signal is the
         # silence of a peer whose socket is still open.
-        from app.supervisor_heartbeat import HEARTBEAT_OK, HEARTBEAT_TIMEOUT
+        from supervision.supervisor_heartbeat import HEARTBEAT_OK, HEARTBEAT_TIMEOUT
 
         listener = self._fake_listener(
             accept_result=True,
@@ -678,7 +678,7 @@ class SupervisorPeerHeartbeatTests(SupervisorCapacityPlanningTests):
         )
         supervisor, fake_process = self._spawn_with_fake_listener(listener)
         with mock.patch(
-            "app.supervisor.dump_python_stack",
+            "supervision.supervisor.dump_python_stack",
             return_value="Thread 0x1: blocked in cuda_dispatch",
         ) as dump_mock:
             supervisor._watch_peer_heartbeat(listener, fake_process, "cuda")
@@ -691,14 +691,14 @@ class SupervisorPeerHeartbeatTests(SupervisorCapacityPlanningTests):
         # read four EOFs in the same millisecond and declare a hang. Must
         # now treat CLOSED as "peer is going away" and hand off to the
         # exit-code watcher without dumping or terminating.
-        from app.supervisor_heartbeat import HEARTBEAT_CLOSED, HEARTBEAT_OK
+        from supervision.supervisor_heartbeat import HEARTBEAT_CLOSED, HEARTBEAT_OK
 
         listener = self._fake_listener(
             accept_result=True,
             heartbeats=[HEARTBEAT_OK, HEARTBEAT_CLOSED],
         )
         supervisor, fake_process = self._spawn_with_fake_listener(listener)
-        with mock.patch("app.supervisor.dump_python_stack") as dump_mock:
+        with mock.patch("supervision.supervisor.dump_python_stack") as dump_mock:
             supervisor._watch_peer_heartbeat(listener, fake_process, "cuda")
         dump_mock.assert_not_called()
         fake_process.terminate.assert_not_called()
@@ -707,7 +707,7 @@ class SupervisorPeerHeartbeatTests(SupervisorCapacityPlanningTests):
         # A transient GC pause or CPU spike can miss one or two heartbeats;
         # a recovery byte must clear the counter so transient stalls do not
         # kill otherwise-healthy peers.
-        from app.supervisor_heartbeat import HEARTBEAT_OK, HEARTBEAT_TIMEOUT
+        from supervision.supervisor_heartbeat import HEARTBEAT_OK, HEARTBEAT_TIMEOUT
 
         listener = mock.Mock()
         listener.accept.return_value = True
@@ -724,7 +724,7 @@ class SupervisorPeerHeartbeatTests(SupervisorCapacityPlanningTests):
             ],
             supervisor,
         )
-        with mock.patch("app.supervisor.dump_python_stack") as dump_mock:
+        with mock.patch("supervision.supervisor.dump_python_stack") as dump_mock:
             supervisor._watch_peer_heartbeat(listener, fake_process, "cuda")
         dump_mock.assert_not_called()
         fake_process.terminate.assert_not_called()
@@ -734,7 +734,7 @@ class SupervisorPeerHeartbeatTests(SupervisorCapacityPlanningTests):
         # process has in the meantime exited. poll() returning non-None
         # means "the exit-code watcher is about to / already has logged the
         # cause" — no dump, no terminate.
-        from app.supervisor_heartbeat import HEARTBEAT_OK, HEARTBEAT_TIMEOUT
+        from supervision.supervisor_heartbeat import HEARTBEAT_OK, HEARTBEAT_TIMEOUT
 
         listener = self._fake_listener(
             accept_result=True,
@@ -742,7 +742,7 @@ class SupervisorPeerHeartbeatTests(SupervisorCapacityPlanningTests):
         )
         supervisor, fake_process = self._spawn_with_fake_listener(listener)
         fake_process.poll.side_effect = [None, 0]
-        with mock.patch("app.supervisor.dump_python_stack") as dump_mock:
+        with mock.patch("supervision.supervisor.dump_python_stack") as dump_mock:
             supervisor._watch_peer_heartbeat(listener, fake_process, "cuda")
         dump_mock.assert_not_called()
         fake_process.terminate.assert_not_called()
@@ -764,9 +764,9 @@ def _make_draining_side_effect(script: list[str], supervisor: Supervisor):
     it to exit deterministically once the scripted sequence is consumed;
     flipping ``_shutdown_requested`` after the last scripted call is the
     smallest signal that matches the real exit path. ``script`` contains
-    tri-state values from :mod:`app.supervisor_heartbeat`.
+    tri-state values from :mod:`supervision.supervisor_heartbeat`.
     """
-    from app.supervisor_heartbeat import HEARTBEAT_CLOSED
+    from supervision.supervisor_heartbeat import HEARTBEAT_CLOSED
 
     remaining = list(script)
 
