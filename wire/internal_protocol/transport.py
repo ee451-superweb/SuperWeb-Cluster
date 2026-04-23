@@ -41,6 +41,8 @@ from wire.external_protocol.control_plane import (
     ClientRequest,
     ClientRequestOk,
     ClientResponse,
+    GemmRequestPayload,
+    GemmResponsePayload,
     GemvRequestPayload,
     GemvResponsePayload,
     Conv2dRequestPayload,
@@ -52,6 +54,8 @@ from wire.external_protocol.data_plane import ArtifactDescriptor
 from wire.internal_protocol.common import MessageKind, NodeStatus, RuntimeEnvelope, TransferMode
 from wire.internal_protocol.control_plane import (
     ArtifactRelease,
+    GemmResultPayload,
+    GemmTaskPayload,
     GemvResultPayload,
     GemvTaskPayload,
     Heartbeat,
@@ -283,7 +287,7 @@ def build_client_request(
     stride: int = 1,
     conv2d_client_response_mode: int = 0,
     conv2d_stats_max_samples: int = 0,
-    request_payload: GemvRequestPayload | Conv2dRequestPayload | None = None,
+    request_payload: GemvRequestPayload | Conv2dRequestPayload | GemmRequestPayload | None = None,
 ) -> RuntimeEnvelope:
     """Use this when a client submits one structured compute request."""
     if timestamp_ms is None:
@@ -375,7 +379,7 @@ def build_client_response(
     elapsed_ms: int = 0,
     result_artifact_id: str = "",
     result_artifact: ArtifactDescriptor | None = None,
-    response_payload: GemvResponsePayload | Conv2dResponsePayload | None = None,
+    response_payload: GemvResponsePayload | Conv2dResponsePayload | GemmResponsePayload | None = None,
     timing: ResponseTiming | None = None,
 ) -> RuntimeEnvelope:
     """Use this when the main node replies to CLIENT_JOIN or CLIENT_REQUEST."""
@@ -442,7 +446,12 @@ def build_task_assign(
     padding: int = 0,
     stride: int = 1,
     weight_data: bytes = b"",
-    task_payload: GemvTaskPayload | Conv2dTaskPayload | None = None,
+    m_start: int = 0,
+    m_end: int = 0,
+    m: int = 0,
+    n: int = 0,
+    k: int = 0,
+    task_payload: GemvTaskPayload | Conv2dTaskPayload | GemmTaskPayload | None = None,
 ) -> RuntimeEnvelope:
     """Use this when the main node dispatches one worker slice of a client request."""
     if timestamp_ms is None:
@@ -482,6 +491,11 @@ def build_task_assign(
             padding=padding,
             stride=stride,
             weight_data=weight_data,
+            m_start=m_start,
+            m_end=m_end,
+            m=m,
+            n=n,
+            k=k,
         ),
     )
 
@@ -555,9 +569,12 @@ def build_task_result(
     output_w: int = 0,
     result_artifact_id: str = "",
     result_artifact: ArtifactDescriptor | None = None,
-    result_payload: GemvResultPayload | Conv2dResultPayload | None = None,
+    result_payload: GemvResultPayload | Conv2dResultPayload | GemmResultPayload | None = None,
     computation_ms: int = 0,
     peripheral_ms: int = 0,
+    m_start: int = 0,
+    m_end: int = 0,
+    method: str = "",
 ) -> RuntimeEnvelope:
     """Use this when a worker completes one assigned task slice."""
     if timestamp_ms is None:
@@ -589,6 +606,9 @@ def build_task_result(
             result_artifact_id=result_artifact_id,
             computation_ms=computation_ms,
             peripheral_ms=peripheral_ms,
+            m_start=m_start,
+            m_end=m_end,
+            method=method,
         ),
     )
 
@@ -681,6 +701,10 @@ __all__ = [
     "ClientRequest",
     "ClientRequestOk",
     "ClientResponse",
+    "GemmRequestPayload",
+    "GemmResponsePayload",
+    "GemmResultPayload",
+    "GemmTaskPayload",
     "GemvRequestPayload",
     "GemvResponsePayload",
     "GemvResultPayload",

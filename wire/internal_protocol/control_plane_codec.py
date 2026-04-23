@@ -363,6 +363,78 @@ def _from_pb_response_timing(payload: runtime_pb2.ResponseTiming):
     )
 
 
+def _to_pb_gemm_request_payload(payload) -> runtime_pb2.GemmRequestPayload:
+    """Encode a GEMM client-request payload into protobuf form."""
+    return runtime_pb2.GemmRequestPayload()
+
+
+def _from_pb_gemm_request_payload(payload: runtime_pb2.GemmRequestPayload):
+    """Decode a generated GEMM client-request payload into the internal model."""
+    runtime = _runtime()
+    return runtime.GemmRequestPayload()
+
+
+def _to_pb_gemm_response_payload(payload) -> runtime_pb2.GemmResponsePayload:
+    """Encode a GEMM client-response payload into protobuf form."""
+    return runtime_pb2.GemmResponsePayload(
+        output_length=payload.output_length,
+        output_vector=payload.output_vector,
+    )
+
+
+def _from_pb_gemm_response_payload(payload: runtime_pb2.GemmResponsePayload):
+    """Decode a generated GEMM client-response payload into the internal model."""
+    runtime = _runtime()
+    return runtime.GemmResponsePayload(
+        output_length=payload.output_length,
+        output_vector=payload.output_vector,
+    )
+
+
+def _to_pb_gemm_task_payload(payload) -> runtime_pb2.GemmTaskPayload:
+    """Encode a GEMM task payload into protobuf form."""
+    return runtime_pb2.GemmTaskPayload(
+        m_start=payload.m_start,
+        m_end=payload.m_end,
+        m=payload.m,
+        n=payload.n,
+        k=payload.k,
+    )
+
+
+def _from_pb_gemm_task_payload(payload: runtime_pb2.GemmTaskPayload):
+    """Decode a generated GEMM task payload into the internal model."""
+    runtime = _runtime()
+    return runtime.GemmTaskPayload(
+        m_start=payload.m_start,
+        m_end=payload.m_end,
+        m=payload.m,
+        n=payload.n,
+        k=payload.k,
+    )
+
+
+def _to_pb_gemm_result_payload(payload) -> runtime_pb2.GemmResultPayload:
+    """Encode a GEMM task-result payload into protobuf form."""
+    return runtime_pb2.GemmResultPayload(
+        m_start=payload.m_start,
+        m_end=payload.m_end,
+        output_length=payload.output_length,
+        output_vector=payload.output_vector,
+    )
+
+
+def _from_pb_gemm_result_payload(payload: runtime_pb2.GemmResultPayload):
+    """Decode a generated GEMM task-result payload into the internal model."""
+    runtime = _runtime()
+    return runtime.GemmResultPayload(
+        m_start=payload.m_start,
+        m_end=payload.m_end,
+        output_length=payload.output_length,
+        output_vector=payload.output_vector,
+    )
+
+
 def _to_pb_gemv_task_payload(payload) -> runtime_pb2.GemvTaskPayload:
     """Use this during protobuf encoding to convert an GEMV task payload.
 
@@ -608,6 +680,10 @@ def encode_envelope(message) -> bytes:
             envelope.client_request.conv2d.CopyFrom(
                 _to_pb_conv2d_request_payload(message.client_request.conv2d_payload)
             )
+        elif message.client_request.gemm_payload is not None:
+            envelope.client_request.gemm.CopyFrom(
+                _to_pb_gemm_request_payload(message.client_request.gemm_payload)
+            )
     elif message.kind == runtime.MessageKind.CLIENT_RESPONSE:
         if message.client_response is None:
             raise ValueError("CLIENT_RESPONSE envelope missing payload")
@@ -634,6 +710,10 @@ def encode_envelope(message) -> bytes:
         elif message.client_response.conv2d_payload is not None:
             envelope.client_response.conv2d.CopyFrom(
                 _to_pb_conv2d_response_payload(message.client_response.conv2d_payload)
+            )
+        elif message.client_response.gemm_payload is not None:
+            envelope.client_response.gemm.CopyFrom(
+                _to_pb_gemm_response_payload(message.client_response.gemm_payload)
             )
         if message.client_response.result_artifact is not None:
             envelope.client_response.result_artifact.CopyFrom(
@@ -667,6 +747,10 @@ def encode_envelope(message) -> bytes:
         elif message.task_assign.conv2d_payload is not None:
             envelope.task_assign.conv2d.CopyFrom(
                 _to_pb_conv2d_task_payload(message.task_assign.conv2d_payload)
+            )
+        elif message.task_assign.gemm_payload is not None:
+            envelope.task_assign.gemm.CopyFrom(
+                _to_pb_gemm_task_payload(message.task_assign.gemm_payload)
             )
     elif message.kind == runtime.MessageKind.TASK_ACCEPT:
         if message.task_accept is None:
@@ -705,6 +789,10 @@ def encode_envelope(message) -> bytes:
         elif message.task_result.conv2d_payload is not None:
             envelope.task_result.conv2d.CopyFrom(
                 _to_pb_conv2d_result_payload(message.task_result.conv2d_payload)
+            )
+        elif message.task_result.gemm_payload is not None:
+            envelope.task_result.gemm.CopyFrom(
+                _to_pb_gemm_result_payload(message.task_result.gemm_payload)
             )
         if message.task_result.result_artifact is not None:
             envelope.task_result.result_artifact.CopyFrom(
@@ -826,6 +914,10 @@ def parse_envelope(payload: bytes):
             request_payload = _from_pb_conv2d_request_payload(
                 envelope_pb.client_request.conv2d
             )
+        elif envelope_pb.client_request.HasField("gemm"):
+            request_payload = _from_pb_gemm_request_payload(
+                envelope_pb.client_request.gemm
+            )
         client_request = runtime.ClientRequest(
             request_id=envelope_pb.client_request.request_id,
             client_name=envelope_pb.client_request.client_name,
@@ -846,6 +938,10 @@ def parse_envelope(payload: bytes):
         elif envelope_pb.client_response.HasField("conv2d"):
             response_payload = _from_pb_conv2d_response_payload(
                 envelope_pb.client_response.conv2d
+            )
+        elif envelope_pb.client_response.HasField("gemm"):
+            response_payload = _from_pb_gemm_response_payload(
+                envelope_pb.client_response.gemm
             )
         client_response = runtime.ClientResponse(
             request_id=envelope_pb.client_response.request_id,
@@ -883,6 +979,10 @@ def parse_envelope(payload: bytes):
         elif envelope_pb.task_assign.HasField("conv2d"):
             task_payload = _from_pb_conv2d_task_payload(
                 envelope_pb.task_assign.conv2d
+            )
+        elif envelope_pb.task_assign.HasField("gemm"):
+            task_payload = _from_pb_gemm_task_payload(
+                envelope_pb.task_assign.gemm
             )
         task_assign = runtime.TaskAssign(
             request_id=envelope_pb.task_assign.request_id,
@@ -925,6 +1025,10 @@ def parse_envelope(payload: bytes):
         elif envelope_pb.task_result.HasField("conv2d"):
             result_payload = _from_pb_conv2d_result_payload(
                 envelope_pb.task_result.conv2d
+            )
+        elif envelope_pb.task_result.HasField("gemm"):
+            result_payload = _from_pb_gemm_result_payload(
+                envelope_pb.task_result.gemm
             )
         task_result = runtime.TaskResult(
             request_id=envelope_pb.task_result.request_id,
