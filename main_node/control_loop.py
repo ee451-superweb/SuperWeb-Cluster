@@ -29,12 +29,12 @@ from app.constants import (
 from discovery import multicast
 from main_node import client_session_service as client_session_service_module
 from main_node import connection_service as connection_service_module
-from main_node import handlers as runtime_handlers_module
+from main_node import main_handlers as runtime_handlers_module
 from main_node.aggregator import ResultAggregator
 from main_node.client_session_service import ClientSessionService
 from main_node.connection_service import RuntimeConnectionService
 from main_node.dispatcher import TaskDispatcher, WorkerTaskSlice
-from main_node.handlers import RuntimeConnectionHandler
+from main_node.main_handlers import RuntimeConnectionHandler
 from main_node.heartbeat import HeartbeatCoordinator
 from main_node.request_handler import ClientRequestHandler
 from main_node.registry import ClusterRegistry, RuntimePeerConnection

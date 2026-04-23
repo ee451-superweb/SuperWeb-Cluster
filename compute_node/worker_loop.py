@@ -21,7 +21,7 @@ from app.tracing import trace_function
 from common.hardware import collect_hardware_profile
 from common.types import DiscoveryResult
 from compute_node.executor import TaskExecutionRouter
-from compute_node.handlers import build_default_method_handlers
+from compute_node.worker_handlers import build_default_method_handlers
 from compute_node.heartbeat import WorkerHeartbeat
 from compute_node.performance_summary import load_compute_performance_summary, load_runtime_processor_inventory
 from compute_node.worker_services import (

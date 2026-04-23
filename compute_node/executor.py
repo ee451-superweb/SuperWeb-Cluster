@@ -6,7 +6,7 @@ method-handler registry for local task execution and shutdown.
 
 from __future__ import annotations
 
-from compute_node.handlers import MethodHandlerRegistry
+from compute_node.worker_handlers import MethodHandlerRegistry
 
 
 class TaskExecutionRouter:
