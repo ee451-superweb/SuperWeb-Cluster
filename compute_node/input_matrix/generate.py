@@ -20,7 +20,7 @@ from adapters.process import enable_utf8_mode
 
 enable_utf8_mode()
 
-from app.runtime_environment import relaunch_with_project_python_if_needed
+from app.venv import relaunch_with_project_python_if_needed
 from app.constants import METHOD_GEMV, METHOD_CONV2D
 from compute_node.input_matrix.gemv.generate import main as generate_gemv_main
 from compute_node.input_matrix.conv2d.generate import main as generate_conv2d_main

@@ -21,7 +21,7 @@ from adapters.process import enable_utf8_mode
 
 enable_utf8_mode()
 
-from app.runtime_environment import relaunch_with_project_python_if_needed
+from app.venv import relaunch_with_project_python_if_needed
 from compute_node.performance_metrics.conv2d.config import DATASET_DIR
 from compute_node.input_matrix.conv2d import (
     build_dataset_layout,

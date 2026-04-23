@@ -22,7 +22,7 @@ from adapters.process import enable_utf8_mode, python_utf8_command
 
 enable_utf8_mode()
 
-from app.runtime_environment import relaunch_with_project_python_if_needed
+from app.venv import relaunch_with_project_python_if_needed
 from setup import active_python_path
 from app.constants import DX12_BACKEND_DISABLED_REASON, METHOD_GEMV, METHOD_CONV2D
 from compute_node.performance_metrics.benchmark_status import (
