@@ -23,7 +23,7 @@ from common.types import DiscoveryResult
 from compute_node.task_router import TaskExecutionRouter
 from compute_node.worker_handlers import build_default_method_handlers
 from compute_node.heartbeat import WorkerHeartbeat
-from compute_node.performance_summary import load_compute_performance_summary, load_runtime_processor_inventory
+from compute_node.performance_metrics.performance_summary import load_compute_performance_summary, load_runtime_processor_inventory
 from compute_node.worker_services import (
     WorkerTaskRuntimeService,
     format_compute_performance_summary,

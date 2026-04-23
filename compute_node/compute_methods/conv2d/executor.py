@@ -43,7 +43,7 @@ from compute_node.performance_metrics.conv2d.config import (
     RESULT_PATH as TOP_LEVEL_RESULT_PATH,
 )
 from compute_node.input_matrix.conv2d import build_input_matrix_spec, normalize_size_variant
-from compute_node.performance_summary import RuntimeProcessorProfile, load_runtime_processor_inventory
+from compute_node.performance_metrics.performance_summary import RuntimeProcessorProfile, load_runtime_processor_inventory
 from setup import active_python_path
 from wire.internal_protocol.control_plane import Conv2dResultPayload
 from wire.internal_protocol.transport import TaskAssign, TaskResult, TransferMode

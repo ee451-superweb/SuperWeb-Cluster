@@ -12,7 +12,7 @@ import subprocess
 from app.constants import DX12_BACKEND_DISABLED_REASON, METHOD_CONV2D
 from compute_node.compute_methods.conv2d import executor as spatial_executor
 from compute_node.performance_metrics.conv2d.models import BenchmarkSpec as SpatialBenchmarkSpec
-from compute_node.performance_summary import RuntimeProcessorInventory, RuntimeProcessorProfile
+from compute_node.performance_metrics.performance_summary import RuntimeProcessorInventory, RuntimeProcessorProfile
 from compute_node.task_executor import GemvTaskExecutor, ProcessorTaskSlice
 from wire.internal_protocol.transport import TaskAssign, TransferMode
 

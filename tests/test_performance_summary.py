@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from compute_node.compute_methods.conv2d import executor as spatial_executor
-from compute_node.performance_summary import load_compute_performance_summary, load_runtime_processor_inventory
+from compute_node.performance_metrics.performance_summary import load_compute_performance_summary, load_runtime_processor_inventory
 
 
 class ComputeNodePerformanceSummaryTests(unittest.TestCase):
