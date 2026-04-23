@@ -21,9 +21,10 @@ from adapters.process import enable_utf8_mode
 enable_utf8_mode()
 
 from core.venv import relaunch_with_project_python_if_needed
-from core.constants import METHOD_GEMV, METHOD_CONV2D
+from core.constants import METHOD_GEMV, METHOD_CONV2D, METHOD_GEMM
 from compute_node.input_matrix.gemv.generate import main as generate_gemv_main
 from compute_node.input_matrix.conv2d.generate import main as generate_conv2d_main
+from compute_node.input_matrix.gemm.generate import main as generate_gemm_main
 
 DEFAULT_GENERATOR_WORKERS = max(1, os.cpu_count() or 1)
 DEFAULT_CHUNK_MIB = 8
@@ -38,9 +39,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate input datasets for one or more compute methods.")
     parser.add_argument(
         "--method",
-        choices=(METHOD_GEMV, METHOD_CONV2D, "all"),
+        choices=(METHOD_GEMV, METHOD_CONV2D, METHOD_GEMM, "all"),
         default="all",
-        help="Which method dataset to generate. Default: generate both in sequence.",
+        help="Which method dataset to generate. Default: generate all in sequence.",
     )
     parser.add_argument(
         "--output-dir",
@@ -99,6 +100,7 @@ def _selected_methods(method_arg: str) -> list[str]:
         return [
             METHOD_GEMV,
             METHOD_CONV2D,
+            METHOD_GEMM,
         ]
     return [method_arg]
 
@@ -144,6 +146,14 @@ def _build_gemv_args(args: argparse.Namespace) -> list[str]:
         argv.extend(["--rows", str(args.rows)])
     if args.cols is not None:
         argv.extend(["--cols", str(args.cols)])
+    return argv
+
+
+def _build_gemm_args(args: argparse.Namespace) -> list[str]:
+    """Build the forwarded CLI argument list for the GEMM generator."""
+    argv = _common_flags(args)
+    if args.output_dir is not None:
+        argv.extend(["--output-dir", str(args.output_dir)])
     return argv
 
 
@@ -211,6 +221,11 @@ def main(argv: list[str] | None = None) -> int:
             if verbose:
                 print(f"[input_matrix verbose] conv2d forwarded_args={forwarded}", flush=True)
             generate_conv2d_main(forwarded)
+        elif method_name == METHOD_GEMM:
+            forwarded = _build_gemm_args(args)
+            if verbose:
+                print(f"[input_matrix verbose] gemm forwarded_args={forwarded}", flush=True)
+            generate_gemm_main(forwarded)
         else:
             raise ValueError(f"unsupported input-matrix method: {method_name}")
     return 0
