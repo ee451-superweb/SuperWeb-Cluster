@@ -14,7 +14,7 @@ from common.types import (
     HardwareProfile,
 )
 from wire.external_protocol.data_plane import ArtifactDescriptor
-from wire.internal_protocol._model_utils import initvar_or_default
+from wire.internal_protocol.model_utils import initvar_or_default
 from wire.internal_protocol.common import NodeStatus, TransferMode
 
 

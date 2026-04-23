@@ -10,7 +10,7 @@ from dataclasses import InitVar, dataclass
 
 from app.constants import METHOD_GEMV, METHOD_CONV2D
 from wire.external_protocol.data_plane import ArtifactDescriptor
-from wire.internal_protocol._model_utils import initvar_or_default
+from wire.internal_protocol.model_utils import initvar_or_default
 
 
 @dataclass(slots=True)
