@@ -18,12 +18,12 @@ from wire.proto import superweb_cluster_runtime_pb2 as runtime_pb2
 
 
 def _runtime():
-    """Use this lazy import helper to avoid a runtime/runtime_codec circular import.
+    """Use this lazy import helper to avoid a transport/codec circular import.
 
     Args: no caller-supplied inputs.
-    Returns: The ``wire.internal_protocol.runtime_transport`` module object.
+    Returns: The ``wire.internal_protocol.transport`` module object.
     """
-    from wire.internal_protocol import runtime_transport as runtime_messages
+    from wire.internal_protocol import transport as runtime_messages
 
     return runtime_messages
 

@@ -17,7 +17,7 @@ from app.constants import (
     SUPERWEB_CLIENT_NAME,
 )
 from wire.internal_protocol.control_plane_codec import encode_envelope, parse_envelope
-from wire.internal_protocol.runtime_transport import (
+from wire.internal_protocol.transport import (
     MessageKind,
     Conv2dRequestPayload,
     Conv2dResponsePayload,

@@ -14,7 +14,7 @@ from compute_node.compute_methods.conv2d import executor as spatial_executor
 from compute_node.performance_metrics.conv2d.models import BenchmarkSpec as SpatialBenchmarkSpec
 from compute_node.performance_summary import RuntimeProcessorInventory, RuntimeProcessorProfile
 from compute_node.task_executor import GemvTaskExecutor, ProcessorTaskSlice
-from wire.internal_protocol.runtime_transport import TaskAssign, TransferMode
+from wire.internal_protocol.transport import TaskAssign, TransferMode
 
 
 class TaskExecutorCommandTests(unittest.TestCase):
