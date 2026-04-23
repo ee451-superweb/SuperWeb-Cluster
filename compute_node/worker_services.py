@@ -15,6 +15,7 @@ from pathlib import Path
 
 from adapters.audit_log import write_audit_event
 from core.constants import (
+    METHOD_GEMM,
     METHOD_GEMV,
     METHOD_CONV2D,
     RUNTIME_MSG_ARTIFACT_RELEASE,
@@ -29,6 +30,7 @@ from core.constants import (
 )
 from core.types import ComputePerformanceSummary
 from wire.internal_protocol.transport import (
+    GemmResultPayload,
     GemvResultPayload,
     MessageKind,
     NodeStatus,
@@ -342,6 +344,13 @@ class WorkerTaskRuntimeService:
                         tuple(conv2d_payload_in.stats_samples) if conv2d_payload_in is not None else ()
                     ),
                 )
+            elif task.method == METHOD_GEMM:
+                outgoing_result_payload = GemmResultPayload(
+                    m_start=task_result.m_start,
+                    m_end=task_result.m_end,
+                    output_length=task_result.output_length,
+                    output_vector=output_vector,
+                )
             else:
                 outgoing_result_payload = GemvResultPayload(
                     row_start=task_result.row_start,
@@ -362,11 +371,12 @@ class WorkerTaskRuntimeService:
                     peripheral_ms=int(getattr(task_result, "peripheral_ms", 0) or 0),
                 )
             )
-            result_scope = (
-                f"oc={task_result.start_oc}:{task_result.end_oc}"
-                if task.method == METHOD_CONV2D
-                else f"rows={task_result.row_start}:{task_result.row_end}"
-            )
+            if task.method == METHOD_CONV2D:
+                result_scope = f"oc={task_result.start_oc}:{task_result.end_oc}"
+            elif task.method == METHOD_GEMM:
+                result_scope = f"m_rows={task_result.m_start}:{task_result.m_end}"
+            else:
+                result_scope = f"rows={task_result.row_start}:{task_result.row_end}"
             write_audit_event(
                 f"{RUNTIME_MSG_TASK_RESULT} from {self.node_name} "
                 f"id={assigned_node_id} task_id={task.task_id} "

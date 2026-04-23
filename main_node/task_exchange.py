@@ -338,8 +338,16 @@ class WorkerTaskExchange:
         Conv2d requests that only need aggregated stats bypass the artifact
         plane since the worker returns a tiny inline summary instead of a full
         output tensor.
+
+        GEMM always routes through the artifact plane because even the smallest
+        variant (m=n=1024) produces a 4 MiB output that already matches the
+        default protobuf envelope budget before the wire adds header/routing
+        overhead; staying inline there intermittently trips the receiver's
+        size guard with ``invalid protobuf message size`` and fails the task.
         """
         if method == METHOD_CONV2D and not stats_only:
+            return TransferMode.ARTIFACT_REQUIRED
+        if method == METHOD_GEMM:
             return TransferMode.ARTIFACT_REQUIRED
         return TransferMode.INLINE_PREFERRED
 
