@@ -15,9 +15,10 @@ import time
 from functools import lru_cache
 from typing import Any
 
-from core.constants import METHOD_GEMV, METHOD_CONV2D
+from core.constants import METHOD_GEMM, METHOD_GEMV, METHOD_CONV2D
 from compute_node.performance_metrics.gemv.config import DISPLAY_NAME as GEMV_DISPLAY_NAME
 from compute_node.performance_metrics.conv2d.config import DISPLAY_NAME as CONV2D_DISPLAY_NAME
+from compute_node.performance_metrics.gemm.config import DISPLAY_NAME as GEMM_DISPLAY_NAME
 _DEVICE_NOTE_PATTERN = re.compile(r"device=(.+)")
 _QUOTED_DEVICE_PATTERN = re.compile(r"'([^']+)'")
 _SEARCH_VALUES_PATTERN = re.compile(r"search order: (?P<values>\[.*\])$")
@@ -668,6 +669,40 @@ def _normalize_conv2d_dataset(raw_method: dict[str, Any], dataset_root: str | No
     }
 
 
+def _normalize_gemm_dataset(raw_method: dict[str, Any], dataset_root: str | None) -> dict[str, Any]:
+    """Normalize the dataset section for a GEMM report.
+
+    GEMM pre-generates A and B from fixed seeds on every compute node, so the
+    dataset description is just the variant name, its shape, and a portable
+    artifact path for each matrix.
+
+    Args:
+        raw_method: Raw GEMM method report.
+        dataset_root: Portable dataset-root string for the report.
+
+    Returns:
+        The normalized GEMM dataset description.
+    """
+    raw_dataset = raw_method.get("dataset") or {}
+    variant = str(raw_dataset.get("variant") or "mid").strip().lower() or "mid"
+    shape = dict(raw_dataset.get("shape") or {})
+
+    def _artifact_path(kind: str) -> str | None:
+        if not dataset_root:
+            return None
+        return f"{dataset_root}/{variant}_{kind}.bin"
+
+    return {
+        "root_dir": dataset_root,
+        "variant": variant,
+        "shape": shape,
+        "artifacts": {
+            "a": _artifact_path("A"),
+            "b": _artifact_path("B"),
+        },
+    }
+
+
 def normalize_method_report(
     *,
     method_name: str,
@@ -689,7 +724,24 @@ def normalize_method_report(
     Returns:
         The normalized method report dictionary.
     """
-    if method_name == METHOD_GEMV:
+    if method_name == METHOD_GEMM:
+        display_name = GEMM_DISPLAY_NAME
+        dataset = _normalize_gemm_dataset(raw_method, dataset_root)
+        raw_workload = raw_method.get("workload", {})
+        # cuBLAS picks its own kernel; no autotune sweep. We still emit the
+        # same autotune_plan/measurement_plan keys so the downstream consumers
+        # have a stable shape — trials_run=1, no search space.
+        autotune_plan = {
+            "autotune_repeats": 0,
+            "measurement_repeats": int(raw_workload.get("measurement_repeats") or 1),
+            "workload_mode": raw_workload.get("workload_mode"),
+        }
+        measurement_plan = {
+            "measurement_repeats": int(raw_workload.get("measurement_repeats") or 1),
+            "workload_mode": raw_workload.get("workload_mode"),
+            "full_runtime_measurement": bool(raw_workload.get("full_runtime_measurement")),
+        }
+    elif method_name == METHOD_GEMV:
         display_name = GEMV_DISPLAY_NAME
         dataset = _normalize_gemv_dataset(raw_method, dataset_root)
         raw_workload = raw_method.get("workload", {})

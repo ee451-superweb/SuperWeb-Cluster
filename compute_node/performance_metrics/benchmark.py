@@ -24,7 +24,7 @@ enable_utf8_mode()
 
 from core.venv import relaunch_with_project_python_if_needed
 from setup import active_python_path
-from core.constants import DX12_BACKEND_DISABLED_REASON, METHOD_GEMV, METHOD_CONV2D
+from core.constants import DX12_BACKEND_DISABLED_REASON, METHOD_GEMM, METHOD_GEMV, METHOD_CONV2D
 from compute_node.performance_metrics.benchmark_status import (
     configure_status_environment,
     emit_status,
@@ -46,6 +46,11 @@ from compute_node.performance_metrics.conv2d.config import (
     RAW_BENCHMARK_PATH as CONV2D_BENCHMARK_PATH,
     RESULT_PATH as CONV2D_RESULT_PATH,
 )
+from compute_node.performance_metrics.gemm.config import (
+    DATASET_DIR as GEMM_DATASET_DIR,
+    RESULT_PATH as GEMM_RESULT_PATH,
+)
+from compute_node.performance_metrics.gemm import benchmark as gemm_benchmark
 from compute_node.performance_metrics.workload_modes import (
     BENCHMARK_WORKLOAD_MODE_CHOICES,
     WORKLOAD_MODE_FULL,
@@ -58,10 +63,12 @@ DEFAULT_DATASET_DIR = gemv_runner.DEFAULT_DATASET_DIR
 METHOD_RESULT_PATHS = {
     METHOD_GEMV: GEMV_RESULT_PATH,
     METHOD_CONV2D: CONV2D_RESULT_PATH,
+    METHOD_GEMM: GEMM_RESULT_PATH,
 }
 METHOD_DATASET_DIRS = {
     METHOD_GEMV: GEMV_DATASET_DIR,
     METHOD_CONV2D: CONV2D_DATASET_DIR,
+    METHOD_GEMM: GEMM_DATASET_DIR,
 }
 
 
@@ -84,10 +91,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=(
             METHOD_GEMV,
             METHOD_CONV2D,
+            METHOD_GEMM,
             "all",
         ),
         default="all",
-        help="Which method benchmark to run. Default: run both methods in sequence.",
+        help="Which method benchmark to run. Default: run every method in sequence.",
     )
     parser.add_argument(
         "--backend",
@@ -174,7 +182,7 @@ def _selected_methods(method_arg: str) -> list[str]:
         The ordered list of method names to benchmark.
     """
     if method_arg == "all":
-        return [METHOD_GEMV, METHOD_CONV2D]
+        return [METHOD_GEMV, METHOD_CONV2D, METHOD_GEMM]
     return [method_arg]
 
 
@@ -344,6 +352,52 @@ def _run_conv2d_benchmark(args: argparse.Namespace) -> dict[str, object]:
         return payload
 
 
+def _run_gemm_benchmark(args: argparse.Namespace) -> dict[str, object]:
+    """Run the cuBLAS GEMM benchmark and return its raw report.
+
+    Use this helper from the combined benchmark flow. GEMM is cuBLAS-only so
+    there is no backend sweep or autotune: the method-local benchmark just
+    runs one cudaEvent-bracketed measurement pass on the mid workload and
+    writes out the per-method ``result.json`` the loader accepts. We call
+    the benchmark module in-process and reuse its JSON as the raw report.
+
+    Args:
+        args: Parsed top-level benchmark CLI arguments.
+
+    Returns:
+        The raw JSON-like GEMM report dictionary.
+    """
+    workload_mode = getattr(args, "workload_mode", None) or WORKLOAD_MODE_FULL
+    size = "mid" if workload_mode not in {"small", "mid", "large"} else workload_mode
+    emit_status(
+        "method.gemm.dispatch",
+        status="running",
+        method=METHOD_GEMM,
+        requested_backends=["cuda"],
+        rebuild=bool(getattr(args, "rebuild", False)),
+        workload_mode=workload_mode,
+        size=size,
+    )
+    target_output = GEMM_RESULT_PATH
+    gemm_benchmark.run(
+        size=size,
+        iteration_count=gemm_benchmark.DEFAULT_ITERATION_COUNT,
+        output=target_output,
+        dataset_dir=METHOD_DATASET_DIRS[METHOD_GEMM],
+        force_rebuild=bool(getattr(args, "rebuild", False)),
+    )
+    payload = json.loads(target_output.read_text(encoding="utf-8"))
+    emit_status(
+        "method.gemm.complete",
+        status="running",
+        method=METHOD_GEMM,
+        elapsed_seconds=payload.get("benchmark_elapsed_seconds"),
+        usable_backends=payload.get("usable_backends", []),
+        ranking=payload.get("ranking", []),
+    )
+    return payload
+
+
 def _method_specific_output_path(method_name: str) -> Path:
     """Return the canonical per-method result path for a method name.
 
@@ -378,7 +432,10 @@ def _dataset_root_for_method(method_name: str, raw_report: dict[str, object]) ->
             return str(resolved.relative_to(PROJECT_ROOT)).replace("\\", "/")
         except ValueError:
             return dataset_root.replace("\\", "/")
-    return str(METHOD_DATASET_DIRS[method_name].relative_to(PROJECT_ROOT)).replace("\\", "/")
+    try:
+        return str(METHOD_DATASET_DIRS[method_name].relative_to(PROJECT_ROOT)).replace("\\", "/")
+    except ValueError:
+        return str(METHOD_DATASET_DIRS[method_name]).replace("\\", "/")
 
 
 def _normalize_results(
@@ -521,6 +578,8 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
             raw_method_reports[method_name] = _run_gemv_benchmark(args)
         elif method_name == METHOD_CONV2D:
             raw_method_reports[method_name] = _run_conv2d_benchmark(args)
+        elif method_name == METHOD_GEMM:
+            raw_method_reports[method_name] = _run_gemm_benchmark(args)
         else:
             raise ValueError(f"unsupported benchmark method: {method_name}")
         elapsed = time.perf_counter() - started
