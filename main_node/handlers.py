@@ -21,7 +21,7 @@ from app.constants import (
     RUNTIME_ROLE_CLIENT,
     RUNTIME_ROLE_WORKER,
 )
-from app.trace_utils import trace_function
+from app.tracing import trace_function
 from wire.internal_protocol.runtime_transport import MessageKind, build_client_info_reply, recv_message, send_message
 
 

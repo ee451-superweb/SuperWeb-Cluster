@@ -13,8 +13,8 @@ Scenarios:
        per pixel), also with N worker slices.
 
 Usage:
-    python scripts/bench_aggregate_io.py
-    python scripts/bench_aggregate_io.py --h 2048 --w 2048 --cout 256 --slices 5
+    python benchmarks/bench_aggregate_io.py
+    python benchmarks/bench_aggregate_io.py --h 2048 --w 2048 --cout 256 --slices 5
 """
 
 from __future__ import annotations

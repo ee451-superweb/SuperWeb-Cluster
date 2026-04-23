@@ -6,7 +6,7 @@ import subprocess
 
 from common.types import FirewallStatus
 from app.constants import WINDOWS_FIREWALL_DATA_PLANE_RULE_NAME, WINDOWS_FIREWALL_RULE_NAME
-from app.trace_utils import trace_function
+from app.tracing import trace_function
 
 
 def _inbound_rule_name() -> str:

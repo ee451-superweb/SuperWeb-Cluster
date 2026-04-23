@@ -18,7 +18,7 @@ from wire.internal_protocol.runtime_transport import (
     recv_message,
     send_message,
 )
-from app.trace_utils import trace_function
+from app.tracing import trace_function
 
 
 class WorkerSession:

@@ -10,7 +10,7 @@ import subprocess
 
 from adapters import network
 from common.types import HardwareProfile
-from app.trace_utils import trace_function
+from app.tracing import trace_function
 
 
 def _detect_total_memory_bytes() -> int:

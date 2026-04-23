@@ -23,7 +23,7 @@ import time
 import unittest
 from unittest import mock
 
-from app import peer_heartbeat
+from app import supervisor_heartbeat
 
 
 def _connect_writer(port: int) -> socket.socket:
@@ -33,7 +33,7 @@ def _connect_writer(port: int) -> socket.socket:
 
 class SupervisorHeartbeatListenerTests(unittest.TestCase):
     def test_port_is_ephemeral_and_accepts_connections(self) -> None:
-        listener = peer_heartbeat.SupervisorHeartbeatListener()
+        listener = supervisor_heartbeat.SupervisorHeartbeatListener()
         self.addCleanup(listener.close)
         self.assertGreater(listener.port, 0)
 
@@ -42,12 +42,12 @@ class SupervisorHeartbeatListenerTests(unittest.TestCase):
         self.assertTrue(listener.accept(timeout=2.0))
 
     def test_accept_returns_false_on_timeout(self) -> None:
-        listener = peer_heartbeat.SupervisorHeartbeatListener()
+        listener = supervisor_heartbeat.SupervisorHeartbeatListener()
         self.addCleanup(listener.close)
         self.assertFalse(listener.accept(timeout=0.1))
 
     def test_wait_for_heartbeat_reads_bytes(self) -> None:
-        listener = peer_heartbeat.SupervisorHeartbeatListener()
+        listener = supervisor_heartbeat.SupervisorHeartbeatListener()
         self.addCleanup(listener.close)
         client = _connect_writer(listener.port)
         self.addCleanup(client.close)
@@ -55,14 +55,14 @@ class SupervisorHeartbeatListenerTests(unittest.TestCase):
 
         client.sendall(b".")
         self.assertEqual(
-            listener.wait_for_heartbeat(timeout=2.0), peer_heartbeat.HEARTBEAT_OK
+            listener.wait_for_heartbeat(timeout=2.0), supervisor_heartbeat.HEARTBEAT_OK
         )
 
     def test_wait_for_heartbeat_times_out_when_peer_silent(self) -> None:
         # Silent-client simulates a hung peer: socket is open, thread can't
         # run, bytes don't arrive. Must return TIMEOUT (not CLOSED) so the
         # supervisor accumulates misses and eventually declares a hang.
-        listener = peer_heartbeat.SupervisorHeartbeatListener()
+        listener = supervisor_heartbeat.SupervisorHeartbeatListener()
         self.addCleanup(listener.close)
         client = _connect_writer(listener.port)
         self.addCleanup(client.close)
@@ -71,7 +71,7 @@ class SupervisorHeartbeatListenerTests(unittest.TestCase):
         start = time.monotonic()
         self.assertEqual(
             listener.wait_for_heartbeat(timeout=0.2),
-            peer_heartbeat.HEARTBEAT_TIMEOUT,
+            supervisor_heartbeat.HEARTBEAT_TIMEOUT,
         )
         # Sanity: we didn't wait way past the budget (i.e. socket timeout
         # actually applied rather than blocking forever).
@@ -82,7 +82,7 @@ class SupervisorHeartbeatListenerTests(unittest.TestCase):
         # supervisor must NOT treat as a miss. Tested against a real close,
         # not a mock, because the EOF-vs-timeout branch is what the
         # 2026-04-21 CUDA-runner incident exposed.
-        listener = peer_heartbeat.SupervisorHeartbeatListener()
+        listener = supervisor_heartbeat.SupervisorHeartbeatListener()
         self.addCleanup(listener.close)
         client = _connect_writer(listener.port)
         self.assertTrue(listener.accept(timeout=2.0))
@@ -90,17 +90,17 @@ class SupervisorHeartbeatListenerTests(unittest.TestCase):
         client.close()
         self.assertEqual(
             listener.wait_for_heartbeat(timeout=1.0),
-            peer_heartbeat.HEARTBEAT_CLOSED,
+            supervisor_heartbeat.HEARTBEAT_CLOSED,
         )
 
 
 class StartPeerHeartbeatTests(unittest.TestCase):
     def test_writer_delivers_bytes_to_listener(self) -> None:
-        listener = peer_heartbeat.SupervisorHeartbeatListener()
+        listener = supervisor_heartbeat.SupervisorHeartbeatListener()
         self.addCleanup(listener.close)
 
         # Short interval so we don't wait multiple seconds per test.
-        stop = peer_heartbeat.start_peer_heartbeat(listener.port, interval=0.05)
+        stop = supervisor_heartbeat.start_peer_heartbeat(listener.port, interval=0.05)
         self.addCleanup(lambda: stop.set() if stop is not None else None)
         self.assertIsNotNone(stop)
         self.assertTrue(listener.accept(timeout=2.0))
@@ -111,9 +111,9 @@ class StartPeerHeartbeatTests(unittest.TestCase):
         self.assertTrue(listener.wait_for_heartbeat(timeout=1.0))
 
     def test_writer_stop_event_halts_thread(self) -> None:
-        listener = peer_heartbeat.SupervisorHeartbeatListener()
+        listener = supervisor_heartbeat.SupervisorHeartbeatListener()
         self.addCleanup(listener.close)
-        stop = peer_heartbeat.start_peer_heartbeat(listener.port, interval=0.05)
+        stop = supervisor_heartbeat.start_peer_heartbeat(listener.port, interval=0.05)
         self.assertIsNotNone(stop)
         self.assertTrue(listener.accept(timeout=2.0))
 
@@ -125,7 +125,7 @@ class StartPeerHeartbeatTests(unittest.TestCase):
         # sending.
         deadline = time.monotonic() + 1.5
         while time.monotonic() < deadline:
-            if listener.wait_for_heartbeat(timeout=0.1) != peer_heartbeat.HEARTBEAT_OK:
+            if listener.wait_for_heartbeat(timeout=0.1) != supervisor_heartbeat.HEARTBEAT_OK:
                 return
         self.fail("Writer thread kept sending bytes after stop was set")
 
@@ -138,14 +138,14 @@ class StartPeerHeartbeatTests(unittest.TestCase):
         probe.close()
 
         logger = mock.Mock()
-        result = peer_heartbeat.start_peer_heartbeat(port, logger=logger)
+        result = supervisor_heartbeat.start_peer_heartbeat(port, logger=logger)
         self.assertIsNone(result)
         logger.warning.assert_called_once()
 
     def test_thread_is_named_and_daemonic(self) -> None:
-        listener = peer_heartbeat.SupervisorHeartbeatListener()
+        listener = supervisor_heartbeat.SupervisorHeartbeatListener()
         self.addCleanup(listener.close)
-        stop = peer_heartbeat.start_peer_heartbeat(listener.port, interval=0.05)
+        stop = supervisor_heartbeat.start_peer_heartbeat(listener.port, interval=0.05)
         self.addCleanup(lambda: stop.set() if stop is not None else None)
         self.assertIsNotNone(stop)
         self.assertTrue(listener.accept(timeout=2.0))
@@ -158,28 +158,28 @@ class StartPeerHeartbeatTests(unittest.TestCase):
 class StartPeerHeartbeatFromEnvTests(unittest.TestCase):
     def test_noop_when_env_missing(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop(peer_heartbeat.HEARTBEAT_PORT_ENV, None)
-            self.assertIsNone(peer_heartbeat.start_peer_heartbeat_from_env())
+            os.environ.pop(supervisor_heartbeat.HEARTBEAT_PORT_ENV, None)
+            self.assertIsNone(supervisor_heartbeat.start_peer_heartbeat_from_env())
 
     def test_noop_on_non_integer_env(self) -> None:
         logger = mock.Mock()
         with mock.patch.dict(
             os.environ,
-            {peer_heartbeat.HEARTBEAT_PORT_ENV: "not-a-port"},
+            {supervisor_heartbeat.HEARTBEAT_PORT_ENV: "not-a-port"},
             clear=False,
         ):
-            self.assertIsNone(peer_heartbeat.start_peer_heartbeat_from_env(logger=logger))
+            self.assertIsNone(supervisor_heartbeat.start_peer_heartbeat_from_env(logger=logger))
         logger.warning.assert_called_once()
 
     def test_connects_when_env_points_to_listener(self) -> None:
-        listener = peer_heartbeat.SupervisorHeartbeatListener()
+        listener = supervisor_heartbeat.SupervisorHeartbeatListener()
         self.addCleanup(listener.close)
         with mock.patch.dict(
             os.environ,
-            {peer_heartbeat.HEARTBEAT_PORT_ENV: str(listener.port)},
+            {supervisor_heartbeat.HEARTBEAT_PORT_ENV: str(listener.port)},
             clear=False,
         ):
-            stop = peer_heartbeat.start_peer_heartbeat_from_env()
+            stop = supervisor_heartbeat.start_peer_heartbeat_from_env()
         self.addCleanup(lambda: stop.set() if stop is not None else None)
         self.assertIsNotNone(stop)
         self.assertTrue(listener.accept(timeout=2.0))

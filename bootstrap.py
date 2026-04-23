@@ -37,7 +37,7 @@ from app.constants import (
     MAIN_NODE_NAME,
 )
 from app.logging_setup import archive_existing_logs, cleanse_existing_logs, configure_logging
-from app.trace_utils import trace_function
+from app.tracing import trace_function
 from setup import REQUIREMENTS_STAMP_PATH, active_python_path, inspect_project_environment, project_python_path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -623,7 +623,7 @@ def main(argv: list[str] | None = None) -> int:
         # hang during startup (e.g. stuck in a CUDA import) is still visible
         # to the parent supervisor. No-op outside the peer-process path.
         if config.peer_process:
-            from app.peer_heartbeat import start_peer_heartbeat_from_env
+            from app.supervisor_heartbeat import start_peer_heartbeat_from_env
 
             start_peer_heartbeat_from_env(logger=logger)
         # Firewall work is intentionally limited to discovery-phase UDP exposure.

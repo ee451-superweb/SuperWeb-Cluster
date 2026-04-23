@@ -22,7 +22,7 @@ from discovery.multicast import (
     recv_packet,
     send_discover,
 )
-from wire.discovery_protocol.discovery import build_discover_message
+from wire.discovery_protocol import build_discover_message
 
 
 class MulticastTests(unittest.TestCase):

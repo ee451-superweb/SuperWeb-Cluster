@@ -23,7 +23,7 @@ from app.constants import (
 from main_node.dispatcher import WorkerTaskSlice
 from main_node.runtime_mailbox import RuntimeConnectionMailbox
 from main_node.runtime import MainNodeRuntime
-from wire.discovery_protocol.discovery import build_discover_message
+from wire.discovery_protocol import build_discover_message
 from wire.internal_protocol.runtime_transport import (
     ArtifactDescriptor,
     GemvTaskPayload,
@@ -958,7 +958,7 @@ class MainNodeRuntimeTests(unittest.TestCase):
         self.assertEqual(send_message_mock.call_count, 1)
 
     @mock.patch("main_node.runtime.network.safe_close")
-    @mock.patch("main_node.heartbeat_service.send_message")
+    @mock.patch("main_node.heartbeat.send_message")
     def test_send_heartbeat_once_retries_and_removes_timed_out_worker(
         self,
         send_message_mock: mock.Mock,
@@ -995,9 +995,9 @@ class MainNodeRuntimeTests(unittest.TestCase):
         safe_close_mock.assert_called_once_with(connection.sock)
         runtime.logger.log.assert_called()
 
-    @mock.patch("main_node.heartbeat_service.recv_message")
-    @mock.patch("main_node.heartbeat_service.send_message")
-    @mock.patch("main_node.heartbeat_service.build_heartbeat")
+    @mock.patch("main_node.heartbeat.recv_message")
+    @mock.patch("main_node.heartbeat.send_message")
+    @mock.patch("main_node.heartbeat.build_heartbeat")
     def test_send_heartbeat_once_marks_alive_worker_on_ack(
         self,
         build_heartbeat_mock: mock.Mock,
@@ -1030,7 +1030,7 @@ class MainNodeRuntimeTests(unittest.TestCase):
         runtime.registry.remove_worker.assert_not_called()
         runtime.logger.log.assert_not_called()
 
-    @mock.patch("main_node.heartbeat_service.HeartbeatCoordinator.send_heartbeat_with_retry")
+    @mock.patch("main_node.heartbeat.HeartbeatCoordinator.send_heartbeat_with_retry")
     def test_send_heartbeat_once_skips_when_no_workers_are_registered(
         self,
         send_with_retry_mock: mock.Mock,

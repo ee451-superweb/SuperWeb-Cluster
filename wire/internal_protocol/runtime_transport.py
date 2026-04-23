@@ -32,7 +32,7 @@ from app.constants import (
     RUNTIME_MSG_WORKER_UPDATE,
     SUPERWEB_CLIENT_NAME,
 )
-from app.trace_utils import trace_function
+from app.tracing import trace_function
 from common.types import ComputePerformanceSummary, HardwareProfile
 from wire.external_protocol.control_plane import (
     ClientInfoReply,

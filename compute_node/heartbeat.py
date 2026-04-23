@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from wire.internal_protocol.runtime_transport import Heartbeat
-from app.trace_utils import trace_function
+from app.tracing import trace_function
 
 
 @dataclass(slots=True)

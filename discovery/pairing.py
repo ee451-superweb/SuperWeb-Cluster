@@ -10,7 +10,7 @@ from __future__ import annotations
 from common.types import DiscoveryResult
 from app.config import AppConfig
 from discovery import multicast
-from app.trace_utils import trace_function
+from app.tracing import trace_function
 
 
 @trace_function

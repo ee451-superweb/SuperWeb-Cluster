@@ -29,7 +29,7 @@ from app.constants import (
     RUNTIME_MSG_TASK_FAIL,
     RUNTIME_MSG_TASK_RESULT,
 )
-from app.trace_utils import trace_function
+from app.tracing import trace_function
 from compute_node.compute_methods.conv2d import DATASET_GENERATE_SCRIPT_PATH as CONV2D_DATASET_GENERATE_SCRIPT_PATH
 from compute_node.compute_methods.conv2d.executor import load_named_workload_spec
 from main_node.dispatcher import WorkerTaskSlice

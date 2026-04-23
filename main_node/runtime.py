@@ -35,7 +35,7 @@ from main_node.client_session_service import ClientSessionService
 from main_node.connection_service import RuntimeConnectionService
 from main_node.dispatcher import TaskDispatcher, WorkerTaskSlice
 from main_node.handlers import RuntimeConnectionHandler
-from main_node.heartbeat_service import HeartbeatCoordinator
+from main_node.heartbeat import HeartbeatCoordinator
 from main_node.request_handler import ClientRequestHandler
 from main_node.registry import ClusterRegistry, RuntimePeerConnection
 from main_node.task_exchange import WorkerTaskExchange
@@ -48,7 +48,7 @@ from wire.internal_protocol.runtime_transport import (
     recv_message,
     send_message,
 )
-from app.trace_utils import trace_function
+from app.tracing import trace_function
 
 
 class MainNodeRuntime:

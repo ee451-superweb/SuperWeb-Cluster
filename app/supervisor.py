@@ -27,7 +27,7 @@ from app.constants import (
     GPU_BACKEND_PRIORITY,
 )
 from app.peer_diagnostics import dump_python_stack
-from app.peer_heartbeat import (
+from app.supervisor_heartbeat import (
     HEARTBEAT_CLOSED,
     HEARTBEAT_INTERVAL_SECONDS,
     HEARTBEAT_MISS_THRESHOLD,
@@ -44,7 +44,7 @@ from app.logging_setup import rebind_logging_role
 from discovery.fallback import prompt_manual_address
 from discovery.pairing import run_pairing
 from main_node.runtime import MainNodeRuntime
-from app.trace_utils import trace_function
+from app.tracing import trace_function
 
 
 class Supervisor:

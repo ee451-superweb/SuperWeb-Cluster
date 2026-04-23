@@ -17,7 +17,7 @@ from pathlib import Path
 
 from adapters.audit_log import write_audit_event
 from app.config import AppConfig
-from app.trace_utils import trace_function
+from app.tracing import trace_function
 from common.hardware import collect_hardware_profile
 from common.types import DiscoveryResult
 from compute_node.executor import TaskExecutionRouter

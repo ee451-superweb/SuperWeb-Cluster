@@ -2,7 +2,7 @@
 
 from common.types import FirewallStatus
 from app.constants import MSG_NOT_IMPLEMENTED
-from app.trace_utils import trace_function
+from app.tracing import trace_function
 
 
 @trace_function

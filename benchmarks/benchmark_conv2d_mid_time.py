@@ -9,9 +9,9 @@ autotune). That value is what this script highlights as the primary result; the 
 
 Usage (from repo root)::
 
-    python scripts/benchmark_conv2d_mid_time.py
-    python scripts/benchmark_conv2d_mid_time.py --backend cuda
-    python scripts/benchmark_conv2d_mid_time.py --cooldown-ms 0 --output-channel-batch 32
+    python benchmarks/benchmark_conv2d_mid_time.py
+    python benchmarks/benchmark_conv2d_mid_time.py --backend cuda
+    python benchmarks/benchmark_conv2d_mid_time.py --cooldown-ms 0 --output-channel-batch 32
 
 **GPU utilization:** the CUDA runner inserts an optional sleep between output-channel
 batches (``cooldown_ms``, cluster default 2.5 ms). That adds huge idle time on large

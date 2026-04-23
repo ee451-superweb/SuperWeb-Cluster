@@ -581,7 +581,7 @@ class SupervisorPeerHeartbeatTests(SupervisorCapacityPlanningTests):
     registry) and fires on the first missed interval without waiting for any
     cluster-level signal. The tests here cover the supervisor side only —
     the listener and peer writer contracts are covered by
-    ``test_peer_heartbeat.py``.
+    ``test_supervisor_heartbeat.py``.
     """
 
     def _fake_listener(
@@ -594,7 +594,7 @@ class SupervisorPeerHeartbeatTests(SupervisorCapacityPlanningTests):
         Once exhausted, further calls return ``HEARTBEAT_CLOSED`` so the
         watcher exits cleanly rather than spinning forever in tests.
         """
-        from app.peer_heartbeat import HEARTBEAT_CLOSED
+        from app.supervisor_heartbeat import HEARTBEAT_CLOSED
 
         listener = mock.Mock()
         listener.accept.return_value = accept_result
@@ -664,7 +664,7 @@ class SupervisorPeerHeartbeatTests(SupervisorCapacityPlanningTests):
         # poll()==None is the definition of "hung", and the supervisor must
         # dump+kill. Note: TIMEOUT (not CLOSED) — the hang signal is the
         # silence of a peer whose socket is still open.
-        from app.peer_heartbeat import HEARTBEAT_OK, HEARTBEAT_TIMEOUT
+        from app.supervisor_heartbeat import HEARTBEAT_OK, HEARTBEAT_TIMEOUT
 
         listener = self._fake_listener(
             accept_result=True,
@@ -691,7 +691,7 @@ class SupervisorPeerHeartbeatTests(SupervisorCapacityPlanningTests):
         # read four EOFs in the same millisecond and declare a hang. Must
         # now treat CLOSED as "peer is going away" and hand off to the
         # exit-code watcher without dumping or terminating.
-        from app.peer_heartbeat import HEARTBEAT_CLOSED, HEARTBEAT_OK
+        from app.supervisor_heartbeat import HEARTBEAT_CLOSED, HEARTBEAT_OK
 
         listener = self._fake_listener(
             accept_result=True,
@@ -707,7 +707,7 @@ class SupervisorPeerHeartbeatTests(SupervisorCapacityPlanningTests):
         # A transient GC pause or CPU spike can miss one or two heartbeats;
         # a recovery byte must clear the counter so transient stalls do not
         # kill otherwise-healthy peers.
-        from app.peer_heartbeat import HEARTBEAT_OK, HEARTBEAT_TIMEOUT
+        from app.supervisor_heartbeat import HEARTBEAT_OK, HEARTBEAT_TIMEOUT
 
         listener = mock.Mock()
         listener.accept.return_value = True
@@ -734,7 +734,7 @@ class SupervisorPeerHeartbeatTests(SupervisorCapacityPlanningTests):
         # process has in the meantime exited. poll() returning non-None
         # means "the exit-code watcher is about to / already has logged the
         # cause" — no dump, no terminate.
-        from app.peer_heartbeat import HEARTBEAT_OK, HEARTBEAT_TIMEOUT
+        from app.supervisor_heartbeat import HEARTBEAT_OK, HEARTBEAT_TIMEOUT
 
         listener = self._fake_listener(
             accept_result=True,
@@ -764,9 +764,9 @@ def _make_draining_side_effect(script: list[str], supervisor: Supervisor):
     it to exit deterministically once the scripted sequence is consumed;
     flipping ``_shutdown_requested`` after the last scripted call is the
     smallest signal that matches the real exit path. ``script`` contains
-    tri-state values from :mod:`app.peer_heartbeat`.
+    tri-state values from :mod:`app.supervisor_heartbeat`.
     """
-    from app.peer_heartbeat import HEARTBEAT_CLOSED
+    from app.supervisor_heartbeat import HEARTBEAT_CLOSED
 
     remaining = list(script)
 

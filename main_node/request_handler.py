@@ -28,7 +28,7 @@ from app.constants import (
     STATUS_NOT_FOUND,
     STATUS_OK,
 )
-from app.trace_utils import trace_function
+from app.tracing import trace_function
 from common.work_partition import partition_contiguous_range
 from compute_node.input_matrix.gemv import build_input_matrix_spec as build_gemv_input_matrix_spec
 from compute_node.compute_methods.conv2d.executor import load_named_workload_spec

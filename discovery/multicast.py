@@ -17,14 +17,14 @@ from adapters import network
 from app.constants import LOGGER_NAME
 from common.types import DiscoveryResult
 from app.config import AppConfig
-from wire.discovery_protocol.discovery import (
+from wire.discovery_protocol import (
     describe_discovery_message,
     build_announce_message,
     build_discover_message,
     parse_announce_message,
     parse_discover_message,
 )
-from app.trace_utils import trace_function
+from app.tracing import trace_function
 
 
 @dataclass(slots=True)

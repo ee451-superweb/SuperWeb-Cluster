@@ -14,7 +14,7 @@ from app.constants import (
     LOGGER_NAME,
     LOG_DIRECTORY_NAME,
 )
-from app.trace_utils import trace_function
+from app.tracing import trace_function
 
 _SESSION_TIMESTAMP = datetime.now().strftime("%Y%m%d-%H%M%S")
 _CURRENT_VERBOSE = False
