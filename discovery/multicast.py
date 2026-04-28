@@ -14,17 +14,17 @@ import time
 from dataclasses import dataclass
 
 from adapters import network
-from app.constants import LOGGER_NAME
-from common.types import DiscoveryResult
-from app.config import AppConfig
-from wire.discovery_protocol.discovery import (
+from core.constants import LOGGER_NAME
+from core.types import DiscoveryResult
+from core.config import AppConfig
+from wire.discovery_protocol import (
     describe_discovery_message,
     build_announce_message,
     build_discover_message,
     parse_announce_message,
     parse_discover_message,
 )
-from app.trace_utils import trace_function
+from core.tracing import trace_function
 
 
 @dataclass(slots=True)

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from common.types import FirewallStatus, PlatformInfo
-from app.trace_utils import trace_function
+from core.types import FirewallStatus, PlatformInfo
+from core.tracing import trace_function
 
 
 @trace_function

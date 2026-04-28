@@ -2,7 +2,7 @@
 
 import unittest
 
-from common.work_partition import merge_ranges
+from core.work_partition import merge_ranges
 
 
 class MergeRangesTests(unittest.TestCase):

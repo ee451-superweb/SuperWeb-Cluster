@@ -4,8 +4,8 @@ import unittest
 from unittest import mock
 
 from adapters import network
-from app.config import AppConfig
-from app.constants import (
+from core.config import AppConfig
+from core.constants import (
     COMPUTE_NODE_NAME,
     DEFAULT_BUFFER_SIZE,
     DEFAULT_DISCOVERY_PORT,
@@ -22,7 +22,7 @@ from discovery.multicast import (
     recv_packet,
     send_discover,
 )
-from wire.discovery_protocol.discovery import build_discover_message
+from wire.discovery_protocol import build_discover_message
 
 
 class MulticastTests(unittest.TestCase):

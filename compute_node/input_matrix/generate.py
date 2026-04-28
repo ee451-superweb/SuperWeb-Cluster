@@ -20,10 +20,11 @@ from adapters.process import enable_utf8_mode
 
 enable_utf8_mode()
 
-from app.runtime_environment import relaunch_with_project_python_if_needed
-from app.constants import METHOD_GEMV, METHOD_CONV2D
+from core.venv import relaunch_with_project_python_if_needed
+from core.constants import METHOD_GEMV, METHOD_CONV2D, METHOD_GEMM
 from compute_node.input_matrix.gemv.generate import main as generate_gemv_main
 from compute_node.input_matrix.conv2d.generate import main as generate_conv2d_main
+from compute_node.input_matrix.gemm.generate import main as generate_gemm_main
 
 DEFAULT_GENERATOR_WORKERS = max(1, os.cpu_count() or 1)
 DEFAULT_CHUNK_MIB = 8
@@ -38,9 +39,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate input datasets for one or more compute methods.")
     parser.add_argument(
         "--method",
-        choices=(METHOD_GEMV, METHOD_CONV2D, "all"),
+        choices=(METHOD_GEMV, METHOD_CONV2D, METHOD_GEMM, "all"),
         default="all",
-        help="Which method dataset to generate. Default: generate both in sequence.",
+        help="Which method dataset to generate. Default: generate all in sequence.",
     )
     parser.add_argument(
         "--output-dir",
@@ -61,7 +62,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Chunk size in MiB used while streaming data.",
     )
     parser.add_argument("--skip-small", action="store_true", help="Skip the small dataset.")
-    parser.add_argument("--skip-refresh", action="store_true", help="Skip the idle-refresh dataset.")
     parser.add_argument("--skip-mid", action="store_true", help="Skip the mid-sized dataset.")
     parser.add_argument("--skip-medium", action="store_true", help="Alias for --skip-mid.")
     parser.add_argument("--skip-large", action="store_true", help="Skip the large dataset.")
@@ -97,7 +97,11 @@ def _selected_methods(method_arg: str) -> list[str]:
         The ordered list of methods whose datasets should be generated.
     """
     if method_arg == "all":
+        # Match the benchmark ordering (GEMM first) so dataset generation
+        # finishes its fastest method first and is immediately ready when the
+        # benchmark picks up the same ordering.
         return [
+            METHOD_GEMM,
             METHOD_GEMV,
             METHOD_CONV2D,
         ]
@@ -122,8 +126,6 @@ def _common_flags(args: argparse.Namespace) -> list[str]:
         argv.extend(["--chunk-mib", str(args.chunk_mib)])
     if args.skip_small or args.skip_test:
         argv.append("--skip-small")
-    if args.skip_refresh:
-        argv.append("--skip-refresh")
     if args.skip_mid or args.skip_medium:
         argv.append("--skip-mid")
     if args.skip_large or args.skip_runtime:
@@ -147,6 +149,14 @@ def _build_gemv_args(args: argparse.Namespace) -> list[str]:
         argv.extend(["--rows", str(args.rows)])
     if args.cols is not None:
         argv.extend(["--cols", str(args.cols)])
+    return argv
+
+
+def _build_gemm_args(args: argparse.Namespace) -> list[str]:
+    """Build the forwarded CLI argument list for the GEMM generator."""
+    argv = _common_flags(args)
+    if args.output_dir is not None:
+        argv.extend(["--output-dir", str(args.output_dir)])
     return argv
 
 
@@ -214,6 +224,11 @@ def main(argv: list[str] | None = None) -> int:
             if verbose:
                 print(f"[input_matrix verbose] conv2d forwarded_args={forwarded}", flush=True)
             generate_conv2d_main(forwarded)
+        elif method_name == METHOD_GEMM:
+            forwarded = _build_gemm_args(args)
+            if verbose:
+                print(f"[input_matrix verbose] gemm forwarded_args={forwarded}", flush=True)
+            generate_gemm_main(forwarded)
         else:
             raise ValueError(f"unsupported input-matrix method: {method_name}")
     return 0

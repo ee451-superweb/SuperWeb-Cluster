@@ -7,10 +7,10 @@ main-node announce-side reply flow.
 
 from __future__ import annotations
 
-from common.types import DiscoveryResult
-from app.config import AppConfig
+from core.types import DiscoveryResult
+from core.config import AppConfig
 from discovery import multicast
-from app.trace_utils import trace_function
+from core.tracing import trace_function
 
 
 @trace_function

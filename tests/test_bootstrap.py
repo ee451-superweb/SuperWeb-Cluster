@@ -13,7 +13,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 import bootstrap
-from common.types import DiscoveryResult, FirewallStatus, PlatformInfo
+from core.types import DiscoveryResult, FirewallStatus, PlatformInfo
 from setup import ProjectEnvironmentStatus
 
 
@@ -183,14 +183,12 @@ class BootstrapTests(unittest.TestCase):
                 mock.patch.object(bootstrap, "PROJECT_ROOT", temp_root),
                 mock.patch.object(bootstrap, "BENCHMARK_SCRIPT_PATH", script_path),
                 mock.patch.object(bootstrap, "BENCHMARK_RESULT_PATH", result_path),
-                mock.patch("bootstrap._validate_compute_benchmark_assets") as validate_mock,
                 mock.patch("bootstrap._run_streaming_command", side_effect=fake_run) as run_mock,
             ):
                 ready = bootstrap.ensure_compute_node_benchmark_ready(logger)
 
         self.assertTrue(ready)
         run_mock.assert_called_once()
-        validate_mock.assert_called_once_with(logger, result_path)
         logger.warning.assert_called_once()
         logger.info.assert_called()
 
@@ -222,7 +220,6 @@ class BootstrapTests(unittest.TestCase):
                 mock.patch.object(bootstrap, "BENCHMARK_SCRIPT_PATH", benchmark_script_path),
                 mock.patch.object(bootstrap, "BENCHMARK_RESULT_PATH", result_path),
                 mock.patch.object(bootstrap, "INPUT_MATRIX_SCRIPT_PATH", dataset_script_path),
-                mock.patch("bootstrap._validate_compute_benchmark_assets") as validate_mock,
                 mock.patch("bootstrap._run_passthrough_command", side_effect=fake_dataset_run) as dataset_run_mock,
                 mock.patch("bootstrap._run_streaming_command", side_effect=fake_benchmark_run) as benchmark_run_mock,
             ):
@@ -235,7 +232,6 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(dataset_run_mock.call_args.args[0][-1], "--force")
         self.assertEqual(benchmark_run_mock.call_args.args[0][3], str(benchmark_script_path))
         self.assertNotIn("--rebuild", benchmark_run_mock.call_args.args[0])
-        validate_mock.assert_called_once_with(logger, result_path)
 
     def test_ensure_compute_node_benchmark_ready_rebuilds_benchmark_binaries_when_requested(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -257,7 +253,6 @@ class BootstrapTests(unittest.TestCase):
                 mock.patch.object(bootstrap, "PROJECT_ROOT", temp_root),
                 mock.patch.object(bootstrap, "BENCHMARK_SCRIPT_PATH", benchmark_script_path),
                 mock.patch.object(bootstrap, "BENCHMARK_RESULT_PATH", result_path),
-                mock.patch("bootstrap._validate_compute_benchmark_assets") as validate_mock,
                 mock.patch("bootstrap._run_passthrough_command") as dataset_run_mock,
                 mock.patch("bootstrap._run_streaming_command", side_effect=fake_run) as run_mock,
             ):
@@ -271,40 +266,6 @@ class BootstrapTests(unittest.TestCase):
         run_mock.assert_called_once()
         self.assertEqual(run_mock.call_args.args[0][3], str(benchmark_script_path))
         self.assertIn("--rebuild", run_mock.call_args.args[0])
-        validate_mock.assert_called_once_with(logger, result_path)
-
-    def test_ensure_compute_node_benchmark_ready_rebuilds_invalid_existing_assets(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_root = Path(temp_dir)
-            result_path = temp_root / "compute_node" / "performance_metrics" / "result.json"
-            script_path = temp_root / "compute_node" / "performance_metrics" / "benchmark.py"
-            result_path.parent.mkdir(parents=True, exist_ok=True)
-            result_path.write_text("{}", encoding="utf-8")
-            script_path.write_text("# placeholder\n", encoding="utf-8")
-            logger = mock.Mock()
-
-            def fake_run(*_args, **_kwargs) -> int:
-                result_path.write_text("{\"ok\": true}", encoding="utf-8")
-                return 0
-
-            with (
-                mock.patch.object(bootstrap, "PROJECT_ROOT", temp_root),
-                mock.patch.object(bootstrap, "BENCHMARK_SCRIPT_PATH", script_path),
-                mock.patch.object(bootstrap, "BENCHMARK_RESULT_PATH", result_path),
-                mock.patch(
-                    "bootstrap._validate_compute_benchmark_assets",
-                    side_effect=[ValueError("benchmark result is missing backends"), None],
-                ) as validate_mock,
-                mock.patch("bootstrap._run_streaming_command", side_effect=fake_run) as run_mock,
-            ):
-                ready = bootstrap.ensure_compute_node_benchmark_ready(logger)
-
-        self.assertTrue(ready)
-        run_mock.assert_called_once()
-        self.assertEqual(validate_mock.call_count, 2)
-        validate_mock.assert_any_call(logger, result_path)
-        logger.warning.assert_called()
-        logger.info.assert_called()
 
     @mock.patch("bootstrap.detect_os")
     @mock.patch("bootstrap.configure_logging")
@@ -465,6 +426,131 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(result, 1)
         runtime_environment_mock.assert_called_once()
         benchmark_ready_mock.assert_called_once_with(logger, force_retest=True, force_rebuild=True, verbose=False)
+
+
+class BootstrapNoCliTests(unittest.TestCase):
+    """Validate the ``--no-cli`` detach handoff and config propagation."""
+
+    def test_build_parser_accepts_no_cli_flag(self) -> None:
+        args = bootstrap.build_parser().parse_args(["--no-cli"])
+        self.assertTrue(args.no_cli)
+
+    def test_build_config_propagates_no_cli(self) -> None:
+        args = bootstrap.build_parser().parse_args(["--no-cli"])
+        config = bootstrap.build_config(args)
+        self.assertTrue(config.no_cli)
+
+    def test_build_config_defaults_no_cli_false(self) -> None:
+        args = bootstrap.build_parser().parse_args([])
+        config = bootstrap.build_config(args)
+        self.assertFalse(config.no_cli)
+
+    def test_build_parser_accepts_peer_process_flag(self) -> None:
+        args = bootstrap.build_parser().parse_args(["--peer-process"])
+        self.assertTrue(args.peer_process)
+
+    def test_build_config_propagates_peer_process(self) -> None:
+        args = bootstrap.build_parser().parse_args(["--peer-process"])
+        config = bootstrap.build_config(args)
+        self.assertTrue(config.peer_process)
+
+    def test_build_config_defaults_peer_process_false(self) -> None:
+        args = bootstrap.build_parser().parse_args([])
+        config = bootstrap.build_config(args)
+        self.assertFalse(config.peer_process)
+
+    @mock.patch("bootstrap.detach_from_current_console", return_value=True)
+    @mock.patch("bootstrap.has_attached_console", return_value=True)
+    @mock.patch("bootstrap.ensure_compute_node_benchmark_ready", return_value=False)
+    @mock.patch("bootstrap.detect_os")
+    @mock.patch("bootstrap.configure_logging")
+    @mock.patch("bootstrap.ensure_bootstrap_runtime_environment", return_value=None)
+    def test_main_detaches_and_exits_zero_when_no_cli_with_console(
+        self,
+        runtime_environment_mock: mock.Mock,
+        configure_logging_mock: mock.Mock,
+        detect_os_mock: mock.Mock,
+        benchmark_ready_mock: mock.Mock,
+        has_console_mock: mock.Mock,
+        detach_mock: mock.Mock,
+    ) -> None:
+        configure_logging_mock.return_value = mock.Mock()
+        detect_os_mock.return_value = PlatformInfo(
+            platform_name="windows",
+            system="Windows",
+            release="11",
+            machine="AMD64",
+            hostname="host",
+            is_wsl=False,
+            is_admin=True,
+            can_elevate=False,
+        )
+
+        result = bootstrap.main(["--no-cli"])
+
+        self.assertEqual(result, 0)
+        detach_mock.assert_called_once()
+        benchmark_ready_mock.assert_not_called()
+
+    @mock.patch("bootstrap.detach_from_current_console")
+    @mock.patch("bootstrap.has_attached_console", return_value=False)
+    @mock.patch("bootstrap.ensure_compute_node_benchmark_ready", return_value=False)
+    @mock.patch("bootstrap.detect_os")
+    @mock.patch("bootstrap.configure_logging")
+    @mock.patch("bootstrap.ensure_bootstrap_runtime_environment", return_value=None)
+    def test_main_skips_detach_when_console_already_absent(
+        self,
+        runtime_environment_mock: mock.Mock,
+        configure_logging_mock: mock.Mock,
+        detect_os_mock: mock.Mock,
+        benchmark_ready_mock: mock.Mock,
+        has_console_mock: mock.Mock,
+        detach_mock: mock.Mock,
+    ) -> None:
+        configure_logging_mock.return_value = mock.Mock()
+        detect_os_mock.return_value = PlatformInfo(
+            platform_name="windows",
+            system="Windows",
+            release="11",
+            machine="AMD64",
+            hostname="host",
+            is_wsl=False,
+            is_admin=True,
+            can_elevate=False,
+        )
+
+        bootstrap.main(["--no-cli"])
+
+        detach_mock.assert_not_called()
+        benchmark_ready_mock.assert_called_once()
+
+    @mock.patch("bootstrap.relaunch_as_admin", return_value=True)
+    @mock.patch("bootstrap.detect_os")
+    @mock.patch("bootstrap.configure_logging")
+    @mock.patch("bootstrap.ensure_bootstrap_runtime_environment", return_value=None)
+    def test_main_passes_hidden_true_to_relaunch_when_no_cli_and_elevating(
+        self,
+        runtime_environment_mock: mock.Mock,
+        configure_logging_mock: mock.Mock,
+        detect_os_mock: mock.Mock,
+        relaunch_mock: mock.Mock,
+    ) -> None:
+        configure_logging_mock.return_value = mock.Mock()
+        detect_os_mock.return_value = PlatformInfo(
+            platform_name="windows",
+            system="Windows",
+            release="11",
+            machine="AMD64",
+            hostname="host",
+            is_wsl=False,
+            is_admin=False,
+            can_elevate=True,
+        )
+
+        result = bootstrap.main(["--no-cli", "--elevate-if-needed"])
+
+        self.assertEqual(result, 0)
+        relaunch_mock.assert_called_once_with(hidden=True)
 
 
 if __name__ == "__main__":

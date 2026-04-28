@@ -515,6 +515,9 @@ int main(int argc, char** argv) {
                 write_float32_file(options.output_path, output_values);
             }
 
+            const double compute_event_ms =
+                metrics.wall_clock_latency_seconds * static_cast<double>(metrics.repeats) * 1000.0;
+
             std::cout << "{"
                       << "\"backend\":\"cpu\","
                       << "\"mode\":\"task\","
@@ -527,6 +530,8 @@ int main(int argc, char** argv) {
                       << "\"iteration_count\":" << metrics.repeats << ","
                       << "\"wall_clock_latency_seconds\":" << std::fixed << std::setprecision(9)
                       << metrics.wall_clock_latency_seconds << ","
+                      << "\"compute_event_ms\":" << std::fixed << std::setprecision(6)
+                      << compute_event_ms << ","
                       << "\"effective_gflops\":" << std::fixed << std::setprecision(9)
                       << metrics.effective_gflops << ","
                       << "\"checksum\":\"" << metrics.checksum << "\""

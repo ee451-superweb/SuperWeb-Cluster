@@ -2,13 +2,13 @@
 
 import unittest
 
-from app.constants import (
+from core.constants import (
     COMPUTE_NODE_NAME,
     DEFAULT_TCP_PORT,
     MAIN_NODE_NAME,
     MDNS_SERVICE_TYPE,
 )
-from wire.discovery_protocol.discovery import (
+from wire.discovery_protocol import (
     describe_discovery_message,
     build_announce_message,
     build_discover_message,

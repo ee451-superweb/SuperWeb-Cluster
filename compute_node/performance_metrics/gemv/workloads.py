@@ -25,8 +25,6 @@ from compute_node.input_matrix.gemv import (
     DEFAULT_ROWS,
     MEDIUM_COLS,
     MEDIUM_ROWS,
-    REFRESH_COLS,
-    REFRESH_ROWS,
     TEST_COLS,
     TEST_ROWS,
 )
@@ -42,7 +40,6 @@ DEFAULT_IDEAL_SECONDS = 0.50
 DEFAULT_ZERO_SCORE_SECONDS = 30.0
 LARGE_IDEAL_SECONDS = DEFAULT_IDEAL_SECONDS
 MID_IDEAL_SECONDS = DEFAULT_IDEAL_SECONDS / 2.0
-REFRESH_IDEAL_SECONDS = MID_IDEAL_SECONDS / 2.0
 SMALL_IDEAL_SECONDS = DEFAULT_IDEAL_SECONDS / 4.0
 
 
@@ -81,8 +78,6 @@ def build_benchmark_spec(
     if rows is None:
         if normalized_variant in {"test", "small"}:
             resolved_rows = TEST_ROWS
-        elif normalized_variant in {"idle", "auto", "autotest", "refresh"}:
-            resolved_rows = REFRESH_ROWS
         elif normalized_variant in {"medium", "mid"}:
             resolved_rows = MEDIUM_ROWS
         else:
@@ -92,8 +87,6 @@ def build_benchmark_spec(
     if cols is None:
         if normalized_variant in {"test", "small"}:
             resolved_cols = TEST_COLS
-        elif normalized_variant in {"idle", "auto", "autotest", "refresh"}:
-            resolved_cols = REFRESH_COLS
         elif normalized_variant in {"medium", "mid"}:
             resolved_cols = MEDIUM_COLS
         else:

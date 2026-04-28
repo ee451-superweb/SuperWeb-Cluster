@@ -21,7 +21,6 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from app.compute_resource_policy import resolve_capped_cpu_worker_count
 from compute_node.compute_methods.gemv import (
     CPU_MACOS_BUILD_DIR,
     CPU_MACOS_EXECUTABLE_PATH,
@@ -197,9 +196,10 @@ def _measurement_repeats(_spec: BenchmarkSpec | None = None) -> int:
 
 
 def _default_worker_candidates(logical_cpu_count: int | None = None) -> list[int]:
-    """Return the CPU benchmark worker sweep under the shared project cap."""
+    """Return the CPU benchmark worker sweep rooted at this machine's logical CPU count."""
 
-    return _binary_tree_worker_candidates(resolve_capped_cpu_worker_count(logical_cpu_count))
+    resolved = logical_cpu_count if logical_cpu_count is not None else os.cpu_count()
+    return _binary_tree_worker_candidates(max(1, int(resolved or 1)))
 
 
 _RAW_REPORT_KEYS = (

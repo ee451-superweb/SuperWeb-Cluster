@@ -19,7 +19,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from app.constants import (
+from core.constants import (
     CONV2D_CLIENT_RESPONSE_STATS_ONLY,
     METHOD_CONV2D,
     METHOD_GEMV,

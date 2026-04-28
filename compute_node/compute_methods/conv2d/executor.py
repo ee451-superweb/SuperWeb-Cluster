@@ -7,8 +7,8 @@ runner, and package the result back into a ``TaskResult``.
 
 from __future__ import annotations
 
-import array
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -16,7 +16,11 @@ import tempfile
 import time
 from pathlib import Path
 
-from app.constants import (
+import numpy as np
+
+from core.process_exit import classify_exit_code
+
+from core.constants import (
     CONV2D_CLIENT_RESPONSE_STATS_ONLY,
     CONV2D_STATS_MAX_SAMPLES,
     DEFAULT_CONV2D_CUDA_COOLDOWN_MS,
@@ -25,7 +29,6 @@ from app.constants import (
     STATUS_OK,
 )
 from adapters.process import python_utf8_command
-from app.compute_resource_policy import resolve_capped_cpu_worker_count, resolve_metal_headroom_policy
 from compute_node.compute_methods.conv2d.paths import (
     CPU_MACOS_EXECUTABLE_PATH,
     CPU_WINDOWS_EXECUTABLE_PATH,
@@ -40,10 +43,163 @@ from compute_node.performance_metrics.conv2d.config import (
     RESULT_PATH as TOP_LEVEL_RESULT_PATH,
 )
 from compute_node.input_matrix.conv2d import build_input_matrix_spec, normalize_size_variant
-from compute_node.performance_summary import RuntimeProcessorProfile, load_runtime_processor_inventory
+from compute_node.performance_metrics.performance_summary import RuntimeProcessorProfile, load_runtime_processor_inventory
 from setup import active_python_path
 from wire.internal_protocol.control_plane import Conv2dResultPayload
-from wire.internal_protocol.runtime_transport import TaskAssign, TaskResult, TransferMode
+from wire.internal_protocol.transport import TaskAssign, TaskResult, TransferMode
+
+_LOGGER = logging.getLogger(__name__)
+_RUNNER_STDERR_TAIL_BYTES = 2048
+
+
+def _tail_stream(payload: str | bytes | None, *, limit: int = _RUNNER_STDERR_TAIL_BYTES) -> str:
+    """Return the trailing portion of a captured runner stream, safe to log.
+
+    Native runners can produce many KB of progress output; only the tail
+    typically matters when explaining a crash, and bounding the size keeps the
+    log readable.
+    """
+    if payload is None:
+        return "<none>"
+    if isinstance(payload, bytes):
+        text = payload.decode("utf-8", errors="replace")
+    else:
+        text = payload
+    text = text.strip()
+    if not text:
+        return "<empty>"
+    if len(text) <= limit:
+        return text
+    return f"...<truncated {len(text) - limit} bytes>...{text[-limit:]}"
+
+
+class RunnerProcessError(RuntimeError):
+    """A native runner exited nonzero (or timed out) and we captured its stderr.
+
+    Why a custom type: the conv2d executor runs inside a ProcessPoolExecutor
+    child where ``_LOGGER`` has no handlers, so any ``_LOGGER.error`` we emit
+    in the child is silently dropped. The parent's ``drain_completed_tasks``
+    only sees the exception via ``future.result()`` and stringifies it once
+    into both the worker log and the upstream TASK_FAIL message — so the
+    stderr tail must travel inside the exception's ``str()`` to reach the
+    operator after the cluster exits. Plain ``CalledProcessError.__str__()``
+    contains only the command line.
+    """
+
+
+def _format_runner_failure_message(
+    *,
+    method: str,
+    backend_name: str,
+    task: TaskAssign,
+    returncode: int | None,
+    stderr: str | bytes | None,
+    stdout: str | bytes | None,
+    elapsed_ms: int,
+) -> str:
+    classification = classify_exit_code(returncode)
+    return (
+        f"{method} native runner failed: backend={backend_name} "
+        f"task_id={getattr(task, 'task_id', '?')} elapsed_ms={elapsed_ms} "
+        f"returncode={returncode} cause=\"{classification}\" "
+        f"stderr_tail={_tail_stream(stderr)!r} stdout_tail={_tail_stream(stdout)!r}"
+    )
+
+
+def _format_runner_timeout_message(
+    *,
+    method: str,
+    backend_name: str,
+    task: TaskAssign,
+    timeout: float | None,
+    stderr: str | bytes | None,
+    stdout: str | bytes | None,
+) -> str:
+    return (
+        f"{method} native runner timed out: backend={backend_name} "
+        f"task_id={getattr(task, 'task_id', '?')} timeout={float(timeout or 0.0):.1f}s "
+        f"stderr_tail={_tail_stream(stderr)!r} stdout_tail={_tail_stream(stdout)!r}"
+    )
+
+
+def _log_runner_failure(
+    *,
+    method: str,
+    backend_name: str,
+    task: TaskAssign,
+    returncode: int | None,
+    stderr: str | bytes | None,
+    stdout: str | bytes | None,
+    elapsed_ms: int,
+) -> None:
+    """Emit a single ERROR line summarizing why a native runner exited nonzero.
+
+    Kept for in-process callers; conv2d's ProcessPoolExecutor path can't rely
+    on this reaching a file (no handlers in the child), so it uses the
+    formatter directly to populate ``RunnerProcessError`` instead.
+    """
+    _LOGGER.error(
+        "%s",
+        _format_runner_failure_message(
+            method=method,
+            backend_name=backend_name,
+            task=task,
+            returncode=returncode,
+            stderr=stderr,
+            stdout=stdout,
+            elapsed_ms=elapsed_ms,
+        ),
+    )
+
+
+def _log_runner_timeout(
+    *,
+    method: str,
+    backend_name: str,
+    task: TaskAssign,
+    timeout: float | None,
+    stderr: str | bytes | None,
+    stdout: str | bytes | None,
+) -> None:
+    """Emit a single ERROR line when a native runner blew its wall-clock budget."""
+    _LOGGER.error(
+        "%s",
+        _format_runner_timeout_message(
+            method=method,
+            backend_name=backend_name,
+            task=task,
+            timeout=timeout,
+            stderr=stderr,
+            stdout=stdout,
+        ),
+    )
+
+
+def _parse_compute_event_ms(stdout: str | bytes | None) -> int | None:
+    """Extract the native runner's cudaEvent-bracketed kernel time (ms).
+
+    Returns ``None`` when the runner stdout has no parseable
+    ``compute_event_ms`` field, e.g. older runners that pre-date the
+    dispatch/benchmark split or non-CUDA backends that don't emit JSON at all.
+    """
+    if not stdout:
+        return None
+    if isinstance(stdout, bytes):
+        stdout = stdout.decode("utf-8", errors="replace")
+    try:
+        payload = json.loads(stdout)
+    except (ValueError, TypeError):
+        return None
+    value = payload.get("compute_event_ms") if isinstance(payload, dict) else None
+    if value is None:
+        return None
+    try:
+        ms = float(value)
+    except (TypeError, ValueError):
+        return None
+    if ms < 0.0:
+        return None
+    return int(round(ms))
 
 
 def _summarize_conv2d_slice_file(path: Path, *, max_samples: int) -> tuple[int, float, float, tuple[float, ...]]:
@@ -58,18 +214,17 @@ def _summarize_conv2d_slice_file(path: Path, *, max_samples: int) -> tuple[int, 
     remaining = max(0, int(max_samples))
     with path.open("rb") as handle:
         while True:
-            chunk = handle.read(256 * 1024)
+            chunk = handle.read(1024 * 1024)
             if not chunk:
                 break
-            values = array.array("f")
-            values.frombytes(chunk)
-            for x in values:
-                xf = float(x)
-                sum_v += xf
-                sum_sq += xf * xf
-                if remaining > 0:
-                    samples.append(xf)
-                    remaining -= 1
+            values = np.frombuffer(chunk, dtype=np.float32)
+            values64 = values.astype(np.float64)
+            sum_v += float(values64.sum())
+            sum_sq += float(np.dot(values64, values64))
+            if remaining > 0:
+                take = min(remaining, values.size)
+                samples.extend(float(x) for x in values[:take])
+                remaining -= take
     return element_count, sum_v, sum_sq, tuple(samples)
 
 METHOD_DIR = CONV2D_METHOD_DIR
@@ -80,11 +235,17 @@ DISABLED_CONV2D_BACKENDS = frozenset({"dx12"})
 CONV2D_CUDA_COOLDOWN_MS = DEFAULT_CONV2D_CUDA_COOLDOWN_MS
 
 
-def _best_backend_profile(result_path: Path) -> RuntimeProcessorProfile | None:
+def _best_backend_profile(
+    result_path: Path,
+    *,
+    pinned_backend: str | None = None,
+) -> RuntimeProcessorProfile | None:
     """Return the best usable processor profile from a method result file.
 
     Args:
         result_path: Conv2d benchmark result path for this compute node.
+        pinned_backend: Optional backend name that restricts the inventory so
+            only that backend's profile can be returned.
 
     Returns:
         The best non-disabled processor profile, or ``None``.
@@ -93,6 +254,7 @@ def _best_backend_profile(result_path: Path) -> RuntimeProcessorProfile | None:
         inventory = load_runtime_processor_inventory(
             result_path=result_path,
             method=METHOD_CONV2D,
+            pinned_backend=pinned_backend,
         )
     except (OSError, ValueError, json.JSONDecodeError):
         return None
@@ -103,15 +265,23 @@ def _best_backend_profile(result_path: Path) -> RuntimeProcessorProfile | None:
     return None
 
 
-def _best_backend_name(result_path: Path) -> str:
+def _best_backend_name(
+    result_path: Path,
+    *,
+    pinned_backend: str | None = None,
+) -> str:
     """Return the best usable backend name from the method result file.
 
     Args:
         result_path: Conv2d benchmark result path for this compute node.
+        pinned_backend: Optional backend name to prefer; when set and valid,
+            it is returned directly.
 
     Returns:
         The preferred backend name, falling back to ``cpu`` when unknown.
     """
+    if pinned_backend is not None and pinned_backend not in DISABLED_CONV2D_BACKENDS:
+        return pinned_backend
     profile = _best_backend_profile(result_path)
     if profile is not None:
         return profile.hardware_type
@@ -354,15 +524,19 @@ class Conv2dTaskExecutor:
         *,
         result_path: Path | None = None,
         dataset_root: Path | None = None,
+        pinned_backend: str | None = None,
     ) -> None:
         """Store the benchmark result path and dataset root used at runtime.
 
         Args:
             result_path: Optional conv2d benchmark result path override.
             dataset_root: Optional conv2d dataset directory override.
+            pinned_backend: Optional backend name restricting backend selection
+                at task-dispatch time for dual-purpose peers.
         """
         self.result_path = DEFAULT_CONV_RESULT_PATH if result_path is None else Path(result_path)
         self.dataset_root = DEFAULT_DATASET_DIR if dataset_root is None else Path(dataset_root)
+        self.pinned_backend = pinned_backend
 
     def execute_task(self, task: TaskAssign) -> TaskResult:
         """Execute one conv2d task and return its result payload.
@@ -378,8 +552,14 @@ class Conv2dTaskExecutor:
         spec, variant = _spec_for_task(task)
         _validate_task_against_spec(task, spec)
         _ensure_dataset_ready(self.dataset_root, variant)
-        backend_profile = _best_backend_profile(self.result_path)
-        backend_name = backend_profile.hardware_type if backend_profile is not None else _best_backend_name(self.result_path)
+        backend_profile = _best_backend_profile(
+            self.result_path, pinned_backend=self.pinned_backend
+        )
+        backend_name = (
+            backend_profile.hardware_type
+            if backend_profile is not None
+            else _best_backend_name(self.result_path, pinned_backend=self.pinned_backend)
+        )
         best_config = {} if backend_profile is None else dict(backend_profile.best_config)
         executable_path = _prepare_runner_path(backend_name)
         if not executable_path.exists():
@@ -436,9 +616,9 @@ class Conv2dTaskExecutor:
                     configured_workers = int(
                         best_config.get("workers")
                         or best_config.get("requested_workers")
-                        or resolve_capped_cpu_worker_count()
+                        or (os.cpu_count() or 1)
                     )
-                    worker_count = max(1, min(resolve_capped_cpu_worker_count(), configured_workers))
+                    worker_count = max(1, configured_workers)
                     cmd.extend(
                         [
                             "--start-oc",
@@ -463,44 +643,85 @@ class Conv2dTaskExecutor:
                             str(CONV2D_CUDA_COOLDOWN_MS),
                         ]
                     )
+                    cuda_block_size = int(best_config.get("block_size") or 0)
+                    cuda_tile_size = int(best_config.get("tile_size") or 0)
+                    if cuda_block_size > 0 and cuda_tile_size > 0:
+                        cmd.extend(
+                            [
+                                "--block-sizes",
+                                str(cuda_block_size),
+                                "--tile-sizes",
+                                str(cuda_tile_size),
+                            ]
+                        )
+                    cuda_shared_input = best_config.get("shared_input")
+                    if cuda_shared_input is not None:
+                        cmd.extend(["--shared-input", str(int(cuda_shared_input))])
                 elif backend_name == "metal":
                     block_size = int(best_config.get("block_size") or 256)
                     tile_size = int(best_config.get("tile_size") or 16)
-                    headroom_fraction = best_config.get("headroom_fraction")
-                    if headroom_fraction is None:
-                        headroom_policy = resolve_metal_headroom_policy(task.end_oc - task.start_oc)
-                    else:
-                        headroom_policy = resolve_metal_headroom_policy(
-                            task.end_oc - task.start_oc,
-                            fraction=float(headroom_fraction),
-                        )
+                    slice_channels = task.end_oc - task.start_oc
+                    output_channel_batch = int(best_config.get("output_channel_batch") or slice_channels)
                     cmd.extend(
                         [
                             "--block-sizes",
                             str(block_size),
                             "--tile-sizes",
                             str(tile_size),
-                            "--headroom-fraction",
-                            f"{headroom_policy.headroom_fraction:.6f}",
                             "--output-channel-batch",
-                            str(headroom_policy.work_chunk_size),
+                            str(output_channel_batch),
                         ]
                     )
 
                 subprocess_started_at = time.monotonic()
-                completed = subprocess.run(
-                    cmd,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    cwd=METHOD_DIR,
-                    timeout=900.0,
-                )
-                computation_ms_total += max(
+                try:
+                    completed = subprocess.run(
+                        cmd,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        cwd=METHOD_DIR,
+                        timeout=900.0,
+                    )
+                except subprocess.CalledProcessError as exc:
+                    message = _format_runner_failure_message(
+                        method="conv2d",
+                        backend_name=backend_name,
+                        task=task,
+                        returncode=exc.returncode,
+                        stderr=exc.stderr,
+                        stdout=exc.stdout,
+                        elapsed_ms=int((time.monotonic() - subprocess_started_at) * 1000),
+                    )
+                    _LOGGER.error("%s", message)
+                    raise RunnerProcessError(message) from exc
+                except subprocess.TimeoutExpired as exc:
+                    message = _format_runner_timeout_message(
+                        method="conv2d",
+                        backend_name=backend_name,
+                        task=task,
+                        timeout=exc.timeout,
+                        stderr=exc.stderr,
+                        stdout=exc.stdout,
+                    )
+                    _LOGGER.error("%s", message)
+                    raise RunnerProcessError(message) from exc
+                subprocess_wall_ms = max(
                     0, int((time.monotonic() - subprocess_started_at) * 1000)
                 )
+                compute_event_ms = _parse_compute_event_ms(completed.stdout)
+                if compute_event_ms is not None:
+                    # The CUDA runner's dispatch mode reports cudaEvent-bracketed
+                    # GPU time. Using it instead of the subprocess wall keeps
+                    # the supervisor's computation_ms aligned with what the
+                    # benchmark's measurement pass measures, so dispatch-time
+                    # per-channel throughput compares directly to the
+                    # benchmark-reported capacity.
+                    computation_ms_total += min(subprocess_wall_ms, compute_event_ms)
+                else:
+                    computation_ms_total += subprocess_wall_ms
                 if not output_path.exists():
                     raise RuntimeError(
                         f"{backend_name} conv2d runner completed without writing {output_path.name}: "

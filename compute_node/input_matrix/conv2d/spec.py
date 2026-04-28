@@ -20,25 +20,16 @@ MID_CIN, MID_COUT = 128, 256
 MID_K, MID_PAD = 3, 1
 MID_STRIDE = 1
 
-REFRESH_H, REFRESH_W = MID_H // 2, MID_W // 2
-REFRESH_CIN, REFRESH_COUT = MID_CIN // 2, MID_COUT // 2
-REFRESH_K, REFRESH_PAD = MID_K, MID_PAD
-REFRESH_STRIDE = MID_STRIDE
-
 LARGE_H, LARGE_W = 2048, 2048
 LARGE_CIN, LARGE_COUT = 128, 256
 LARGE_K, LARGE_PAD = 3, 1
 LARGE_STRIDE = 1
 WORKLOAD_SIZE_SMALL = "small"
 WORKLOAD_SIZE_MID = "mid"
-WORKLOAD_SIZE_REFRESH = "refresh"
 WORKLOAD_SIZE_LARGE = "large"
 LEGACY_SIZE_ALIASES = {
     "test": WORKLOAD_SIZE_SMALL,
     "medium": WORKLOAD_SIZE_MID,
-    "idle": WORKLOAD_SIZE_REFRESH,
-    "auto": WORKLOAD_SIZE_REFRESH,
-    "autotest": WORKLOAD_SIZE_REFRESH,
     "runtime": WORKLOAD_SIZE_LARGE,
 }
 TEST_H, TEST_W = SMALL_H, SMALL_W
@@ -147,20 +138,6 @@ def get_mid_input_matrix_spec() -> Conv2dSpec:
     )
 
 
-def get_refresh_input_matrix_spec() -> Conv2dSpec:
-    """Return the dedicated idle-refresh conv2d dataset specification."""
-    return Conv2dSpec(
-        name=f"refresh-conv2d-{REFRESH_H}x{REFRESH_W}",
-        h=REFRESH_H,
-        w=REFRESH_W,
-        c_in=REFRESH_CIN,
-        c_out=REFRESH_COUT,
-        k=REFRESH_K,
-        pad=REFRESH_PAD,
-        stride=REFRESH_STRIDE,
-    )
-
-
 def get_large_input_matrix_spec() -> Conv2dSpec:
     """Return the canonical large conv2d dataset specification."""
     return Conv2dSpec(
@@ -222,8 +199,6 @@ def build_input_matrix_spec(
             base_spec = get_small_input_matrix_spec()
         elif default_variant == WORKLOAD_SIZE_MID:
             base_spec = get_mid_input_matrix_spec()
-        elif default_variant == WORKLOAD_SIZE_REFRESH:
-            base_spec = get_refresh_input_matrix_spec()
         else:
             base_spec = get_large_input_matrix_spec()
         return Conv2dSpec(
@@ -241,10 +216,6 @@ def build_input_matrix_spec(
         default_h, default_w = MID_H, MID_W
         default_c_in, default_c_out = MID_CIN, MID_COUT
         default_k, default_pad, default_stride = MID_K, MID_PAD, MID_STRIDE
-    elif default_variant == WORKLOAD_SIZE_REFRESH:
-        default_h, default_w = REFRESH_H, REFRESH_W
-        default_c_in, default_c_out = REFRESH_CIN, REFRESH_COUT
-        default_k, default_pad, default_stride = REFRESH_K, REFRESH_PAD, REFRESH_STRIDE
     elif default_variant == WORKLOAD_SIZE_LARGE:
         default_h, default_w = LARGE_H, LARGE_W
         default_c_in, default_c_out = LARGE_CIN, LARGE_COUT

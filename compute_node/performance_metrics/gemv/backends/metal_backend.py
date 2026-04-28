@@ -11,7 +11,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-from app.compute_resource_policy import resolve_metal_headroom_policy
 from compute_node.compute_methods.gemv import (
     METAL_BUILD_DIR,
     METAL_EXECUTABLE_PATH,
@@ -134,7 +133,6 @@ class MetalBackend:
             "implementation": "mps_matrix_vector_multiplication",
             "block_size_candidates": _candidate_block_sizes(),
             "tile_size_candidates": _candidate_tile_sizes(),
-            "headroom_fraction": resolve_metal_headroom_policy(2).headroom_fraction,
             "autotune_repeats": DEFAULT_AUTOTUNE_REPEATS,
             "measurement_repeats": DEFAULT_MEASUREMENT_REPEATS,
             "runner_path": str(METAL_EXECUTABLE_PATH),
@@ -251,17 +249,16 @@ class MetalBackend:
             1 if (measurement_spec != spec or measurement_dataset != dataset)
             else _measurement_repeats(spec)
         )
-        autotune_headroom_policy = resolve_metal_headroom_policy(spec.rows)
-        measurement_headroom_policy = resolve_metal_headroom_policy(measurement_spec.rows)
+        autotune_row_chunk_size = max(1, int(spec.rows))
+        measurement_row_chunk_size = max(1, int(measurement_spec.rows))
 
         notes.append("implementation: official Apple MPSMatrixVectorMultiplication")
         notes.append(
             "launch-shape autotune hints are accepted for interface compatibility but ignored by "
             "MPSMatrixVectorMultiplication"
         )
-        notes.append(f"shared_headroom_fraction: {measurement_headroom_policy.headroom_fraction:.3f}")
-        notes.append(f"translated_autotune_row_chunk_size: {autotune_headroom_policy.work_chunk_size}")
-        notes.append(f"translated_measurement_row_chunk_size: {measurement_headroom_policy.work_chunk_size}")
+        notes.append(f"autotune_row_chunk_size: {autotune_row_chunk_size}")
+        notes.append(f"measurement_row_chunk_size: {measurement_row_chunk_size}")
         notes.append(f"autotune_repeats_per_run: {autotune_repeats}")
         notes.append(f"measurement_repeats_for_best_run: {final_measurement_repeats}")
 
@@ -272,8 +269,7 @@ class MetalBackend:
                 dataset,
                 block_sizes=block_sizes,
                 tile_sizes=tile_sizes,
-                headroom_fraction=autotune_headroom_policy.headroom_fraction,
-                row_chunk_size=autotune_headroom_policy.work_chunk_size,
+                row_chunk_size=autotune_row_chunk_size,
                 autotune_repeats=autotune_repeats,
                 measurement_repeats=1,
                 timeout_seconds=max(time_budget_seconds, 30.0),
@@ -317,8 +313,7 @@ class MetalBackend:
                 measurement_dataset,
                 block_sizes=block_sizes,
                 tile_sizes=tile_sizes,
-                headroom_fraction=measurement_headroom_policy.headroom_fraction,
-                row_chunk_size=measurement_headroom_policy.work_chunk_size,
+                row_chunk_size=measurement_row_chunk_size,
                 autotune_repeats=1,
                 measurement_repeats=final_measurement_repeats,
                 timeout_seconds=max(time_budget_seconds, 30.0),
@@ -425,7 +420,6 @@ class MetalBackend:
         *,
         block_sizes: list[int],
         tile_sizes: list[int],
-        headroom_fraction: float,
         row_chunk_size: int,
         autotune_repeats: int,
         measurement_repeats: int,
@@ -461,8 +455,6 @@ class MetalBackend:
             ",".join(str(value) for value in block_sizes),
             "--tile-sizes",
             ",".join(str(value) for value in tile_sizes),
-            "--headroom-fraction",
-            f"{headroom_fraction:.6f}",
             "--row-chunk-size",
             str(row_chunk_size),
             "--autotune-repeats",
@@ -584,7 +576,7 @@ class MetalBackend:
         """Normalize one selected-config record for reporting and reuse."""
 
         config: dict[str, object] = {}
-        for key in ("implementation", "block_size", "tile_size", "headroom_fraction", "row_chunk_size"):
+        for key in ("implementation", "block_size", "tile_size", "row_chunk_size"):
             if key in metrics:
                 config[key] = metrics[key]
         config["autotune_repeats"] = (

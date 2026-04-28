@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from app.config import AppConfig
+from core.config import AppConfig
 from main_node.task_exchange import WorkerTaskExchange
 
 

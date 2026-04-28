@@ -14,9 +14,14 @@ class Conv2dMethodHandler:
 
     method_name = "conv2d"
 
-    def __init__(self) -> None:
-        """Create the shared conv2d task executor for this handler."""
-        self._executor = Conv2dTaskExecutor()
+    def __init__(self, *, pinned_backend: str | None = None) -> None:
+        """Create the shared conv2d task executor for this handler.
+
+        Args:
+            pinned_backend: Optional backend name restricting which backend
+                the executor selects at task-dispatch time.
+        """
+        self._executor = Conv2dTaskExecutor(pinned_backend=pinned_backend)
 
     def execute_task(self, task):
         """Execute one conv2d task through the shared executor.

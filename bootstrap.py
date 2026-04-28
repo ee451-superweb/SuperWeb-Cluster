@@ -13,11 +13,18 @@ from adapters.process import enable_utf8_mode, python_utf8_command
 enable_utf8_mode()
 
 from adapters.firewall import ensure_rules
-from adapters.platform import detect_os, relaunch_as_admin
+from core.types import FirewallStatus
+from adapters.host import (
+    detach_from_current_console,
+    detect_os,
+    has_attached_console,
+    relaunch_as_admin,
+)
 from adapters.audit_log import write_audit_event
-from app.config import AppConfig
-from app.constants import (
+from core.config import AppConfig
+from core.constants import (
     APP_NAME,
+    BACKEND_CHOICES,
     COMPUTE_NODE_NAME,
     DEFAULT_NODE_NAME,
     DEFAULT_DISCOVERY_ATTEMPTS,
@@ -29,8 +36,8 @@ from app.constants import (
     DEFAULT_DATA_PLANE_PORT,
     MAIN_NODE_NAME,
 )
-from app.logging_setup import archive_existing_logs, cleanse_existing_logs, configure_logging
-from app.trace_utils import trace_function
+from core.logging_setup import archive_existing_logs, cleanse_existing_logs, configure_logging
+from core.tracing import trace_function
 from setup import REQUIREMENTS_STAMP_PATH, active_python_path, inspect_project_environment, project_python_path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -201,41 +208,6 @@ def _apply_log_start_mode(mode: str) -> tuple[int, str] | None:
         return logging.WARNING, f"Log start mode {normalized_mode} failed: {exc}"
 
 
-def _validate_compute_benchmark_assets(logger, result_path: Path | None = None) -> None:
-    """Validate that compute startup has refresh-ready datasets and runners.
-
-    Args:
-        logger: Bootstrap logger used to emit startup progress messages.
-        result_path: Optional benchmark result path to validate instead of the default.
-
-    Returns:
-        ``None`` when idle refresh can reuse the persisted benchmark output safely.
-    """
-    from compute_node.performance_refresh import validate_idle_refresh_requirements
-
-    resolved_result_path = BENCHMARK_RESULT_PATH if result_path is None else result_path
-    logger.info(
-        "Benchmark validation 0%%: starting startup checks for %s.",
-        _display_project_path(resolved_result_path),
-    )
-
-    def log_progress(step: int, total_steps: int, description: str) -> None:
-        percent = int(round((step / total_steps) * 100))
-        logger.info(
-            "Benchmark validation %s%% (%s/%s): %s",
-            percent,
-            step,
-            total_steps,
-            description,
-        )
-
-    validate_idle_refresh_requirements(
-        resolved_result_path,
-        progress_callback=log_progress,
-    )
-    logger.info("Benchmark validation 100%%: startup checks passed.")
-
-
 @trace_function
 def ensure_bootstrap_runtime_environment(logger, argv: list[str]) -> int | None:
     """Ensure bootstrap runs with the prepared project venv.
@@ -314,7 +286,7 @@ def ensure_bootstrap_runtime_environment(logger, argv: list[str]) -> int | None:
 def _load_supervisor_class():
     """Import Supervisor only after the runtime environment is ready."""
 
-    from app.supervisor import Supervisor
+    from supervision.supervisor import Supervisor
 
     return Supervisor
 
@@ -411,6 +383,48 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Enable verbose logging, including DEBUG-level bootstrap output.",
     )
+    parser.add_argument(
+        "--peer-process",
+        action="store_true",
+        help=(
+            "Marks this process as a peer subprocess spawned by another supervisor on the "
+            "same host. Firewall lifecycle (ensure on startup, cleanup on shutdown) is "
+            "delegated to the spawning supervisor instead — peers must not touch firewall "
+            "rules because rule names are host-global and a peer's cleanup would nuke the "
+            "parent's rules. Set automatically by the supervisor when spawning peers; "
+            "operators do not pass this flag manually."
+        ),
+    )
+    parser.add_argument(
+        "--dual-purpose",
+        action="store_true",
+        help=(
+            "Main-node also participates in compute by spawning a peer compute-node process "
+            "pinned to the best available GPU backend. Ignored when this process resolves to "
+            "a compute-node role."
+        ),
+    )
+    parser.add_argument(
+        "--backend",
+        choices=BACKEND_CHOICES,
+        default=None,
+        help=(
+            "Pin this compute-node to a specific backend. Ignored when this process resolves "
+            "to the main-node role. When omitted and this process resolves to a compute-node, "
+            "the supervisor picks the best available GPU (or cpu if no GPU is present) and "
+            "spawns a peer compute-node for the complementary backend."
+        ),
+    )
+    parser.add_argument(
+        "--no-cli",
+        action="store_true",
+        help=(
+            "Run headless: detach the current process from its console on startup and spawn "
+            "any peer compute-node subprocess detached as well (no new console window). "
+            "Only Task Manager / taskkill can stop a --no-cli process. When this flag is off, "
+            "peers get their own visible console window for easier demo / live debugging."
+        ),
+    )
     return parser
 
 
@@ -435,6 +449,10 @@ def build_config(args: argparse.Namespace) -> AppConfig:
         discovery_attempts=args.discover_attempts,
         discovery_retry_delay=args.retry_delay,
         enable_manual_fallback=args.manual_fallback,
+        dual_purpose=bool(getattr(args, "dual_purpose", False)),
+        pinned_backend=getattr(args, "backend", None),
+        no_cli=bool(getattr(args, "no_cli", False)),
+        peer_process=bool(getattr(args, "peer_process", False)),
     )
 @trace_function
 def ensure_compute_node_benchmark_ready(
@@ -471,16 +489,7 @@ def ensure_compute_node_benchmark_ready(
 
     benchmark_needs_rebuild = force_retest or force_rebuild or not BENCHMARK_RESULT_PATH.exists()
     if BENCHMARK_RESULT_PATH.exists() and not (force_retest or force_rebuild):
-        try:
-            _validate_compute_benchmark_assets(logger, BENCHMARK_RESULT_PATH)
-        except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
-            logger.warning(
-                "Existing compute benchmark assets are not refresh-ready: %s. Rebuilding the local benchmark now.",
-                exc,
-            )
-            benchmark_needs_rebuild = True
-        else:
-            return True
+        return True
 
     if force_rebuild:
         logger.warning(
@@ -523,12 +532,6 @@ def ensure_compute_node_benchmark_ready(
             "Benchmark finished but %s was still not created.",
             _display_project_path(BENCHMARK_RESULT_PATH),
         )
-        return False
-
-    try:
-        _validate_compute_benchmark_assets(logger, BENCHMARK_RESULT_PATH)
-    except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
-        logger.error("Benchmark finished but compute assets are still not refresh-ready: %s", exc)
         return False
 
     logger.info(
@@ -583,9 +586,24 @@ def main(argv: list[str] | None = None) -> int:
 
         # Windows elevation is attempted when explicitly requested, and the
         # self-relaunched venv process opts into the same check by default.
-        if args.elevate_if_needed and platform_info.can_elevate and relaunch_as_admin():
+        # --no-cli is merged into this handoff: when elevating, hide the
+        # elevated console; when only detaching, skip UAC and Popen a
+        # DETACHED copy of ourselves. Both paths are one-way — the parent
+        # exits immediately so we never end up with a third self-relaunch.
+        if args.elevate_if_needed and platform_info.can_elevate and relaunch_as_admin(
+            hidden=bool(getattr(args, "no_cli", False))
+        ):
             logger.info("Relaunched with administrator privileges.")
             return 0
+
+        if getattr(args, "no_cli", False) and has_attached_console():
+            if detach_from_current_console(effective_argv):
+                logger.info("Relaunched in detached (--no-cli) mode; console parent exiting.")
+                return 0
+            logger.warning(
+                "--no-cli was requested but detach_from_current_console failed; "
+                "continuing in the current console.",
+            )
 
         if not ensure_compute_node_benchmark_ready(
             logger,
@@ -600,16 +618,39 @@ def main(argv: list[str] | None = None) -> int:
         Supervisor = _load_supervisor_class()
 
         config = build_config(args)
+        # When this bootstrap was invoked as a supervisor-spawned peer, open
+        # the loopback heartbeat channel before any heavy runtime work so a
+        # hang during startup (e.g. stuck in a CUDA import) is still visible
+        # to the parent supervisor. No-op outside the peer-process path.
+        if config.peer_process:
+            from supervision.supervisor_heartbeat import start_peer_heartbeat_from_env
+
+            start_peer_heartbeat_from_env(logger=logger)
         # Firewall work is intentionally limited to discovery-phase UDP exposure.
-        write_audit_event("setting up firewall", stdout=True, logger=logger)
-        firewall_status = ensure_rules(platform_info, config.udp_port, config.data_plane_port)
-        logger.info("Firewall setup: %s", firewall_status.message)
+        # Peer subprocesses inherit the parent supervisor's firewall ownership;
+        # they must not touch host-global rule names because their own cleanup
+        # would delete rules the parent still needs.
+        if config.peer_process:
+            firewall_status = FirewallStatus(
+                supported=True,
+                applied=False,
+                needs_admin=False,
+                backend=platform_info.platform_name,
+                message="firewall lifecycle delegated to spawning supervisor (peer process)",
+            )
+            logger.info("Firewall setup: %s", firewall_status.message)
+        else:
+            write_audit_event("setting up firewall", stdout=True, logger=logger)
+            firewall_status = ensure_rules(platform_info, config.udp_port, config.data_plane_port)
+            logger.info("Firewall setup: %s", firewall_status.message)
 
         supervisor = Supervisor(
             config=config,
             platform_info=platform_info,
             firewall_status=firewall_status,
             logger=logger,
+            benchmark_result_path=BENCHMARK_RESULT_PATH,
+            bootstrap_script_path=PROJECT_ROOT / "bootstrap.py",
         )
 
         # The supervisor owns the rest of the kickoff lifecycle, including

@@ -8,9 +8,9 @@ from __future__ import annotations
 
 from dataclasses import InitVar, dataclass
 
-from app.constants import METHOD_GEMV, METHOD_CONV2D
+from core.constants import METHOD_GEMM, METHOD_GEMV, METHOD_CONV2D
 from wire.external_protocol.data_plane import ArtifactDescriptor
-from wire.internal_protocol._model_utils import initvar_or_default
+from wire.internal_protocol.model_utils import initvar_or_default
 
 
 @dataclass(slots=True)
@@ -74,6 +74,25 @@ class Conv2dRequestPayload:
 
 
 @dataclass(slots=True)
+class GemmRequestPayload:
+    """Method-specific request payload for cuBLAS GEMM.
+
+    The client supplies no matrix bytes; both A and B are pre-generated on
+    each compute node from fixed seeds keyed by request size. Shape fields
+    on this payload are intentionally empty — shape is derived from the
+    request ``size`` by main and worker alike.
+    """
+
+
+@dataclass(slots=True)
+class GemmResponsePayload:
+    """Method-specific client response payload for cuBLAS GEMM."""
+
+    output_length: int = 0
+    output_vector: bytes = b""
+
+
+@dataclass(slots=True)
 class GemvResponsePayload:
     """Method-specific client response payload for fixed-matrix vector multiplication."""
 
@@ -106,7 +125,7 @@ class ClientRequest:
     stream_id: str
     timestamp_ms: int
     iteration_count: int
-    request_payload: GemvRequestPayload | Conv2dRequestPayload | None = None
+    request_payload: GemvRequestPayload | Conv2dRequestPayload | GemmRequestPayload | None = None
     vector_length: InitVar[int] = 0
     vector_data: InitVar[bytes] = b""
     tensor_h: InitVar[int] = 0
@@ -146,7 +165,9 @@ class ClientRequest:
         conv2d_client_response_mode = initvar_or_default(conv2d_client_response_mode, 0)
         conv2d_stats_max_samples = initvar_or_default(conv2d_stats_max_samples, 0)
         if self.request_payload is None:
-            if self.method == METHOD_CONV2D or any(
+            if self.method == METHOD_GEMM:
+                self.request_payload = GemmRequestPayload()
+            elif self.method == METHOD_CONV2D or any(
                 value for value in (tensor_h, tensor_w, channels_in, channels_out, kernel_size, padding)
             ):
                 self.request_payload = Conv2dRequestPayload(
@@ -175,6 +196,11 @@ class ClientRequest:
             Conv2dRequestPayload,
         ):
             raise ValueError("conv2d requests require a matching payload")
+        elif self.method == METHOD_GEMM and not isinstance(
+            self.request_payload,
+            GemmRequestPayload,
+        ):
+            raise ValueError("gemm requests require a matching payload")
 
     @property
     def gemv_payload(self) -> GemvRequestPayload | None:
@@ -187,6 +213,13 @@ class ClientRequest:
     def conv2d_payload(self) -> Conv2dRequestPayload | None:
         """Return the conv2d request payload when this request targets Conv2D."""
         if isinstance(self.request_payload, Conv2dRequestPayload):
+            return self.request_payload
+        return None
+
+    @property
+    def gemm_payload(self) -> GemmRequestPayload | None:
+        """Return the GEMM request payload when this request targets GEMM."""
+        if isinstance(self.request_payload, GemmRequestPayload):
             return self.request_payload
         return None
 
@@ -306,7 +339,7 @@ class ClientResponse:
     iteration_count: int
     task_id: str = ""
     elapsed_ms: int = 0
-    response_payload: GemvResponsePayload | Conv2dResponsePayload | None = None
+    response_payload: GemvResponsePayload | Conv2dResponsePayload | GemmResponsePayload | None = None
     result_artifact: ArtifactDescriptor | None = None
     timing: ResponseTiming | None = None
     output_length: InitVar[int] = 0
@@ -319,7 +352,12 @@ class ClientResponse:
         output_vector = initvar_or_default(output_vector, b"")
         result_artifact_id = initvar_or_default(result_artifact_id, "")
         if self.response_payload is None:
-            if self.method == METHOD_CONV2D or result_artifact_id:
+            if self.method == METHOD_GEMM:
+                self.response_payload = GemmResponsePayload(
+                    output_length=output_length,
+                    output_vector=output_vector,
+                )
+            elif self.method == METHOD_CONV2D or result_artifact_id:
                 self.response_payload = Conv2dResponsePayload(
                     output_length=output_length,
                     output_vector=output_vector,
@@ -340,6 +378,11 @@ class ClientResponse:
             Conv2dResponsePayload,
         ):
             raise ValueError("conv2d responses require a matching payload")
+        elif self.method == METHOD_GEMM and not isinstance(
+            self.response_payload,
+            GemmResponsePayload,
+        ):
+            raise ValueError("gemm responses require a matching payload")
 
     @property
     def gemv_payload(self) -> GemvResponsePayload | None:
@@ -356,12 +399,21 @@ class ClientResponse:
         return None
 
     @property
+    def gemm_payload(self) -> GemmResponsePayload | None:
+        """Return the GEMM response payload when this response targets GEMM."""
+        if isinstance(self.response_payload, GemmResponsePayload):
+            return self.response_payload
+        return None
+
+    @property
     def output_length(self) -> int:
         """Return the output element count stored in the response payload."""
         if self.gemv_payload is not None:
             return self.gemv_payload.output_length
         if self.conv2d_payload is not None:
             return self.conv2d_payload.output_length
+        if self.gemm_payload is not None:
+            return self.gemm_payload.output_length
         return 0
 
     @property
@@ -371,6 +423,8 @@ class ClientResponse:
             return self.gemv_payload.output_vector
         if self.conv2d_payload is not None:
             return self.conv2d_payload.output_vector
+        if self.gemm_payload is not None:
+            return self.gemm_payload.output_vector
         return b""
 
     @property

@@ -529,6 +529,10 @@ int main(int argc, char** argv) {
                 write_float32_file(options.output_path, best_output_values);
             }
 
+            const double compute_event_ms =
+                metrics.measurement.wall_clock_latency_seconds
+                * static_cast<double>(metrics.measurement.repeats) * 1000.0;
+
             std::cout << "{"
                       << "\"backend\":\"metal\","
                       << "\"implementation\":\"" << metrics.implementation << "\","
@@ -539,6 +543,8 @@ int main(int argc, char** argv) {
                       << "\"autotune_repeats\":" << metrics.autotune.repeats << ","
                       << "\"measurement_repeats\":" << metrics.measurement.repeats << ","
                       << "\"trials_run\":1,"
+                      << "\"compute_event_ms\":" << std::fixed << std::setprecision(6)
+                      << compute_event_ms << ","
                       << "\"autotune_wall_clock_latency_seconds\":" << std::fixed << std::setprecision(9)
                       << metrics.autotune.wall_clock_latency_seconds << ","
                       << "\"autotune_effective_gflops\":" << std::fixed << std::setprecision(9)

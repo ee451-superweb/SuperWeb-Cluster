@@ -92,8 +92,7 @@ from compute_node.performance_metrics.gemv.scoring import linear_time_score
 from compute_node.performance_metrics.gemv.workloads import build_benchmark_spec
 import subprocess
 
-from app.constants import DX12_BACKEND_DISABLED_REASON, METHOD_GEMV, METHOD_CONV2D
-from app.compute_resource_policy import resolve_metal_headroom_policy
+from core.constants import DX12_BACKEND_DISABLED_REASON, METHOD_GEMV, METHOD_CONV2D
 from tests.support import require_integration
 
 
@@ -119,18 +118,6 @@ class _FakeNativeRunnerProcess:
 
 
 class PerformanceMatricsTests(unittest.TestCase):
-    def test_metal_headroom_policy_translates_fraction_into_chunk_and_cooldown(self) -> None:
-        policy = resolve_metal_headroom_policy(8, fraction=0.9)
-
-        self.assertEqual(policy.work_chunk_size, 7)
-        self.assertAlmostEqual(policy.cooldown_ratio, (1.0 / 0.9) - 1.0)
-
-    def test_metal_headroom_policy_keeps_full_work_when_fraction_is_one(self) -> None:
-        policy = resolve_metal_headroom_policy(8, fraction=1.0)
-
-        self.assertEqual(policy.work_chunk_size, 8)
-        self.assertEqual(policy.cooldown_ratio, 0.0)
-
     def test_linear_score_midpoint_is_half(self) -> None:
         score = linear_time_score(0.6, ideal_seconds=0.2, zero_score_seconds=1.0, max_score=100.0)
         self.assertAlmostEqual(score, 50.0)
@@ -161,15 +148,12 @@ class PerformanceMatricsTests(unittest.TestCase):
                 "small",
                 "--output-channel-batch",
                 "8",
-                "--output-channel-batch-scale",
-                "0.75",
                 "--cooldown-ms",
                 "2.5",
             ]
         )
         self.assertEqual(args.workload_mode, "small")
         self.assertEqual(args.output_channel_batch, 8)
-        self.assertEqual(args.output_channel_batch_scale, 0.75)
         self.assertEqual(args.cooldown_ms, 2.5)
 
     def test_spatial_benchmark_parser_defaults_to_full_workload(self) -> None:
@@ -326,7 +310,7 @@ class PerformanceMatricsTests(unittest.TestCase):
         self.assertEqual(sha256_hex, "parallel-sha256")
         parallel_writer.assert_called_once()
 
-    def test_windows_default_backend_order_routes_gpu_by_display_adapter(self) -> None:
+    def test_windows_default_backend_order_pairs_cpu_with_detected_gpu(self) -> None:
         with (
             mock.patch(
                 "compute_node.performance_metrics.gemv.backends.os.name",
@@ -339,9 +323,9 @@ class PerformanceMatricsTests(unittest.TestCase):
         ):
             names = [backend.name for backend in backend_registry.build_backends()]
 
-        self.assertEqual(names, ["cuda"])
+        self.assertEqual(names, ["cpu", "cuda"])
 
-    def test_spatial_windows_default_backend_order_routes_gpu_by_display_adapter(self) -> None:
+    def test_spatial_windows_default_backend_order_pairs_cpu_with_detected_gpu(self) -> None:
         with (
             mock.patch(
                 "compute_node.performance_metrics.conv2d.backends.os.name",
@@ -354,7 +338,7 @@ class PerformanceMatricsTests(unittest.TestCase):
         ):
             names = [backend.name for backend in conv2d_backend_registry.build_backends()]
 
-        self.assertEqual(names, ["cuda"])
+        self.assertEqual(names, ["cpu", "cuda"])
 
     def test_windows_default_backend_order_falls_back_to_cpu_without_gpu(self) -> None:
         with (
@@ -569,7 +553,6 @@ class PerformanceMatricsTests(unittest.TestCase):
             stride=None,
             workload_mode="small",
             output_channel_batch=None,
-            output_channel_batch_scale=None,
             cooldown_ms=None,
             rebuild=False,
         )
@@ -761,68 +744,6 @@ class PerformanceMatricsTests(unittest.TestCase):
         self.assertEqual((conv_spec.h, conv_spec.w), (256, 256))
         self.assertEqual((conv_spec.c_in, conv_spec.c_out), (32, 64))
 
-    def test_refresh_default_workloads_are_half_mid(self) -> None:
-        gemv_mid_spec = build_input_matrix_spec(default_variant="mid")
-        gemv_refresh_spec = build_input_matrix_spec(default_variant="refresh")
-        conv_mid_spec = build_conv_input_matrix_spec(default_variant="mid")
-        conv_refresh_spec = build_conv_input_matrix_spec(default_variant="refresh")
-
-        self.assertEqual(gemv_refresh_spec.rows, gemv_mid_spec.rows // 2)
-        self.assertEqual(gemv_refresh_spec.cols, gemv_mid_spec.cols // 2)
-        self.assertEqual(conv_refresh_spec.h, conv_mid_spec.h // 2)
-        self.assertEqual(conv_refresh_spec.w, conv_mid_spec.w // 2)
-        self.assertEqual(conv_refresh_spec.c_in, conv_mid_spec.c_in // 2)
-        self.assertEqual(conv_refresh_spec.c_out, conv_mid_spec.c_out // 2)
-
-    def test_gemv_benchmark_dataset_generation_skips_refresh_variant(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            dataset_dir = Path(temp_dir) / "gemv"
-            with (
-                mock.patch.object(
-                    gemv_dataset_runner,
-                    "dataset_is_generated",
-                    side_effect=[False, False, True, True],
-                ),
-                mock.patch.object(gemv_dataset_runner, "emit_status"),
-                mock.patch.object(gemv_dataset_runner, "active_python_path", return_value=Path("/tmp/project-python")),
-                mock.patch.object(gemv_dataset_runner.subprocess, "run") as run_mock,
-            ):
-                gemv_dataset_runner.generate_dataset_if_missing(
-                    dataset_dir,
-                    8,
-                    16,
-                    generate_small_dataset=True,
-                    generate_mid_dataset=True,
-                    generate_large_dataset=False,
-                    root_dir=PROJECT_ROOT,
-                    generate_script_path=PROJECT_ROOT / "compute_node" / "input_matrix" / "gemv" / "generate.py",
-                )
-
-        command = run_mock.call_args.args[0]
-        self.assertIn("--skip-refresh", command)
-
-    def test_conv2d_benchmark_dataset_generation_skips_refresh_variant(self) -> None:
-        spec = spatial_benchmark.get_small_spec()
-        with tempfile.TemporaryDirectory() as temp_dir:
-            dataset_dir = Path(temp_dir) / "conv2d"
-            with (
-                mock.patch.object(spatial_benchmark, "dataset_is_generated", return_value=False),
-                mock.patch.object(spatial_benchmark, "emit_status"),
-                mock.patch.object(spatial_benchmark, "active_python_path", return_value=Path("/tmp/project-python")),
-                mock.patch.object(spatial_benchmark.subprocess, "run") as run_mock,
-            ):
-                spatial_benchmark._generate_if_needed(
-                    dataset_dir,
-                    spec,
-                    "compute",
-                    generate_small_dataset=True,
-                    generate_mid_dataset=False,
-                    generate_large_dataset=False,
-                )
-
-        command = run_mock.call_args.args[0]
-        self.assertIn("--skip-refresh", command)
-
     def test_generate_dataset_with_small_override(self) -> None:
         spec = build_input_matrix_spec(rows=8, cols=16)
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -973,7 +894,7 @@ class PerformanceMatricsTests(unittest.TestCase):
             )
             report = benchmark.run_benchmark(args)
 
-        self.assertEqual(report["schema_version"], 5)
+        self.assertEqual(report["schema_version"], 6)
         self.assertIn("device_overview", report)
         self.assertIn("methods", report)
         method_report = report["methods"][METHOD_GEMV]
@@ -1160,6 +1081,8 @@ class PerformanceMatricsTests(unittest.TestCase):
         self.assertEqual(command[command.index("--output-channel-batches") + 1], "8")
         self.assertIn("--cooldown-ms", command)
         self.assertEqual(command[command.index("--cooldown-ms") + 1], "2.5")
+        self.assertIn("--mode", command)
+        self.assertEqual(command[command.index("--mode") + 1], "benchmark")
 
     def test_spatial_metal_runner_command_includes_preparation_timing_flag(self) -> None:
         backend = SpatialMetalBackend()
@@ -1192,7 +1115,6 @@ class PerformanceMatricsTests(unittest.TestCase):
                 layout,
                 block_sizes=[256],
                 tile_sizes=[16],
-                headroom_fraction=0.9,
                 output_channel_batch=7,
                 autotune_repeats=1,
                 measurement_repeats=1,
@@ -1202,6 +1124,8 @@ class PerformanceMatricsTests(unittest.TestCase):
         command = captured["command"]
         self.assertIn("--include-preparation-in-metrics", command)
         self.assertEqual(command[command.index("--include-preparation-in-metrics") + 1], "1")
+        self.assertIn("--mode", command)
+        self.assertEqual(command[command.index("--mode") + 1], "benchmark")
 
     def test_metal_backend_probe_returns_status(self) -> None:
         backend = MetalBackend()

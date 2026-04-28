@@ -6,8 +6,8 @@ from unittest import mock
 
 from adapters.firewall import cleanup_rules, ensure_rules
 from adapters.firewall import windows as windows_firewall
-from common.types import PlatformInfo
-from app.constants import (
+from core.types import PlatformInfo
+from core.constants import (
     DEFAULT_DATA_PLANE_PORT,
     DEFAULT_DISCOVERY_PORT,
     WINDOWS_FIREWALL_DATA_PLANE_RULE_NAME,

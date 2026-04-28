@@ -8,13 +8,13 @@ from __future__ import annotations
 
 from dataclasses import InitVar, dataclass
 
-from app.constants import METHOD_GEMV, METHOD_CONV2D
-from common.types import (
+from core.constants import METHOD_GEMM, METHOD_GEMV, METHOD_CONV2D
+from core.types import (
     ComputePerformanceSummary,
     HardwareProfile,
 )
 from wire.external_protocol.data_plane import ArtifactDescriptor
-from wire.internal_protocol._model_utils import initvar_or_default
+from wire.internal_protocol.model_utils import initvar_or_default
 from wire.internal_protocol.common import NodeStatus, TransferMode
 
 
@@ -88,6 +88,36 @@ class Conv2dTaskPayload:
 
 
 @dataclass(slots=True)
+class GemmTaskPayload:
+    """Method-specific task payload for cuBLAS GEMM.
+
+    Carries the M-axis row range assigned to one worker and echoes the (M, N, K)
+    shape so the worker can cross-check it against its locally generated A/B
+    matrices before running cuBLAS.
+    """
+
+    m_start: int = 0
+    m_end: int = 0
+    m: int = 0
+    n: int = 0
+    k: int = 0
+
+
+@dataclass(slots=True)
+class GemmResultPayload:
+    """Method-specific task result payload for cuBLAS GEMM.
+
+    ``output_vector`` is the row-major float32 slice ``C[m_start:m_end, :]``;
+    ``output_length`` counts float32 elements ((m_end - m_start) * N), not bytes.
+    """
+
+    m_start: int = 0
+    m_end: int = 0
+    output_length: int = 0
+    output_vector: bytes = b""
+
+
+@dataclass(slots=True)
 class GemvResultPayload:
     """Method-specific task result payload for fixed-matrix vector multiplication."""
 
@@ -126,7 +156,7 @@ class ArtifactRelease:
 
 @dataclass(slots=True)
 class WorkerUpdate:
-    """Idle-period worker performance refresh sent from compute node to main node."""
+    """Updated worker performance summary sent from compute node to main node."""
 
     node_id: str
     timestamp_ms: int
@@ -149,7 +179,7 @@ class TaskAssign:
     transfer_mode: TransferMode = TransferMode.UNSPECIFIED
     artifact_id: str = ""
     artifact_timeout_ms: int = 0
-    task_payload: GemvTaskPayload | Conv2dTaskPayload | None = None
+    task_payload: GemvTaskPayload | Conv2dTaskPayload | GemmTaskPayload | None = None
     row_start: InitVar[int] = 0
     row_end: InitVar[int] = 0
     vector_length: InitVar[int] = 0
@@ -164,6 +194,11 @@ class TaskAssign:
     padding: InitVar[int] = 0
     stride: InitVar[int] = 1
     weight_data: InitVar[bytes] = b""
+    m_start: InitVar[int] = 0
+    m_end: InitVar[int] = 0
+    m: InitVar[int] = 0
+    n: InitVar[int] = 0
+    k: InitVar[int] = 0
 
     def __post_init__(
         self,
@@ -181,6 +216,11 @@ class TaskAssign:
         padding: int,
         stride: int,
         weight_data: bytes,
+        m_start: int,
+        m_end: int,
+        m: int,
+        n: int,
+        k: int,
     ) -> None:
         """Normalize legacy initvars into the typed task payload."""
         self.transfer_mode = TransferMode(self.transfer_mode)
@@ -198,8 +238,21 @@ class TaskAssign:
         padding = initvar_or_default(padding, 0)
         stride = initvar_or_default(stride, 1)
         weight_data = initvar_or_default(weight_data, b"")
+        m_start = initvar_or_default(m_start, 0)
+        m_end = initvar_or_default(m_end, 0)
+        m = initvar_or_default(m, 0)
+        n = initvar_or_default(n, 0)
+        k = initvar_or_default(k, 0)
         if self.task_payload is None:
-            if self.method == METHOD_CONV2D or any(
+            if self.method == METHOD_GEMM or any(value for value in (m_start, m_end, m, n, k)):
+                self.task_payload = GemmTaskPayload(
+                    m_start=m_start,
+                    m_end=m_end,
+                    m=m,
+                    n=n,
+                    k=k,
+                )
+            elif self.method == METHOD_CONV2D or any(
                 value
                 for value in (
                     start_oc,
@@ -242,6 +295,11 @@ class TaskAssign:
             Conv2dTaskPayload,
         ):
             raise ValueError("conv2d tasks require a matching payload")
+        elif self.method == METHOD_GEMM and not isinstance(
+            self.task_payload,
+            GemmTaskPayload,
+        ):
+            raise ValueError("gemm tasks require a matching payload")
 
     @property
     def gemv_payload(self) -> GemvTaskPayload | None:
@@ -256,6 +314,43 @@ class TaskAssign:
         if isinstance(self.task_payload, Conv2dTaskPayload):
             return self.task_payload
         return None
+
+    @property
+    def gemm_payload(self) -> GemmTaskPayload | None:
+        """Return the GEMM task payload when this assignment targets GEMM."""
+        if isinstance(self.task_payload, GemmTaskPayload):
+            return self.task_payload
+        return None
+
+    @property
+    def m_start(self) -> int:
+        """Return the GEMM M-axis starting row encoded in the task payload."""
+        payload = self.gemm_payload
+        return payload.m_start if payload is not None else 0
+
+    @property
+    def m_end(self) -> int:
+        """Return the GEMM M-axis ending row encoded in the task payload."""
+        payload = self.gemm_payload
+        return payload.m_end if payload is not None else 0
+
+    @property
+    def m(self) -> int:
+        """Return the total GEMM M dimension encoded in the task payload."""
+        payload = self.gemm_payload
+        return payload.m if payload is not None else 0
+
+    @property
+    def n(self) -> int:
+        """Return the GEMM N dimension encoded in the task payload."""
+        payload = self.gemm_payload
+        return payload.n if payload is not None else 0
+
+    @property
+    def k(self) -> int:
+        """Return the GEMM K dimension encoded in the task payload."""
+        payload = self.gemm_payload
+        return payload.k if payload is not None else 0
 
     @property
     def row_start(self) -> int:
@@ -375,7 +470,7 @@ class TaskResult:
     timestamp_ms: int
     status_code: int
     iteration_count: int
-    result_payload: GemvResultPayload | Conv2dResultPayload | None = None
+    result_payload: GemvResultPayload | Conv2dResultPayload | GemmResultPayload | None = None
     result_artifact: ArtifactDescriptor | None = None
     local_result_path: str = ""
     computation_ms: int = 0
@@ -389,6 +484,9 @@ class TaskResult:
     output_h: InitVar[int] = 0
     output_w: InitVar[int] = 0
     result_artifact_id: InitVar[str] = ""
+    m_start: InitVar[int] = 0
+    m_end: InitVar[int] = 0
+    method: InitVar[str] = ""
 
     def __post_init__(
         self,
@@ -401,6 +499,9 @@ class TaskResult:
         output_h: int,
         output_w: int,
         result_artifact_id: str,
+        m_start: int,
+        m_end: int,
+        method: str,
     ) -> None:
         """Normalize legacy initvars into the typed task-result payload."""
         row_start = initvar_or_default(row_start, 0)
@@ -412,8 +513,18 @@ class TaskResult:
         output_h = initvar_or_default(output_h, 0)
         output_w = initvar_or_default(output_w, 0)
         result_artifact_id = initvar_or_default(result_artifact_id, "")
+        m_start = initvar_or_default(m_start, 0)
+        m_end = initvar_or_default(m_end, 0)
+        method = initvar_or_default(method, "")
         if self.result_payload is None:
-            if any(value for value in (start_oc, end_oc, output_h, output_w)) or result_artifact_id:
+            if method == METHOD_GEMM or (m_end > m_start and method != METHOD_GEMV and method != METHOD_CONV2D):
+                self.result_payload = GemmResultPayload(
+                    m_start=m_start,
+                    m_end=m_end,
+                    output_length=output_length,
+                    output_vector=output_vector,
+                )
+            elif any(value for value in (start_oc, end_oc, output_h, output_w)) or result_artifact_id:
                 self.result_payload = Conv2dResultPayload(
                     start_oc=start_oc,
                     end_oc=end_oc,
@@ -446,6 +557,25 @@ class TaskResult:
         return None
 
     @property
+    def gemm_payload(self) -> GemmResultPayload | None:
+        """Return the GEMM result payload when this task result targets GEMM."""
+        if isinstance(self.result_payload, GemmResultPayload):
+            return self.result_payload
+        return None
+
+    @property
+    def m_start(self) -> int:
+        """Return the GEMM M-axis starting row encoded in the result payload."""
+        payload = self.gemm_payload
+        return payload.m_start if payload is not None else 0
+
+    @property
+    def m_end(self) -> int:
+        """Return the GEMM M-axis ending row encoded in the result payload."""
+        payload = self.gemm_payload
+        return payload.m_end if payload is not None else 0
+
+    @property
     def row_start(self) -> int:
         """Return the GEMV starting row encoded in the result payload."""
         payload = self.gemv_payload
@@ -464,6 +594,8 @@ class TaskResult:
             return self.gemv_payload.output_length
         if self.conv2d_payload is not None:
             return self.conv2d_payload.output_length
+        if self.gemm_payload is not None:
+            return self.gemm_payload.output_length
         return 0
 
     @property
@@ -473,6 +605,8 @@ class TaskResult:
             return self.gemv_payload.output_vector
         if self.conv2d_payload is not None:
             return self.conv2d_payload.output_vector
+        if self.gemm_payload is not None:
+            return self.gemm_payload.output_vector
         return b""
 
     @property

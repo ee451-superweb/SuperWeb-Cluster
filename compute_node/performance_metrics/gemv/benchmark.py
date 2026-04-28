@@ -17,7 +17,7 @@ from adapters.process import enable_utf8_mode
 
 enable_utf8_mode()
 
-from app.constants import METHOD_GEMV
+from core.constants import METHOD_GEMV
 from compute_node.performance_metrics.benchmark import main as run_top_level_benchmark
 from compute_node.performance_metrics.gemv.config import RESULT_PATH
 

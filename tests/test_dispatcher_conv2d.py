@@ -6,7 +6,7 @@ import threading
 import unittest
 from unittest import mock
 
-from app.constants import METHOD_CONV2D
+from core.constants import METHOD_CONV2D
 from main_node.dispatcher import TaskDispatcher, WorkerTaskSlice
 from main_node.registry import RuntimePeerConnection, WorkerHardwareCapability
 

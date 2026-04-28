@@ -135,6 +135,47 @@ home devices usually have much less RAM than disk capacity, and widespread SSD
 adoption means sequential disk I/O is now fast enough that a disk-first artifact
 path is often the safer choice when we are forced to choose.
 
+## Dropped Approach: Payload Compression
+
+Early in Sprint 4 we evaluated whether compressing large `FP32` matrix
+artifacts on the data plane would shorten end-to-end transfer time.
+The benchmark target was a representative `4 GiB` (`32768 x 32768` float32)
+matrix from `Client/download`, with the constraint that compression must
+finish in under `30s` on the sender (which may have a GPU) and that the
+receiver is only guaranteed to have a CPU.
+
+Tested categories:
+
+- general lossless: `gzip`, `bz2`, `lzma`
+- numeric-array lossless: `blosc2 + zstd / lz4 + shuffle / bitshuffle`
+- scientific float: `zfp / zfpy`, `fpzip`, `SZ3`
+- structural approximation: randomized `SVD`, `HODLR / H-matrix`
+
+The best lossless candidate, `blosc2_zstd_shuffle_c1`, compressed in
+`6.64s`, decompressed on CPU in `4.84s`, and saved `15.52%` of bytes
+with full SHA256 equality. The best low-error candidate,
+`zfpy_tolerance_1e-4`, saved `25.42%` at `2.86e-05` max absolute error.
+
+The deciding question was not the compression ratio but the end-to-end
+model `compress + send-side checksum + transfer + recv-side checksum + decompress`,
+which gave these speedups:
+
+| Method | 300 Mbps WiFi | 1 Gbps Ethernet |
+|---|---:|---:|
+| `blosc2_zstd_shuffle_c1` | `1.064x` | `0.886x` |
+| `zfpy_tolerance_1e-4`    | `0.876x` | `0.519x` |
+| `zfpy_tolerance_5e-4`    | `0.984x` | `0.575x` |
+
+The break-even point for the best lossless option lands at roughly
+`506 Mbps`. On the LAN this cluster actually runs on (`1 Gbps`
+Ethernet, often higher), every candidate was a net regression.
+We dropped compression from the data-plane path: at LAN speeds the
+compress + decompress cost exceeds the byte savings. The full
+methodology, dependency manifest, and per-method numbers are archived
+under [`docs/compression_solution_report.md`](docs/compression_solution_report.md).
+If a future deployment is bandwidth-limited (sub-`500 Mbps` WAN, mobile
+uplink), `blosc2_zstd_shuffle_c1` is the candidate to reach for first.
+
 ## Progress Through Sprint 3
 
 Sprint 1 delivered:
@@ -355,7 +396,7 @@ In detail:
 15. Clients join, receive their own runtime ids, and send structured `CLIENT_REQUEST` messages.
 16. Each `CLIENT_REQUEST` can include an `iteration_count`, and the main node emits matching `TASK_ASSIGN` slices to workers.
 17. While a request is active, clients can poll `CLIENT_INFO_REQUEST` / `CLIENT_INFO_REPLY` for active-request visibility.
-18. Workers send periodic `HEARTBEAT_OK` and optional idle `WORKER_UPDATE` performance refreshes.
+18. Workers send periodic `HEARTBEAT_OK`, plus `WORKER_UPDATE` messages whenever their effective performance changes.
 19. The main node aggregates worker slices and returns one `CLIENT_RESPONSE`, using artifact descriptors plus the TCP data plane for large outputs.
 
 ## Local, LAN, And Internet Steps
@@ -461,9 +502,17 @@ With no flags, `bootstrap.py` defaults to `--role discover`. That triggers
 this sequence:
 
 1. Verify the project `.venv` and `requirements.txt` stamp are current; run
-   `setup.py` and self-relaunch into `.venv` if not.
+   `setup.py` and self-relaunch into `.venv` if not. **This relaunch is
+   synchronous** — the parent blocks on the child with `subprocess.run`,
+   then forwards its exit code. Parent and child share the same console.
 2. Detect the platform; on Windows, optionally elevate to admin (only when
-   `--elevate-if-needed` is also set).
+   `--elevate-if-needed` is also set). **This relaunch is asynchronous and
+   detached** — `ShellExecuteW` hands off to a new elevated process with
+   its own console, and the parent exits immediately. This is a one-way
+   handoff: any future "relaunch under a different identity" flag
+   (headless / dashboard mode, alternate user, etc.) should merge into
+   this same decision point rather than introduce a third self-relaunch,
+   otherwise order and detach semantics stop composing cleanly.
 3. Make sure `compute_node/performance_metrics/result.json` exists; if it
    does not (or `--retest` / `--rebuild` was passed), run the local
    benchmark first.
@@ -506,7 +555,8 @@ python bootstrap.py --role announce --udp-port 5353 --tcp-port 52020
 | `--discover-attempts N` | `3` | How many discovery rounds to run before falling back. With the defaults this is roughly 3–4 seconds of total discovery time before self-promotion. |
 | `--retry-delay SECONDS` | `0.3` | Pause between discovery attempts. |
 | `--manual-fallback / --no-manual-fallback` | `--manual-fallback` (on) | When discovery fails, prompt the operator for a manual main-node address instead of immediately promoting self. Pass `--no-manual-fallback` for non-interactive runs that should hard-fail when discovery does not find a main node. |
-| `--elevate-if-needed` | off | On Windows, relaunch the process with administrator privileges. Required when firewall rule installation needs elevation. The bootstrap auto-injects this flag into its own `.venv` self-relaunch so behavior is consistent. |
+| `--elevate-if-needed` | off | On Windows, relaunch the process with administrator privileges if not already admin. **The name is aspirational** — the bootstrap does not probe whether elevation is actually needed; it elevates eagerly whenever this flag is set and the current process is not admin. The only thing in the runtime that genuinely requires admin is Windows firewall rule installation; non-admin runs simply skip rule install and log a warning. The bootstrap auto-injects this flag into its own `.venv` self-relaunch so behavior is consistent. |
+| `--no-cli` | off | Run headless — no console window for the main process, and spawned peers (dual-purpose compute-node) also detach instead of opening their own console. Merges with `--elevate-if-needed` at step 2: when both are set, the UAC handoff uses `SW_HIDE` so the elevated child has no console; when `--no-cli` is set alone, the bootstrap detaches via `DETACHED_PROCESS` after UAC. Only Task Manager / `kill` can stop the process; logs still land in the role-specific log file. Intended for dashboard / service deployments. |
 | `--retest` | off | Regenerate the deterministic input matrices and rerun the local benchmark before startup. Use after changing dataset shapes or after replacing hardware. |
 | `--rebuild` | off | Rerun the local benchmark and force the native runner binaries to rebuild, but do **not** regenerate input matrices. Use after editing a backend's CUDA / Metal / CPU source. |
 | `--log-start-mode {normal,clean,cleanse}` | `normal` | `normal` keeps prior session logs untouched. `clean` archives previous loose log files into a dated archive directory. `cleanse` permanently removes them. |

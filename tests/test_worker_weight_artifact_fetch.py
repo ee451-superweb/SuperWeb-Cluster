@@ -9,14 +9,14 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
-from app.config import AppConfig
-from app.constants import COMPUTE_NODE_NAME, METHOD_CONV2D, STATUS_OK
-from common.float32_codec import pack_float32_values
-from compute_node.runtime_services import WorkerTaskRuntimeService
+from core.config import AppConfig
+from core.constants import COMPUTE_NODE_NAME, METHOD_CONV2D, STATUS_OK
+from core.float32_codec import pack_float32_values
+from compute_node.worker_services import WorkerTaskRuntimeService
 from transport.artifact_manager import ArtifactManager
 from wire.internal_protocol.control_plane import Conv2dTaskPayload
 from wire.internal_protocol.control_plane_codec import encode_envelope, parse_envelope
-from wire.internal_protocol.runtime_transport import (
+from wire.internal_protocol.transport import (
     MessageKind,
     TaskAssign,
     TaskResult,

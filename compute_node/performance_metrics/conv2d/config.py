@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.constants import METHOD_CONV2D
+from core.constants import METHOD_CONV2D
 
 METHOD_NAME = METHOD_CONV2D
 DISPLAY_NAME = "Spatial Convolution"

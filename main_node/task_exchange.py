@@ -19,22 +19,25 @@ from pathlib import Path
 
 from adapters.audit_log import write_audit_event
 from adapters.process import python_utf8_command
-from app.constants import (
+from core.constants import (
     CONV2D_CLIENT_RESPONSE_STATS_ONLY,
     MAIN_NODE_NAME,
     RUNTIME_MSG_ARTIFACT_RELEASE,
     METHOD_CONV2D,
+    METHOD_GEMM,
     RUNTIME_MSG_TASK_ACCEPT,
     RUNTIME_MSG_TASK_ASSIGN,
     RUNTIME_MSG_TASK_FAIL,
     RUNTIME_MSG_TASK_RESULT,
 )
-from app.trace_utils import trace_function
+from core.tracing import trace_function
 from compute_node.compute_methods.conv2d import DATASET_GENERATE_SCRIPT_PATH as CONV2D_DATASET_GENERATE_SCRIPT_PATH
 from compute_node.compute_methods.conv2d.executor import load_named_workload_spec
+from compute_node.input_matrix.gemm import build_spec as gemm_build_spec
 from main_node.dispatcher import WorkerTaskSlice
-from main_node.runtime_mailbox import RuntimeConnectionMailbox
-from wire.internal_protocol.runtime_transport import (
+from main_node.mailbox import RuntimeConnectionMailbox
+from wire.internal_protocol.transport import (
+    GemmTaskPayload,
     GemvTaskPayload,
     MessageKind,
     Conv2dTaskPayload,
@@ -335,8 +338,16 @@ class WorkerTaskExchange:
         Conv2d requests that only need aggregated stats bypass the artifact
         plane since the worker returns a tiny inline summary instead of a full
         output tensor.
+
+        GEMM always routes through the artifact plane because even the smallest
+        variant (m=n=1024) produces a 4 MiB output that already matches the
+        default protobuf envelope budget before the wire adds header/routing
+        overhead; staying inline there intermittently trips the receiver's
+        size guard with ``invalid protobuf message size`` and fails the task.
         """
         if method == METHOD_CONV2D and not stats_only:
+            return TransferMode.ARTIFACT_REQUIRED
+        if method == METHOD_GEMM:
             return TransferMode.ARTIFACT_REQUIRED
         return TransferMode.INLINE_PREFERRED
 
@@ -400,7 +411,7 @@ class WorkerTaskExchange:
                 end_oc=assignment.end_oc,
                 weight_path=self._client_weight_paths.get(request.request_id),
             )
-            weight_artifact_id = f"{assignment.task_id}-weight"
+            weight_artifact_id = f"{assignment.artifact_id}-weight"
             weight_artifact_descriptor = self.artifact_manager.publish_bytes(
                 weight_bytes,
                 producer_node_id=MAIN_NODE_NAME,
@@ -424,6 +435,17 @@ class WorkerTaskExchange:
                     stats_max_samples=stats_max_samples,
                 ),
             )
+        elif request.method == METHOD_GEMM:
+            gemm_spec = gemm_build_spec(default_variant=request.size or "large")
+            build_kwargs.update(
+                task_payload=GemmTaskPayload(
+                    m_start=assignment.m_start,
+                    m_end=assignment.m_end,
+                    m=gemm_spec.m,
+                    n=gemm_spec.n,
+                    k=gemm_spec.k,
+                )
+            )
         else:
             build_kwargs.update(
                 task_payload=GemvTaskPayload(
@@ -440,11 +462,12 @@ class WorkerTaskExchange:
             with task_lock:
                 with send_lock:
                     send_message(sock, task_assign)
-                task_scope = (
-                    f"oc={assignment.start_oc}:{assignment.end_oc}"
-                    if request.method == METHOD_CONV2D
-                    else f"rows={assignment.row_start}:{assignment.row_end}"
-                )
+                if request.method == METHOD_CONV2D:
+                    task_scope = f"oc={assignment.start_oc}:{assignment.end_oc}"
+                elif request.method == METHOD_GEMM:
+                    task_scope = f"m_rows={assignment.m_start}:{assignment.m_end}"
+                else:
+                    task_scope = f"rows={assignment.row_start}:{assignment.row_end}"
                 write_audit_event(
                     f"{RUNTIME_MSG_TASK_ASSIGN} to {assignment.connection.node_name} "
                     f"id={assignment.connection.runtime_id} "
@@ -586,6 +609,9 @@ class WorkerTaskExchange:
                         output_h=task_result.output_h,
                         output_w=task_result.output_w,
                         result_artifact_id=task_result.result_artifact_id,
+                        m_start=task_result.m_start,
+                        m_end=task_result.m_end,
+                        method=request.method,
                         computation_ms=task_result.computation_ms,
                         peripheral_ms=task_result.peripheral_ms,
                     )
@@ -600,11 +626,12 @@ class WorkerTaskExchange:
                 artifact_fetch_ms = max(
                     0, int((slice_finished_at - artifact_fetch_started_at) * 1000)
                 ) if task_result.result_artifact is not None else 0
-                slice_label = (
-                    f"oc={assignment.start_oc}:{assignment.end_oc}"
-                    if request.method == METHOD_CONV2D
-                    else f"rows={assignment.row_start}:{assignment.row_end}"
-                )
+                if request.method == METHOD_CONV2D:
+                    slice_label = f"oc={assignment.start_oc}:{assignment.end_oc}"
+                elif request.method == METHOD_GEMM:
+                    slice_label = f"m_rows={assignment.m_start}:{assignment.m_end}"
+                else:
+                    slice_label = f"rows={assignment.row_start}:{assignment.row_end}"
                 timing = WorkerTiming(
                     node_id=assignment.connection.runtime_id,
                     task_id=assignment.task_id,

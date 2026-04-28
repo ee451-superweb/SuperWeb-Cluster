@@ -14,13 +14,15 @@ class GemvMethodHandler:
 
     method_name = "gemv"
 
-    def __init__(self, inventory=None) -> None:
+    def __init__(self, inventory=None, *, pinned_backend: str | None = None) -> None:
         """Create the shared GEMV task executor for this handler.
 
         Args:
             inventory: Optional runtime processor inventory override.
+            pinned_backend: Optional backend name passed to the executor so it
+                only advertises and uses the pinned backend at runtime.
         """
-        self._executor = GemvTaskExecutor(inventory)
+        self._executor = GemvTaskExecutor(inventory, pinned_backend=pinned_backend)
 
     def execute_task(self, task):
         """Execute one GEMV task through the shared executor.

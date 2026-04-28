@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.constants import METHOD_GEMV
+from core.constants import METHOD_GEMV
 
 METHOD_NAME = METHOD_GEMV
 DISPLAY_NAME = "Fixed Matrix-Vector Multiplication"

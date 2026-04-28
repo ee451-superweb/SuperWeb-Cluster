@@ -15,12 +15,14 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
-from adapters.audit_log import write_audit_event
-from app.constants import (
+from adapters.audit_log import write_audit_event, write_diag_event
+from core.constants import (
     CONV2D_CLIENT_RESPONSE_STATS_ONLY,
     CONV2D_STATS_MAX_SAMPLES,
+    INLINE_RESPONSE_ENVELOPE_MARGIN,
     MAIN_NODE_NAME,
     METHOD_FREE_CONTENT,
+    METHOD_GEMM,
     METHOD_GEMV,
     METHOD_CONV2D,
     STATUS_BAD_REQUEST,
@@ -28,12 +30,14 @@ from app.constants import (
     STATUS_NOT_FOUND,
     STATUS_OK,
 )
-from app.trace_utils import trace_function
-from common.work_partition import partition_contiguous_range
+from core.tracing import trace_function
+from core.work_partition import partition_contiguous_range
 from compute_node.input_matrix.gemv import build_input_matrix_spec as build_gemv_input_matrix_spec
+from compute_node.input_matrix.gemm import build_spec as gemm_build_spec
 from compute_node.compute_methods.conv2d.executor import load_named_workload_spec
 from main_node.dispatcher import WorkerTaskSlice
-from wire.internal_protocol.runtime_transport import (
+from wire.internal_protocol.transport import (
+    GemmResponsePayload,
     GemvResponsePayload,
     Conv2dResponsePayload,
     ResponseTiming,
@@ -112,7 +116,7 @@ class ClientRequestHandler:
         if not isinstance(method_totals, dict):
             method_totals = {}
         main_node_host = getattr(self.artifact_manager, "public_host", "127.0.0.1") or "127.0.0.1"
-        supported_methods = ", ".join((METHOD_GEMV, METHOD_CONV2D, METHOD_FREE_CONTENT))
+        supported_methods = ", ".join((METHOD_GEMV, METHOD_CONV2D, METHOD_GEMM, METHOD_FREE_CONTENT))
         return "\n".join(
             (
                 "superweb-cluster system overview",
@@ -122,6 +126,7 @@ class ClientRequestHandler:
                 f"total_effective_gflops: {total_effective_gflops:.3f}",
                 f"gemv_effective_gflops: {self._safe_float(method_totals.get(METHOD_GEMV, 0.0)):.3f}",
                 f"conv2d_effective_gflops: {self._safe_float(method_totals.get(METHOD_CONV2D, 0.0)):.3f}",
+                f"gemm_effective_gflops: {self._safe_float(method_totals.get(METHOD_GEMM, 0.0)):.3f}",
                 f"supported_methods: {supported_methods}",
             )
         )
@@ -212,6 +217,8 @@ class ClientRequestHandler:
         """
         if failed_slice.method == METHOD_GEMV:
             range_start, range_end = failed_slice.row_start, failed_slice.row_end
+        elif failed_slice.method == METHOD_GEMM:
+            range_start, range_end = failed_slice.m_start, failed_slice.m_end
         else:
             range_start, range_end = failed_slice.start_oc, failed_slice.end_oc
         if range_end <= range_start:
@@ -240,6 +247,20 @@ class ClientRequestHandler:
                         row_end=partition.end,
                         effective_gflops=float(original_weights.get(connection.peer_id, 0.0)),
                         method=METHOD_GEMV,
+                    )
+                )
+            elif failed_slice.method == METHOD_GEMM:
+                retry_slices.append(
+                    WorkerTaskSlice(
+                        connection=connection,
+                        task_id=retry_task_id,
+                        artifact_id=f"{retry_task_id}:{connection.runtime_id}",
+                        row_start=0,
+                        row_end=0,
+                        m_start=partition.start,
+                        m_end=partition.end,
+                        effective_gflops=float(original_weights.get(connection.peer_id, 0.0)),
+                        method=METHOD_GEMM,
                     )
                 )
             else:
@@ -300,6 +321,8 @@ class ClientRequestHandler:
         def _slice_scope(slice_: WorkerTaskSlice) -> str:
             if request.method == METHOD_CONV2D:
                 return f"oc={slice_.start_oc}:{slice_.end_oc}"
+            if request.method == METHOD_GEMM:
+                return f"m_rows={slice_.m_start}:{slice_.m_end}"
             return f"rows={slice_.row_start}:{slice_.row_end}"
 
         def _submit_retry(slice_: WorkerTaskSlice):
@@ -324,10 +347,23 @@ class ClientRequestHandler:
             return executor.submit(self.run_worker_task_slice, request, slice_)
 
         max_workers = max(len(assignments), 1) * 2
+        dispatch_started_at = time.monotonic()
+        total_dispatched = len(assignments)
         with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="task-dispatch") as executor:
             for assignment in assignments:
                 future = executor.submit(self.run_worker_task_slice, request, assignment)
                 pending[future] = assignment
+            distinct_initial_workers = {
+                assignment.connection.runtime_id for assignment in assignments
+            }
+            write_diag_event(
+                f"[DIAG] all initial assignments submitted request_id={request.request_id} "
+                f"slice_count={len(assignments)} "
+                f"dispatched_workers={len(distinct_initial_workers)} "
+                f"cluster_workers={self.registry.count_workers()} "
+                f"submit_elapsed_ms={max(0, int((time.monotonic() - dispatch_started_at) * 1000))}",
+                logger=self.logger,
+            )
 
             while pending:
                 done, _ = concurrent.futures.wait(
@@ -337,7 +373,24 @@ class ClientRequestHandler:
                 for future in done:
                     failed_assignment = pending.pop(future)
                     try:
-                        outcomes.append(future.result())
+                        task_result, timing = future.result()
+                        outcomes.append((task_result, timing))
+                        artifact_bytes = (
+                            task_result.result_artifact.size_bytes
+                            if task_result.result_artifact is not None
+                            else 0
+                        )
+                        write_diag_event(
+                            f"[DIAG] worker outcome collected request_id={request.request_id} "
+                            f"received={len(outcomes)}/{total_dispatched} "
+                            f"remaining={len(pending)} "
+                            f"task_id={failed_assignment.task_id} "
+                            f"runtime_id={failed_assignment.connection.runtime_id} "
+                            f"wall_ms={timing.wall_ms} artifact_fetch_ms={timing.artifact_fetch_ms} "
+                            f"computation_ms={timing.computation_ms} peripheral_ms={timing.peripheral_ms} "
+                            f"artifact_bytes={artifact_bytes}",
+                            logger=self.logger,
+                        )
                         continue
                     except (OSError, ValueError, ConnectionError, RuntimeError) as exc:
                         peer_id = _peer_id(failed_assignment)
@@ -374,7 +427,14 @@ class ClientRequestHandler:
                             )
                             future = _submit_retry(retry_slice)
                             pending[future] = retry_slice
+                            total_dispatched += 1
 
+        write_diag_event(
+            f"[DIAG] all worker outcomes collected request_id={request.request_id} "
+            f"outcome_count={len(outcomes)}/{total_dispatched} "
+            f"total_elapsed_ms={max(0, int((time.monotonic() - dispatch_started_at) * 1000))}",
+            logger=self.logger,
+        )
         return outcomes
 
     @trace_function
@@ -436,7 +496,7 @@ class ClientRequestHandler:
                 iteration_count=request.iteration_count,
             )
 
-        if request.method not in (METHOD_GEMV, METHOD_CONV2D):
+        if request.method not in (METHOD_GEMV, METHOD_CONV2D, METHOD_GEMM):
             return build_response(
                 status_code=STATUS_BAD_REQUEST,
                 method=request.method,
@@ -501,6 +561,27 @@ class ClientRequestHandler:
                 workers=workers,
                 worker_hardware=self.registry.list_worker_hardware(METHOD_GEMV),
             )
+        elif request.method == METHOD_GEMM:
+            try:
+                gemm_spec = gemm_build_spec(default_variant=request.size or "large")
+            except ValueError as exc:
+                return build_response(
+                    status_code=STATUS_BAD_REQUEST,
+                    method=request.method,
+                    object_id=request.object_id,
+                    stream_id=request.stream_id,
+                    error_message=str(exc),
+                    worker_count=worker_count,
+                    client_count=client_count,
+                    client_id="",
+                    iteration_count=request.iteration_count,
+                )
+            assignments = self.dispatcher.dispatch_gemm(
+                request_id=request.request_id,
+                rows=gemm_spec.m,
+                workers=workers,
+                worker_hardware=self.registry.list_worker_hardware(METHOD_GEMM),
+            )
         else:
             try:
                 spec, _variant = load_named_workload_spec(request.object_id, size=request.size)
@@ -518,9 +599,17 @@ class ClientRequestHandler:
                 )
 
             if allocation.upload_future is not None:
+                upload_wait_started_at = time.monotonic()
                 try:
                     weight_path = allocation.upload_future.result(
                         timeout=float(self.config.compute_artifact_ttl_seconds),
+                    )
+                    write_diag_event(
+                        f"[DIAG] client weight upload received task_id={task_id} "
+                        f"upload_id={allocation.upload_id} "
+                        f"local_path={weight_path} "
+                        f"wait_ms={max(0, int((time.monotonic() - upload_wait_started_at) * 1000))}",
+                        logger=self.logger,
                     )
                 except concurrent.futures.TimeoutError as exc:
                     self.artifact_manager.cancel_upload_slot(allocation.upload_id)
@@ -590,6 +679,41 @@ class ClientRequestHandler:
                 iteration_count=request.iteration_count,
             )
 
+        total_effective_gflops = sum(
+            float(a.effective_gflops or 0.0) for a in assignments
+        )
+        assignment_descriptions: list[str] = []
+        for assignment in assignments:
+            if request.method == METHOD_CONV2D:
+                scope = f"oc={assignment.start_oc}:{assignment.end_oc} span={assignment.end_oc - assignment.start_oc}"
+            elif request.method == METHOD_GEMM:
+                scope = f"m_rows={assignment.m_start}:{assignment.m_end} span={assignment.m_end - assignment.m_start}"
+            else:
+                scope = f"rows={assignment.row_start}:{assignment.row_end} span={assignment.row_end - assignment.row_start}"
+            weight_frac = (
+                float(assignment.effective_gflops or 0.0) / total_effective_gflops
+                if total_effective_gflops > 0
+                else 0.0
+            )
+            assignment_descriptions.append(
+                f"[runtime_id={assignment.connection.runtime_id} "
+                f"gflops={float(assignment.effective_gflops or 0.0):.3f} "
+                f"frac={weight_frac:.3f} {scope}]"
+            )
+        distinct_worker_runtime_ids = {
+            assignment.connection.runtime_id for assignment in assignments
+        }
+        write_diag_event(
+            f"[DIAG] request accepted task_id={task_id} method={request.method} "
+            f"size={request.size or 'large'} "
+            f"cluster_workers={self.registry.count_workers()} "
+            f"dispatched_workers={len(distinct_worker_runtime_ids)} "
+            f"slice_count={len(assignments)} "
+            f"total_effective_gflops={total_effective_gflops:.3f} "
+            f"assignments={' '.join(assignment_descriptions)}",
+            logger=self.logger,
+        )
+
         try:
             completion_conv2d_stats_only = False
             dispatch_done_at = time.monotonic()
@@ -610,7 +734,7 @@ class ClientRequestHandler:
                 )
                 output_length = gemv_spec.rows
                 result_artifact = None
-                if len(output_vector) > self.config.max_message_size:
+                if len(output_vector) + INLINE_RESPONSE_ENVELOPE_MARGIN > self.config.max_message_size:
                     result_artifact = self.artifact_manager.publish_bytes(
                         output_vector,
                         producer_node_id=MAIN_NODE_NAME,
@@ -621,6 +745,41 @@ class ClientRequestHandler:
                 response_payload = GemvResponsePayload(
                     output_length=output_length,
                     output_vector=output_vector,
+                )
+            elif request.method == METHOD_GEMM:
+                task_window_started_at = time.monotonic()
+                outcomes = self._run_assignments_with_failover(request, assignments)
+                task_window_done_at = time.monotonic()
+                task_results = [outcome[0] for outcome in outcomes]
+                worker_timings = tuple(outcome[1] for outcome in outcomes)
+                write_audit_event(
+                    f"aggregating result task_id={task_id} method={request.method} size={request.size or 'large'} worker_slices={len(task_results)}",
+                    stdout=True,
+                    logger=self.logger,
+                )
+                output_vector = self.aggregator.collect_gemm_result(
+                    m=gemm_spec.m,
+                    n=gemm_spec.n,
+                    results=task_results,
+                )
+                output_length = gemm_spec.m * gemm_spec.n
+                if self.artifact_manager is None:
+                    raise RuntimeError("artifact manager is required to publish GEMM results")
+                # GEMM results always go through the data plane, never inline:
+                # even the smallest variant (m=n=k=1024) produces a 4 MiB C
+                # matrix that matches the max_message_size budget exactly, so
+                # inline encoding always risks tripping the receiver's size
+                # guard once the envelope fields are serialised. Mirrors
+                # conv2d's unconditional-artifact behaviour.
+                result_artifact = self.artifact_manager.publish_bytes(
+                    output_vector,
+                    producer_node_id=MAIN_NODE_NAME,
+                    content_type="application/octet-stream",
+                    artifact_id=request.request_id,
+                )
+                response_payload = GemmResponsePayload(
+                    output_length=output_length,
+                    output_vector=b"",
                 )
             else:
                 spec, _variant = load_named_workload_spec(request.object_id, size=request.size)
@@ -708,6 +867,13 @@ class ClientRequestHandler:
                         result_artifact_id=result_artifact.artifact_id if result_artifact is not None else "",
                     )
             aggregate_done_at = time.monotonic()
+            write_diag_event(
+                f"[DIAG] aggregator finished task_id={task_id} method={request.method} "
+                f"aggregate_ms={max(0, int((aggregate_done_at - task_window_done_at) * 1000))} "
+                f"output_length={output_length} "
+                f"result_artifact={'yes' if result_artifact is not None else 'no'}",
+                logger=self.logger,
+            )
             timing = ResponseTiming(
                 dispatch_ms=max(0, int((dispatch_done_at - started_at) * 1000)),
                 task_window_ms=max(0, int((task_window_done_at - task_window_started_at) * 1000)),

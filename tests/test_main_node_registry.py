@@ -3,9 +3,9 @@
 import unittest
 from unittest import mock
 
-from app.constants import METHOD_GEMV, METHOD_CONV2D
-from common.types import ComputeHardwarePerformance, ComputePerformanceSummary, HardwareProfile
-from common.types import MethodPerformanceSummary
+from core.constants import METHOD_GEMV, METHOD_CONV2D
+from core.types import ComputeHardwarePerformance, ComputePerformanceSummary, HardwareProfile
+from core.types import MethodPerformanceSummary
 from main_node.registry import ClusterRegistry
 
 

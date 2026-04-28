@@ -1,0 +1,110 @@
+"""Shared constants for superweb-cluster."""
+
+APP_NAME = "superweb-cluster"
+APP_SLUG = "superweb-cluster"
+LOGGER_NAME = "superweb_cluster"
+LOG_DIRECTORY_NAME = "logs"
+
+DEFAULT_NODE_NAME = "node"
+MAIN_NODE_NAME = "main node"
+MAIN_NODE_SLUG = "main-node"
+COMPUTE_NODE_NAME = "compute node"
+COMPUTE_NODE_SLUG = "compute-node"
+SUPERWEB_CLIENT_NAME = "superweb client"
+SUPERWEB_CLIENT_SLUG = "superweb-client"
+
+RUNTIME_ROLE_MAIN = "main"
+RUNTIME_ROLE_WORKER = "worker"
+RUNTIME_ROLE_CLIENT = "client"
+
+DEFAULT_MULTICAST_GROUP = "224.0.0.251"
+DEFAULT_DISCOVERY_PORT = 5353
+DEFAULT_TCP_PORT = 52020
+DEFAULT_DATA_PLANE_PORT = 52021
+DEFAULT_DISCOVERY_TIMEOUT = 1.0
+DEFAULT_BUFFER_SIZE = 2048
+DEFAULT_MULTICAST_TTL = 255
+DEFAULT_DISCOVERY_ATTEMPTS = 3
+DEFAULT_DISCOVERY_RETRY_DELAY = 0.3
+DEFAULT_MAIN_NODE_POLL_TIMEOUT = 1.0
+DEFAULT_RUNTIME_SOCKET_TIMEOUT = 1.0
+DEFAULT_TCP_CONNECT_TIMEOUT = 5.0
+DEFAULT_HEARTBEAT_INTERVAL = 10.0
+DEFAULT_HEARTBEAT_RETRY_COUNT = 3
+DEFAULT_MAX_PROTOBUF_MESSAGE_SIZE = 4 * 1024 * 1024
+# Headroom reserved for protobuf envelope fields (request_id, node_id, timing
+# blocks, per-worker entries, ...) when deciding whether a payload should be
+# inlined into one message or published as a fetched artifact instead. An
+# ``output_vector`` exactly equal to ``max_message_size`` serialises past the
+# limit once the surrounding fields are encoded — GEMM small (m=n=k=1024
+# produces exactly 4 MiB) hits this edge. 64 KiB accommodates hundreds of
+# per-worker timing entries with long runtime_ids and keeps the boundary
+# comfortably below the receiver's guard.
+INLINE_RESPONSE_ENVELOPE_MARGIN = 64 * 1024
+DEFAULT_ARTIFACT_CHUNK_SIZE = 512 * 1024
+DEFAULT_ARTIFACT_TRANSFER_TIMEOUT = 30.0
+DEFAULT_COMPUTE_ARTIFACT_TTL_SECONDS = 600.0
+DEFAULT_CLIENT_INFO_TIMEOUT = 5.0
+DEFAULT_LOG_FILE_MAX_BYTES = 16 * 1024 * 1024
+DEFAULT_LOG_FILE_BACKUP_COUNT = 8
+DEFAULT_CONV2D_CUDA_COOLDOWN_MS = 2.5
+
+MDNS_SERVICE_TYPE = "_superweb-cluster._tcp.local."
+MDNS_SERVICE_ROLE = MAIN_NODE_SLUG
+MDNS_RECORD_TTL = 120
+MDNS_QUERY_UNICAST_RESPONSE = True
+
+RUNTIME_MSG_REGISTER_WORKER = "REGISTER_WORKER"
+RUNTIME_MSG_REGISTER_OK = "REGISTER_OK"
+RUNTIME_MSG_HEARTBEAT = "HEARTBEAT"
+RUNTIME_MSG_HEARTBEAT_OK = "HEARTBEAT_OK"
+RUNTIME_MSG_CLIENT_JOIN = "CLIENT_JOIN"
+RUNTIME_MSG_CLIENT_REQUEST = "CLIENT_REQUEST"
+RUNTIME_MSG_CLIENT_REQUEST_OK = "CLIENT_REQUEST_OK"
+RUNTIME_MSG_CLIENT_RESPONSE = "CLIENT_RESPONSE"
+RUNTIME_MSG_TASK_ASSIGN = "TASK_ASSIGN"
+RUNTIME_MSG_TASK_ACCEPT = "TASK_ACCEPT"
+RUNTIME_MSG_TASK_FAIL = "TASK_FAIL"
+RUNTIME_MSG_TASK_RESULT = "TASK_RESULT"
+RUNTIME_MSG_ARTIFACT_RELEASE = "ARTIFACT_RELEASE"
+RUNTIME_MSG_WORKER_UPDATE = "WORKER_UPDATE"
+RUNTIME_MSG_CLIENT_INFO_REQUEST = "CLIENT_INFO_REQUEST"
+RUNTIME_MSG_CLIENT_INFO_REPLY = "CLIENT_INFO_REPLY"
+
+METHOD_GEMV = "gemv"
+METHOD_CONV2D = "conv2d"
+METHOD_GEMM = "gemm"
+METHOD_FREE_CONTENT = "free_content"
+
+BACKEND_CPU = "cpu"
+BACKEND_CUDA = "cuda"
+BACKEND_METAL = "metal"
+BACKEND_CHOICES = (BACKEND_CPU, BACKEND_CUDA, BACKEND_METAL)
+GPU_BACKEND_PRIORITY = (BACKEND_CUDA, BACKEND_METAL)
+
+# Conv2dClientResponseMode (wire/proto/superweb_cluster_runtime.proto); default is FULL.
+CONV2D_CLIENT_RESPONSE_FULL = 0
+CONV2D_CLIENT_RESPONSE_STATS_ONLY = 1
+# First N float32 values (file order) included in STATS_ONLY responses.
+CONV2D_STATS_MAX_SAMPLES = 32
+
+DX12_BACKEND_DISABLED_REASON = (
+    "DX12 backend is disabled due to a fatal instability bug that can trigger "
+    "system-level crashes or power-protection events during benchmark execution. "
+    "Do not use DX12 in this build."
+)
+
+STATUS_OK = 200
+STATUS_ACCEPTED = 202
+STATUS_BAD_REQUEST = 400
+STATUS_NOT_FOUND = 404
+STATUS_CONFLICT = 409
+STATUS_INTERNAL_ERROR = 500
+
+WINDOWS_FIREWALL_RULE_NAME = "SuperWebClusterDiscoveryUDP"
+WINDOWS_FIREWALL_DATA_PLANE_RULE_NAME = "SuperWebClusterDataPlaneTCP"
+
+MSG_DISCOVERY_TIMEOUT = "Discovery timed out."
+MSG_MANUAL_PROMPT = "Enter peer host or host:port (leave blank to cancel): "
+MSG_MANUAL_CANCELLED = "Manual input cancelled."
+MSG_NOT_IMPLEMENTED = "Not implemented in Sprint 1."

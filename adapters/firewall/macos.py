@@ -1,8 +1,8 @@
 ﻿"""macOS firewall skeleton for the kickoff version."""
 
-from common.types import FirewallStatus
-from app.constants import MSG_NOT_IMPLEMENTED
-from app.trace_utils import trace_function
+from core.types import FirewallStatus
+from core.constants import MSG_NOT_IMPLEMENTED
+from core.tracing import trace_function
 
 
 @trace_function

@@ -18,13 +18,9 @@ import time
 from functools import lru_cache
 from pathlib import Path
 
-from app.constants import (
-    DEFAULT_CONV2D_CUDA_COOLDOWN_MS,
-    DEFAULT_CONV2D_CUDA_OUTPUT_CHANNEL_BATCH_SCALE,
-)
-from app.compute_resource_policy import (
+from core.constants import DEFAULT_CONV2D_CUDA_COOLDOWN_MS
+from supervision.compute_resource_policy import (
     build_conv2d_cuda_output_channel_batch_candidates,
-    resolve_scaled_conv2d_cuda_output_channel_batch,
 )
 from compute_node.compute_methods.conv2d import (
     CUDA_BUILD_DIR,
@@ -63,7 +59,6 @@ DESIRED_FATBIN_SMS = (
 )
 PTX_FALLBACK_PREFERENCE = ("120", "110", "100", "90", "89", "86", "80", "75", "70", "61", "52", "50")
 CONV2D_CUDA_OUTPUT_CHANNEL_BATCH_OVERRIDE: tuple[int, ...] | None = None
-CONV2D_CUDA_OUTPUT_CHANNEL_BATCH_SCALE = DEFAULT_CONV2D_CUDA_OUTPUT_CHANNEL_BATCH_SCALE
 CONV2D_CUDA_COOLDOWN_MS = DEFAULT_CONV2D_CUDA_COOLDOWN_MS
 
 _RAW_REPORT_KEYS = (
@@ -338,7 +333,6 @@ class CudaBackend:
             "autotune_repeats": _autotune_repeats(spec),
             "measurement_repeats": _measurement_repeats(spec),
             "output_channel_batch_candidates": _candidate_output_channel_batches(spec),
-            "output_channel_batch_scale": CONV2D_CUDA_OUTPUT_CHANNEL_BATCH_SCALE,
             "cooldown_ms": CONV2D_CUDA_COOLDOWN_MS,
         }
 
@@ -489,19 +483,14 @@ class CudaBackend:
         selected_transpose = int(autotune_metrics["transpose"])
         selected_block_size = int(autotune_metrics["block_size"])
         selected_tile_size = int(autotune_metrics["tile_size"])
-        selected_autotune_batch = int(autotune_metrics.get("output_channel_batch") or measurement_spec.c_out)
-        selected_measurement_batch = resolve_scaled_conv2d_cuda_output_channel_batch(
-            selected_autotune_batch,
-            measurement_spec.c_out,
-            scale=CONV2D_CUDA_OUTPUT_CHANNEL_BATCH_SCALE,
+        selected_output_channel_batch = int(
+            autotune_metrics.get("output_channel_batch") or measurement_spec.c_out
         )
         selected_config = {
             "transpose": bool(selected_transpose),
             "block_size": selected_block_size,
             "tile_size": selected_tile_size,
-            "output_channel_batch": selected_measurement_batch,
-            "autotuned_output_channel_batch": selected_autotune_batch,
-            "output_channel_batch_scale": CONV2D_CUDA_OUTPUT_CHANNEL_BATCH_SCALE,
+            "output_channel_batch": selected_output_channel_batch,
             "cooldown_ms": float(autotune_metrics.get("cooldown_ms", CONV2D_CUDA_COOLDOWN_MS)),
             "autotune_repeats": int(autotune_metrics["autotune_repeats"]),
             "measurement_repeats": final_measurement_repeats,
@@ -518,7 +507,7 @@ class CudaBackend:
                 block_sizes=[selected_block_size],
                 tile_sizes=[selected_tile_size],
                 transpose_modes=[selected_transpose],
-                output_channel_batches=[selected_measurement_batch],
+                output_channel_batches=[selected_output_channel_batch],
                 autotune_repeats=1,
                 measurement_repeats=final_measurement_repeats,
                 timeout_seconds=max(time_budget_seconds, 30.0),
@@ -552,12 +541,6 @@ class CudaBackend:
 
         if measurement_spec != spec or measurement_dataset != dataset:
             notes.append(f"Autotuned on {spec.name} and measured on {measurement_spec.name}.")
-        if selected_measurement_batch != selected_autotune_batch:
-            notes.append(
-                "Scaled CUDA output-channel batch "
-                f"{selected_autotune_batch} -> {selected_measurement_batch} "
-                f"using runtime batch scale {CONV2D_CUDA_OUTPUT_CHANNEL_BATCH_SCALE:.3f}."
-            )
 
         autotune_score = linear_time_score(
             float(autotune_metrics["autotune_wall_clock_latency_seconds"]),
@@ -575,8 +558,7 @@ class CudaBackend:
             "shared_input": bool(int(autotune_metrics.get("shared_input", 0))),
             "block_size": int(autotune_metrics["block_size"]),
             "tile_size": int(autotune_metrics["tile_size"]),
-            "output_channel_batch": selected_autotune_batch,
-            "output_channel_batch_scale": CONV2D_CUDA_OUTPUT_CHANNEL_BATCH_SCALE,
+            "output_channel_batch": selected_output_channel_batch,
             "cooldown_ms": float(autotune_metrics.get("cooldown_ms", CONV2D_CUDA_COOLDOWN_MS)),
             "autotune_repeats": int(autotune_metrics["autotune_repeats"]),
             "measurement_repeats": int(autotune_metrics["measurement_repeats"]),
@@ -587,9 +569,7 @@ class CudaBackend:
             "shared_input": bool(int(measurement_metrics.get("shared_input", 0))),
             "block_size": int(measurement_metrics["block_size"]),
             "tile_size": int(measurement_metrics["tile_size"]),
-            "output_channel_batch": int(measurement_metrics.get("output_channel_batch", selected_measurement_batch)),
-            "autotuned_output_channel_batch": selected_autotune_batch,
-            "output_channel_batch_scale": CONV2D_CUDA_OUTPUT_CHANNEL_BATCH_SCALE,
+            "output_channel_batch": int(measurement_metrics.get("output_channel_batch", selected_output_channel_batch)),
             "cooldown_ms": float(measurement_metrics.get("cooldown_ms", CONV2D_CUDA_COOLDOWN_MS)),
             "autotune_repeats": int(autotune_metrics["autotune_repeats"]),
             "measurement_repeats": int(measurement_metrics["measurement_repeats"]),
@@ -672,6 +652,8 @@ class CudaBackend:
         """
         command = [
             str(executable_path),
+            "--mode",
+            "benchmark",
             "--input",
             _relative_cli_path(dataset.input_path),
             "--weight",

@@ -11,7 +11,7 @@ import socket
 import struct
 import uuid
 
-from app.trace_utils import trace_function
+from core.tracing import trace_function
 
 
 @trace_function

@@ -146,6 +146,7 @@ message ClientRequest {
   oneof request_payload {
     GemvRequestPayload gemv = 8;
     Conv2dRequestPayload conv2d = 9;
+    GemmRequestPayload gemm = 11;
   }
 }
 
@@ -207,6 +208,7 @@ message ClientResponse {
   oneof response_payload {
     GemvResponsePayload gemv = 12;
     Conv2dResponsePayload conv2d = 13;
+    GemmResponsePayload gemm = 19;
   }
   ArtifactDescriptor result_artifact = 14;
   string task_id = 15;
@@ -229,6 +231,7 @@ message TaskAssign {
   oneof task_payload {
     GemvTaskPayload gemv = 9;
     Conv2dTaskPayload conv2d = 10;
+    GemmTaskPayload gemm = 15;
   }
   TransferMode transfer_mode = 11;
   string artifact_id = 13;
@@ -263,6 +266,7 @@ message TaskResult {
   oneof result_payload {
     GemvResultPayload gemv = 7;
     Conv2dResultPayload conv2d = 8;
+    GemmResultPayload gemm = 12;
   }
   ArtifactDescriptor result_artifact = 9;
   // Worker-observed native compute time for this task (sum of
@@ -360,6 +364,39 @@ message Conv2dTaskPayload {
 message GemvResultPayload {
   uint32 row_start = 1;
   uint32 row_end = 2;
+  uint32 output_length = 3;
+  bytes output_vector = 4;
+}
+
+message GemmRequestPayload {
+  // Both A and B are pre-generated on each compute node from fixed seeds, so
+  // the client only names a canonical dataset size (small|mid|large). Per-run
+  // shapes are derived from the size on main and worker alike.
+}
+
+message GemmResponsePayload {
+  // Output C bytes in row-major float32 order. output_length counts float32
+  // elements (M*N), not bytes. When the merged tensor exceeds
+  // max_message_size the main node publishes it as result_artifact and clears
+  // output_vector (same convention as gemv).
+  uint32 output_length = 1;
+  bytes output_vector = 2;
+}
+
+message GemmTaskPayload {
+  // Assigned row range on the M axis. Each worker computes rows
+  // [m_start, m_end) of C. m/n/k are echoed for validation against the
+  // worker's locally generated A/B matrices.
+  uint32 m_start = 1;
+  uint32 m_end = 2;
+  uint32 m = 3;
+  uint32 n = 4;
+  uint32 k = 5;
+}
+
+message GemmResultPayload {
+  uint32 m_start = 1;
+  uint32 m_end = 2;
   uint32 output_length = 3;
   bytes output_vector = 4;
 }

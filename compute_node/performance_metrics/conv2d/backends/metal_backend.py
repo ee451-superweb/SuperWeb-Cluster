@@ -14,7 +14,6 @@ import sys
 import threading
 from pathlib import Path
 
-from app.compute_resource_policy import resolve_metal_headroom_policy
 from compute_node.compute_methods.conv2d import (
     METAL_BUILD_DIR,
     METAL_EXECUTABLE_PATH,
@@ -122,7 +121,6 @@ class MetalBackend:
             "implementation": "mpsgraph",
             "block_size_candidates": _candidate_block_sizes(),
             "tile_size_candidates": _candidate_tile_sizes(),
-            "headroom_fraction": resolve_metal_headroom_policy(2).headroom_fraction,
             "autotune_repeats": DEFAULT_AUTOTUNE_REPEATS,
             "measurement_repeats": DEFAULT_MEASUREMENT_REPEATS,
             "runner_path": str(METAL_EXECUTABLE_PATH),
@@ -223,17 +221,16 @@ class MetalBackend:
             1 if (measurement_spec != spec or measurement_dataset != dataset)
             else DEFAULT_MEASUREMENT_REPEATS
         )
-        autotune_headroom_policy = resolve_metal_headroom_policy(spec.c_out)
-        measurement_headroom_policy = resolve_metal_headroom_policy(measurement_spec.c_out)
+        autotune_output_channel_batch = max(1, int(spec.c_out))
+        measurement_output_channel_batch = max(1, int(measurement_spec.c_out))
 
         block_sizes = _candidate_block_sizes()
         tile_sizes = _candidate_tile_sizes()
         notes.append("implementation: official Apple MPSGraph convolution2D")
         notes.append("launch-shape autotune hints are accepted for interface compatibility but ignored by MPSGraph")
         notes.append("wall-clock timings include MPSGraph graph construction and initial compilation cost")
-        notes.append(f"shared_headroom_fraction: {measurement_headroom_policy.headroom_fraction:.3f}")
-        notes.append(f"translated_autotune_output_channel_batch: {autotune_headroom_policy.work_chunk_size}")
-        notes.append(f"translated_measurement_output_channel_batch: {measurement_headroom_policy.work_chunk_size}")
+        notes.append(f"autotune_output_channel_batch: {autotune_output_channel_batch}")
+        notes.append(f"measurement_output_channel_batch: {measurement_output_channel_batch}")
         notes.append(f"autotune_repeats_per_run: {DEFAULT_AUTOTUNE_REPEATS}")
         notes.append(f"measurement_repeats_for_best_run: {final_measurement_repeats}")
 
@@ -244,8 +241,7 @@ class MetalBackend:
                 dataset,
                 block_sizes=block_sizes,
                 tile_sizes=tile_sizes,
-                headroom_fraction=autotune_headroom_policy.headroom_fraction,
-                output_channel_batch=autotune_headroom_policy.work_chunk_size,
+                output_channel_batch=autotune_output_channel_batch,
                 autotune_repeats=DEFAULT_AUTOTUNE_REPEATS,
                 measurement_repeats=1,
                 timeout_seconds=max(time_budget_seconds, 30.0),
@@ -289,8 +285,7 @@ class MetalBackend:
                 measurement_dataset,
                 block_sizes=block_sizes,
                 tile_sizes=tile_sizes,
-                headroom_fraction=measurement_headroom_policy.headroom_fraction,
-                output_channel_batch=measurement_headroom_policy.work_chunk_size,
+                output_channel_batch=measurement_output_channel_batch,
                 autotune_repeats=1,
                 measurement_repeats=final_measurement_repeats,
                 timeout_seconds=max(time_budget_seconds, 30.0),
@@ -397,7 +392,6 @@ class MetalBackend:
         *,
         block_sizes: list[int],
         tile_sizes: list[int],
-        headroom_fraction: float,
         output_channel_batch: int,
         autotune_repeats: int,
         measurement_repeats: int,
@@ -408,6 +402,8 @@ class MetalBackend:
 
         command = [
             str(executable_path),
+            "--mode",
+            "benchmark",
             "--input",
             _relative_cli_path(dataset.input_path),
             "--weight",
@@ -432,8 +428,6 @@ class MetalBackend:
             ",".join(str(value) for value in tile_sizes),
             "--include-preparation-in-metrics",
             "1",
-            "--headroom-fraction",
-            f"{headroom_fraction:.6f}",
             "--output-channel-batch",
             str(output_channel_batch),
             "--autotune-repeats",
@@ -624,7 +618,6 @@ class MetalBackend:
             "tile_size",
             "shared_input",
             "transpose",
-            "headroom_fraction",
             "output_channel_batch",
         ):
             if key in metrics:
