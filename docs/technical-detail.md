@@ -222,8 +222,9 @@ Sprint 3 delivered:
 - first iOS frontend covering mobile monitoring and lightweight control flows
 - a cleaner compute-method tree under `compute_node/compute_methods/` so runtime executors and benchmark backends share method source rather than duplicating it
 
-A detailed Sprint 3 planning document lives at
-[`sprint3_plan_2026-04-15.txt`](sprint3_plan_2026-04-15.txt).
+The original Sprint 3 planning document was archived during the
+2026-04-28 docs cleanup; see [`archived_plans.md`](archived_plans.md) for
+what it covered and where the resulting capability lives now.
 
 ## Sprint 4 Outcome
 

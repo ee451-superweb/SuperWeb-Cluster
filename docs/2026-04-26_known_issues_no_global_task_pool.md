@@ -1,66 +1,66 @@
-# 已知问题：缺少全局任务池导致的多 client 与 failover 性能瓶颈 — 2026-04-26
+# Known issue: lack of a global task pool causes multi-client and failover performance bottlenecks — 2026-04-26
 
-本文档记录项目当前架构中**已识别但本次作业周期内未予修复**的一项核心性能缺陷，供后续迭代或下一阶段工作参考。该问题在功能测试中不会暴露（所有请求最终都能正确返回），但在多 client 并发或 worker 故障场景下会显著拖慢端到端时延。
+This document records a core performance defect in the project's current architecture that has been **identified but intentionally not fixed within this assignment cycle**, for reference in later iterations or follow-up work. The issue does not surface in functional tests (every request still returns the correct result), but in multi-client concurrency or worker-failure scenarios it noticeably degrades end-to-end latency.
 
-## 1. 现象
+## 1. Symptom
 
-1. **多 client 并发提交时无全局调度仲裁**：两个 client 同时提交请求，main_node 会为每个 client 起一条独立线程并各自走完 `dispatch → ThreadPoolExecutor.submit → wait` 的流程，dispatcher 是 stateless 的，因此可能把同一个 worker 的同一时间窗口同时分配给两个请求。没有任何排队、准入控制（admission control）或背压机制。
-2. **failover 重派的 slice 必须在 survivor 跑完当前 slice 后才能开始执行**：单个请求内部，当某个 worker 失败时，重切的 retry slice 会立刻被 dispatcher 提交到 executor，但实际执行被 worker 端的连接锁阻塞，看起来就像"等所有人完成"。
+1. **No global scheduling arbitration when multiple clients submit concurrently.** When two clients submit requests at the same time, main_node spins up an independent thread per client and each one walks its own `dispatch -> ThreadPoolExecutor.submit -> wait` flow. The dispatcher is stateless across requests, so it can hand the same time window on the same worker to two different requests. There is no queueing, no admission control, and no backpressure.
+2. **Failover retry slices cannot start until the survivor finishes its current slice.** Within a single request, when a worker fails the re-partitioned retry slice is immediately submitted to the executor, but actual execution is blocked by the connection lock on the worker side, so the user-visible behavior looks like "wait for everyone to finish."
 
-## 2. 根因（重要：和直觉不一致）
+## 2. Root cause (important: counterintuitive)
 
-两个现象其实是**同一个根因的两个面**——但不是"缺任务池"本身，而是缺一个**对所有正在排队/正在执行的 slice 有全局视图的调度器**。
+The two symptoms are **two faces of the same root cause** — but the root cause is not "missing task pool" itself. It is the absence of a **scheduler with a global view of all queued and in-flight slices**.
 
-具体到 failover 路径，[request_handler.py:369-372](../main_node/request_handler.py#L369-L372) 的 dispatcher 循环用的是 `concurrent.futures.wait(..., return_when=FIRST_COMPLETED)`，**第一个 future 完成（无论成功失败）就会立刻醒来**。失败 slice 在 [request_handler.py:413-430](../main_node/request_handler.py#L413-L430) 立刻被重切并 `executor.submit` 出去——dispatcher 层完全没有等所有人。
+Concretely on the failover path, the dispatcher loop at [request_handler.py:369-372](../main_node/request_handler.py#L369-L372) uses `concurrent.futures.wait(..., return_when=FIRST_COMPLETED)`, which **wakes up the moment the first future completes (success or failure)**. The failed slice is immediately re-partitioned and `executor.submit`'d at [request_handler.py:413-430](../main_node/request_handler.py#L413-L430) — the dispatcher layer never waits for everyone.
 
-真正的阻塞在 worker 端的 `Connection.task_lock`。`_submit_retry` 自己的注释（[request_handler.py:328-347](../main_node/request_handler.py#L328-L347)）已经写明：
+The real block is the `Connection.task_lock` on the worker side. The comment on `_submit_retry` itself ([request_handler.py:328-347](../main_node/request_handler.py#L328-L347)) already spells it out:
 
 > When the survivor's `task_lock` is already held by an in-flight original slice, the retry will block inside `run_worker_task_slice` until that lock releases.
 
-也就是说：每个 worker 同一时间只能跑一个 slice。retry 被按原始 gflops 比例重分给 N-1 个 survivor 之后，这 N-1 个全都正在跑各自的原始 slice，于是 retry 全员排队——**表象是"等所有人完成"，机制是 N-1 个独立的 per-worker 等待并发发生**。
+In other words: each worker can only run one slice at a time. After the retry is re-distributed across the N-1 survivors proportional to their original GFLOPS, all N-1 of them are still running their original slices, so every retry queues up — **the appearance is "wait for everyone to finish," the mechanism is N-1 independent per-worker waits happening concurrently**.
 
-多 client 场景同理：两个独立的 `ClientRequestHandler` 实例都在调用 dispatcher，谁也看不到谁正在占用哪个 worker。
+The multi-client case is the same story: two independent `ClientRequestHandler` instances both call into the dispatcher, and neither one can see which workers the other is currently using.
 
-## 3. 仅加任务池**解决不了**整个问题
+## 3. Why "just add a queue" doesn't fix it
 
-这是本文档要强调的反直觉点。如果只在 main_node 加一个全局 FIFO 队列收 client 请求，那：
+This is the counterintuitive point this document wants to highlight. If we only add a global FIFO queue in front of main_node to receive client requests, then:
 
-- ✅ 多 client 不再互相抢 worker（队列按序出，每次 dispatch 看到的是独占的 worker 集合）
-- ❌ failover 仍然慢——retry slice 仍然只能被 push 到指定 survivor，仍然卡在 `task_lock` 上
+- Multi-client no longer fights over workers (the queue dequeues in order, so each dispatch sees an exclusive worker set)
+- Failover is still slow — retry slices are still pushed to specific survivors, still blocked on `task_lock`
 
-要同时解决两个问题，**正确的形态是"全局可窃取队列 + worker 主动 pull"**：
+To solve both at once, **the correct shape is "global stealable queue + worker-side pull"**:
 
-| 改造点 | 作用 |
-|--------|------|
-| main_node 持有全局 slice 队列（含原始 slice 与 retry slice） | 多 client 自然分流；retry 不再需要预先选 survivor |
-| worker 端从"被 push"改为"我闲了，给我下一个" | retry 自动落到当前最闲的 worker，无需 `_build_retry_assignments` 按 gflops 重分配 |
-| `_run_assignments_with_failover` 退化为"提交 + 等结果聚合"，不再做 worker 选择 | dispatcher 大幅简化 |
+| Change | Effect |
+|--------|--------|
+| main_node owns a global slice queue (both original and retry slices) | multi-client requests fan out naturally; retries no longer need to pre-select a survivor |
+| worker side switches from "being pushed" to "I'm idle, give me the next one" | retries land on whichever worker is currently freest, no need for `_build_retry_assignments` to re-distribute by GFLOPS |
+| `_run_assignments_with_failover` collapses to "submit + wait for result aggregation" with no worker selection | dispatcher simplifies dramatically |
 
-副产物：`_build_retry_assignments` 中按 `original_weights` 加权切分的逻辑（[request_handler.py:230-280](../main_node/request_handler.py#L230-L280) 附近）可以删掉一大半。
+By-product: a large chunk of the `original_weights`-weighted partitioning logic in `_build_retry_assignments` (around [request_handler.py:230-280](../main_node/request_handler.py#L230-L280)) can be deleted.
 
-## 4. 为什么本次未实施
+## 4. Why this was not implemented in this cycle
 
-- 改造涉及 worker 端协议从 push 模型改为 pull 模型，需要修改 wire 协议、worker 主循环、heartbeat 含义，超出本次作业的工程预算。
-- 现有 push 模型已经能在功能正确性上覆盖所有评估场景；性能损失只在多 client 高频提交或 worker 故障率较高时才显著，与本次作业的评测重点（单 client 端到端正确性 + 异构后端调度）不重合。
-- 真正治本还需要决定 worker 端是否允许并发执行多 slice（涉及 GPU/CPU 资源切分策略），这是独立的设计决定，不应与"加队列"绑定。
+- The change moves the worker side from a push model to a pull model, which requires modifying the wire protocol, the worker main loop, and the meaning of heartbeat. That is beyond the engineering budget of this assignment.
+- The current push model already covers every evaluation scenario for functional correctness; the performance loss is only significant under high-frequency multi-client submission or high worker failure rate, neither of which is the focus of this assignment's evaluation (single-client end-to-end correctness + heterogeneous backend scheduling).
+- A real fix also requires deciding whether a worker should ever execute multiple slices concurrently (which involves GPU/CPU resource-partitioning policy). That is an independent design decision and should not be bundled with "add a queue."
 
-## 5. 相关代码位置
+## 5. Related code locations
 
-| 关注点 | 文件 | 行 |
-|--------|------|---|
-| Per-request executor，无跨请求视图 | [main_node/request_handler.py](../main_node/request_handler.py) | 282-438 |
-| `FIRST_COMPLETED` 等待循环 | [main_node/request_handler.py](../main_node/request_handler.py) | 369-372 |
-| Retry submit 后阻塞在 worker `task_lock` | [main_node/request_handler.py](../main_node/request_handler.py) | 328-347 |
-| Retry slice 按原始 gflops 重分配 | [main_node/request_handler.py](../main_node/request_handler.py) | 230-280 |
-| 多 client accept 循环（入口侧已是 multi-client clean） | [main_node/connection_service.py](../main_node/connection_service.py) | 208-250 |
-| Per-client 服务线程 | [main_node/connection_service.py](../main_node/connection_service.py) | 163-170 |
+| Concern | File | Line |
+|---------|------|------|
+| Per-request executor, no cross-request view | [main_node/request_handler.py](../main_node/request_handler.py) | 282-438 |
+| `FIRST_COMPLETED` wait loop | [main_node/request_handler.py](../main_node/request_handler.py) | 369-372 |
+| Retry submit blocks on worker `task_lock` | [main_node/request_handler.py](../main_node/request_handler.py) | 328-347 |
+| Retry slices re-partitioned by original GFLOPS | [main_node/request_handler.py](../main_node/request_handler.py) | 230-280 |
+| Multi-client accept loop (entry side is already multi-client clean) | [main_node/connection_service.py](../main_node/connection_service.py) | 208-250 |
+| Per-client service thread | [main_node/connection_service.py](../main_node/connection_service.py) | 163-170 |
 
-## 6. 后续如要落地的最小步骤建议
+## 6. Suggested minimum migration steps
 
-1. 在 main_node 增加 `GlobalSliceQueue`，以 `(request_id, slice)` 入队，含优先级字段供 retry slice 插队
-2. 增加 wire 协议消息 `WORKER_REQUEST_WORK` / `WORKER_NO_WORK_AVAILABLE`
-3. worker 主循环改为：完成一个 slice → 发 `WORKER_REQUEST_WORK` → 阻塞等下一个 → 收到则执行
-4. `_run_assignments_with_failover` 退化为：将 slice 全部 enqueue → 等所有 task_id 的结果回流 → 聚合
-5. heartbeat 保留为 liveness 信号，不再承担"分配新任务"的隐式作用
+1. Add a `GlobalSliceQueue` in main_node, enqueueing `(request_id, slice)` with a priority field so retry slices can jump the queue.
+2. Add wire-protocol messages `WORKER_REQUEST_WORK` / `WORKER_NO_WORK_AVAILABLE`.
+3. Change the worker main loop to: finish a slice -> send `WORKER_REQUEST_WORK` -> block waiting for the next one -> execute on receipt.
+4. Collapse `_run_assignments_with_failover` to: enqueue every slice -> wait for all results keyed by `task_id` to come back -> aggregate.
+5. Keep heartbeat as a liveness signal only; it no longer carries the implicit "ready to accept new work" semantics.
 
-如未来推进上述方向，建议同时引入端到端 benchmark：模拟 3 client × 持续提交，对比改造前后的尾延迟（p95/p99）与 worker 利用率曲线。
+If this direction is pursued in the future, it is worth introducing an end-to-end benchmark at the same time: simulate 3 clients × continuous submission and compare tail latency (p95/p99) and per-worker utilization curves before and after the change.
