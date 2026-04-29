@@ -1,58 +1,58 @@
-# 单机 2×Metal + 1×CPU 共享 GPU 并发行为分析 — 2026-04-22
+# Single-Machine 2xMetal + 1xCPU Shared GPU Concurrency Behavior Analysis - 2026-04-22
 
-本次测试目的是在单台 M1 Pro Mac 上启动 1 个 main_node + 3 个 compute_node（2 个以 Metal 为后端、1 个以 CPU 为后端），观察两个 Metal worker 争抢同一块物理 GPU 时的行为，以及 CPU worker 并存时的调度、心跳、数据面表现。结论：**系统行为完全符合单机共享 GPU 的物理约束，没有发现 bug**。
+The goal of this test was to launch 1 main_node + 3 compute_nodes (2 with Metal as backend, 1 with CPU as backend) on a single M1 Pro Mac, and observe the behavior of two Metal workers contending for the same physical GPU, as well as the scheduling, heartbeat, and data-plane behavior when a CPU worker coexists with them. Conclusion: **the system behavior is fully consistent with the physical constraints of single-machine shared GPU; no bug was found**.
 
-## 测试配置
+## Test Configuration
 
-| 角色 | 日志 | backend | 自报算力 |
+| Role | Log | backend | Self-reported throughput |
 |------|------|---------|---------|
-| main_node | `main-20260422-221819.txt` | — | — |
+| main_node | `main-20260422-221819.txt` | - | - |
 | worker-1 (peer-metal) | `worker-20260422-221854.txt` | Metal | gemv 80.021 GFLOPS / conv2d 955.035 GFLOPS |
 | worker-2 (metal) | `worker-20260422-222556.txt` | Metal | gemv 80.021 GFLOPS / conv2d 955.035 GFLOPS |
 | worker-3 (peer-cpu) | `worker-20260422-222558.txt` | CPU | gemv 52.488 GFLOPS / conv2d 202.933 GFLOPS |
 
-四个进程全部跑在同一台 Mac（`192.168.1.136`，M1 Pro，10 核 CPU，16 GB 统一内存）上。数据面走 loopback，实测 recv 带宽 5–7 GB/s，与内核 memcpy 一致，可以排除任何"跨机"假象。
+All four processes ran on the same Mac (`192.168.1.136`, M1 Pro, 10-core CPU, 16 GB unified memory). The data plane went through loopback, with measured recv bandwidth of 5-7 GB/s, matching kernel memcpy, which rules out any "cross-machine" illusion.
 
-客户端运行窗口 2026-04-22 23:12:18 – 23:16:39，共发起 8 次任务（gemv × 4，conv2d × 4），均 `status=200`。
+The client run window was 2026-04-22 23:12:18 - 23:16:39, with 8 tasks issued in total (gemv x 4, conv2d x 4), all returning `status=200`.
 
-## 关键观察
+## Key Observations
 
-### 1. 两个 Metal worker 在同一块 GPU 上被精确对半分（符合预期）
+### 1. The two Metal workers were split exactly in half on the same GPU (as expected)
 
-conv2d `size=large, iter=1` 的计时（`fixe-3 = conv2d-12`）：
+Timing for conv2d `size=large, iter=1` (`fixe-3 = conv2d-12`):
 
-| worker | 分到 oc | wall | compute | peripheral |
+| worker | assigned oc | wall | compute | peripheral |
 |--------|---------|------|---------|-----------|
 | worker-1 (metal) | 0:116 | 27087 ms | **21972 ms** | 20 ms |
 | worker-2 (metal) | 116:232 | 27073 ms | **22137 ms** | 21 ms |
 | worker-3 (cpu) | 232:256 | 26281 ms | 7727 ms | 16543 ms |
 
-两个 Metal worker 在：
+The two Metal workers showed:
 
-- **compute 时间差 0.75%**（21972 vs 22137 ms）
-- **finish 时间差 87 ms**（artifact publish 分别在 23:14:29.924 和 23:14:30.011）
-- 不是 serial（若 serial 应当差 22 秒），也不是 2× parallel（若真并行各自应是 ~11 秒）
+- **0.75% difference in compute time** (21972 vs 22137 ms)
+- **87 ms difference in finish time** (artifact publish at 23:14:29.924 and 23:14:30.011 respectively)
+- Not serial (if serial, the difference should be 22 seconds), and not 2x parallel (if truly parallel, each should take ~11 seconds)
 
-这是 Apple Silicon integrated GPU 在 **EU 级时间片轮转** 两个 Metal 进程命令队列的典型症状：两人同时推进，但每人只拿到约一半的 GPU 执行单元时间，因此各自感受到的 kernel 延迟正好翻倍。
+This is the typical symptom of Apple Silicon integrated GPU performing **EU-level time-slicing** between the two Metal processes' command queues: both advance simultaneously, but each only gets about half of the GPU execution unit time, so the kernel latency each one perceives is exactly doubled.
 
-### 2. GPU 并发吞吐不翻倍的根因
+### 2. Root cause of why GPU concurrent throughput does not double
 
-从 benchmark 源码侧可以直接印证：
+This can be confirmed directly from the benchmark source side:
 
-- `gemv_metal_runner.mm` 每 chunk 都 `commit` + `waitUntilCompleted`（[L243-249](../compute_node/compute_methods/gemv/metal/gemv_metal_runner.mm#L243-L249)），chunk 间 GPU 会 idle。GFLOPS 计算时优先采用 `GPUStartTime`/`GPUEndTime` 硬件时间戳（[L348-352](../compute_node/compute_methods/gemv/metal/gemv_metal_runner.mm#L348-L352)），因此 80 GFLOPS 是纯 GPU kernel 时间。M1 Pro 内存带宽 ~200 GB/s，gemv 的算术强度 0.5 flop/byte → 带宽上限约 100 GFLOPS，**当前 80 GFLOPS 已经吃到带宽的 80%**，几乎无并发加速空间。
-- `conv2d_metal_runner.mm` 用 MPSGraph 的同步 API `runWithMTLCommandQueue`（[L491-502](../compute_node/compute_methods/conv2d/metal/conv2d_metal_runner.mm#L491-L502)），计时用 `steady_clock` 包住整次 graph run，包括 CPU 侧 dispatch。955 GFLOPS ≈ 5.2 TFLOPS 理论峰值的 18%，对 MPSGraph 3×3 conv 这个档位属于合理的实测峰值。
+- `gemv_metal_runner.mm` does `commit` + `waitUntilCompleted` per chunk ([L243-249](../compute_node/compute_methods/gemv/metal/gemv_metal_runner.mm#L243-L249)), and the GPU goes idle between chunks. GFLOPS calculation prefers the `GPUStartTime`/`GPUEndTime` hardware timestamps ([L348-352](../compute_node/compute_methods/gemv/metal/gemv_metal_runner.mm#L348-L352)), so 80 GFLOPS is pure GPU kernel time. M1 Pro memory bandwidth is ~200 GB/s, gemv arithmetic intensity is 0.5 flop/byte -> bandwidth ceiling about 100 GFLOPS, **the current 80 GFLOPS is already eating 80% of bandwidth**, leaving almost no headroom for concurrent speedup.
+- `conv2d_metal_runner.mm` uses MPSGraph's synchronous API `runWithMTLCommandQueue` ([L491-502](../compute_node/compute_methods/conv2d/metal/conv2d_metal_runner.mm#L491-L502)), and timing uses `steady_clock` wrapped around the entire graph run, including CPU-side dispatch. 955 GFLOPS is approximately 18% of the 5.2 TFLOPS theoretical peak, which is a reasonable measured peak for MPSGraph 3x3 conv at this scale.
 
-**两个进程同构 workload × 2 不能互相填补 GPU idle**：因为两个 worker 的 chunk 节拍是同步的，会同时忙、同时在 CPU 侧 prep 下一个 chunk，GPU 的空闲窗口也是同时出现。真正能获得并发增益的场景是异构 workload（例如 gemv + conv2d 混跑）。
+**Two processes with isomorphic workload x 2 cannot fill in each other's GPU idle**: because the chunk cadence of the two workers is synchronized, they are busy at the same time, prep the next chunk on the CPU side at the same time, and the GPU's idle windows also appear at the same time. The scenario that can actually achieve concurrency gains is a heterogeneous workload (e.g., gemv + conv2d mixed run).
 
-### 3. 调度器按自报 GFLOPS 分片，未考虑"同 backend 多实例共享硬件"
+### 3. The scheduler partitions by self-reported GFLOPS without considering "multiple instances on the same backend sharing hardware"
 
-conv2d large 的切片比例是 116 : 116 : 24 = 45% : 45% : 9.4%，正好匹配 self-reported 955 : 955 : 203 GFLOPS 的比例。调度器把两个 Metal worker 当成两块独立的 955 GFLOPS 设备处理，导致 Metal 侧 compute 被打满 22 秒，而 CPU worker 7.7 秒就做完了自己那 24 channels，剩下 17 秒在 peripheral 里等 —— **整批任务的 wall time 由 Metal 这侧拖尾决定**。
+The slice ratio for conv2d large is 116 : 116 : 24 = 45% : 45% : 9.4%, exactly matching the self-reported 955 : 955 : 203 GFLOPS ratio. The scheduler treats the two Metal workers as two independent 955 GFLOPS devices, causing the Metal-side compute to be saturated for 22 seconds, while the CPU worker finishes its 24 channels in 7.7 seconds and then waits 17 seconds in peripheral - **the wall time of the entire batch is determined by the Metal-side tail**.
 
-这是**预期的局限**而非 bug：benchmark 是在"独占 backend"语境下测的 GFLOPS，调度器也按这个值决策。如果今后要让调度器感知共享硬件，一种做法是 main_node 在 REGISTER_WORKER 时按 `(hostname, backend)` 分组，组内把每实例的有效 GFLOPS 除以组大小。
+This is an **expected limitation rather than a bug**: the benchmark measures GFLOPS in an "exclusive backend" context, and the scheduler also makes decisions based on these values. If the scheduler is to become aware of shared hardware in the future, one approach is for the main_node to group by `(hostname, backend)` at REGISTER_WORKER time, and divide each instance's effective GFLOPS by the group size within the group.
 
-### 4. HEARTBEAT 警告只是边缘 case，立即自恢复
+### 4. The HEARTBEAT warning is just an edge case, with immediate self-recovery
 
-[main-20260422-221819.txt:6728](../logs/main-20260422-221819.txt) 有唯一一条 WARNING：
+There is a single WARNING at [main-20260422-221819.txt:6728](../logs/main-20260422-221819.txt):
 
 ```
 23:14:29,901 HEARTBEAT failure for compute node-peer-metal at 192.168.1.136:59286
@@ -60,58 +60,58 @@ conv2d large 的切片比例是 116 : 116 : 24 = 45% : 45% : 9.4%，正好匹配
     active_task=conv2d-12
 ```
 
-时刻精确落在：worker-1 正在 publish 1.9 GB artifact（23:14:29.924）+ main_node 准备 fetch 同一份 artifact（23:14:33.034）+ worker-2/worker-3 同时进入后处理阶段。四个进程 + 一次 4 GB 数据面传输把 CPU 和 IO 同时打满，heartbeat 线程被调度饿死 ~1 秒。
+The timing falls precisely at: worker-1 publishing a 1.9 GB artifact (23:14:29.924) + main_node preparing to fetch the same artifact (23:14:33.034) + worker-2/worker-3 entering the post-processing stage at the same time. Four processes + a 4 GB data-plane transfer simultaneously saturated CPU and IO, and the heartbeat thread was scheduling-starved for ~1 second.
 
-次轮 attempt（23:14:29.902）直接成功，没有升级到节点摘除。说明 1 秒的 heartbeat_ack 超时对"all-in-one 单机 + 大 artifact 高峰"略紧，但系统的重试机制处理得很干净。
+The next attempt (23:14:29.902) succeeded directly, without escalating to node eviction. This indicates that the 1-second heartbeat_ack timeout is slightly tight for "all-in-one single machine + large artifact peak", but the system's retry mechanism handled it cleanly.
 
-### 5. iter=1 比 iter=100 慢是冷 page cache
+### 5. iter=1 being slower than iter=100 is cold page cache
 
-| task | iter | 总 elapsed | worker-1/-2 compute | worker-1/-2 peripheral |
+| task | iter | total elapsed | worker-1/-2 compute | worker-1/-2 peripheral |
 |------|------|-----------|---------------------|----------------------|
-| gemv-6 | 1 | 4986 ms | 5–6 ms | **4806 ms** |
-| gemv-7 | 100 | **4011 ms** ↓ | 889–912 ms | 2793 ms |
-| gemv-8 | 1000 | 15100 ms | 9932–10284 ms | 4221 ms |
+| gemv-6 | 1 | 4986 ms | 5-6 ms | **4806 ms** |
+| gemv-7 | 100 | **4011 ms** down | 889-912 ms | 2793 ms |
+| gemv-8 | 1000 | 15100 ms | 9932-10284 ms | 4221 ms |
 
-large gemv 矩阵 ~2 GB（16384×32768 f32），每个 worker 分到约 800 MB，首次请求是从磁盘冷读到 shared-memory MTLBuffer。后续请求命中 OS page cache，peripheral 降下来，compute 成为主导。**含义**：单次 iter=1 的基准数据具有误导性，性能回归对比至少要预热或取 iter ≥ 100。
+The large gemv matrix is ~2 GB (16384x32768 f32), with each worker assigned about 800 MB. The first request is a cold read from disk into shared-memory MTLBuffer. Subsequent requests hit the OS page cache, peripheral drops, and compute becomes dominant. **Implication**: single-iter=1 baseline data is misleading; performance regression comparison requires at least warm-up or iter >= 100.
 
-### 6. worker-3 (CPU) 的 peripheral 吞掉大量时间
+### 6. worker-3 (CPU) peripheral consumes a large amount of time
 
-conv2d-13 stats-only（没 artifact 要上传）的 worker-3：`wall=25620ms, compute=7307ms, peripheral=17461ms`。peripheral 并非上传耗时，而是 CPU 路径的 sum / sum² / reshape / memcpy 在被 Metal 进程挤占的 CPU 上爬行；Metal 路径把这些后处理放在 GPU shader 里所以 peripheral 只有 20 ms。
+worker-3 on conv2d-13 stats-only (no artifact to upload): `wall=25620ms, compute=7307ms, peripheral=17461ms`. peripheral is not upload time, but rather the CPU path's sum / sum^2 / reshape / memcpy crawling on a CPU squeezed by the Metal processes; the Metal path puts these post-processing steps in a GPU shader, so peripheral is only 20 ms.
 
-这符合"同机异构 backend 抢 CPU"的预期。如果要诊断分布更清晰，后续可以把 `peripheral` 拆成 `artifact_stage / output_copy / stats_reduce` 三段。
+This matches the expectation of "heterogeneous backends on the same machine contending for CPU". To make the diagnostic distribution clearer, `peripheral` could later be split into three segments: `artifact_stage / output_copy / stats_reduce`.
 
-## 结论
+## Conclusion
 
-当前 run 的所有行为都能用"单机共享 GPU + 共享 CPU"的物理约束解释，没有发现需要修复的 bug：
+All behavior in the current run can be explained by the physical constraints of "single-machine shared GPU + shared CPU"; no bug requiring repair was found:
 
-- ✓ 两个 Metal worker 公平分走 GPU 时间（差 0.75%）
-- ✓ 同步完成（差 87 ms）、无饿死
-- ✓ heartbeat 在峰值 IO 下触发一次边缘 case 并立即恢复
-- ✓ 数据面跑在 loopback，带宽内存级
-- ✓ 8 次任务全部 `status=200`
+- Pass: the two Metal workers fairly split GPU time (0.75% difference)
+- Pass: synchronous completion (87 ms difference), no starvation
+- Pass: heartbeat triggered an edge case under peak IO and recovered immediately
+- Pass: data plane runs on loopback, bandwidth at memory level
+- Pass: all 8 tasks returned `status=200`
 
-如果后续要让这个拓扑的吞吐逼近"两块独立 GPU"，唯一真正能榨出增量的方向是**让两个 Metal worker 的 chunk 节拍错开**（不同 `output_channel_batch` 或引入微小起步抖动），让 GPU 的短 idle 窗口被对端 kernel 填补。在同构 workload × 2 的情况下，上限大概也就 5–10% aggregate gain，不值得为此牺牲代码简洁性。
+If we want this topology's throughput to approach "two independent GPUs" later, the only direction that can really squeeze out an increment is **staggering the chunk cadence of the two Metal workers** (different `output_channel_batch` or introducing a small startup jitter), so that the GPU's short idle windows are filled by the peer kernel. In the case of isomorphic workload x 2, the ceiling is probably only 5-10% aggregate gain, not worth sacrificing code simplicity for.
 
-## 潜在改进（非阻塞）
+## Potential Improvements (non-blocking)
 
-按优先级排序，都不影响当前设计目标：
+Sorted by priority, none of which affect the current design goals:
 
-1. **调度器感知同 backend 多实例**：注册时按 `(host, backend)` 分组，组内 GFLOPS 除以组大小。能避免"把单块 GPU 当两块派发"。
-2. **放宽 heartbeat_ack 超时到 2–3 秒** 或在 artifact stage 路径里显式 `sched_yield`，消除 4 GB 峰值 IO 下的边缘 warning。
-3. **拆 peripheral 细项**（stage / copy / reduce），精确看到 CPU 路径哪一块是瓶颈。
-4. **benchmark 增加 warm-up + 多次采样**，让 iter=1 的首轮延迟不再主导用户看到的单次延迟。
+1. **Make the scheduler aware of multiple instances on the same backend**: group by `(host, backend)` at registration, divide GFLOPS within the group by group size. This avoids "dispatching a single GPU as if it were two".
+2. **Relax the heartbeat_ack timeout to 2-3 seconds** or explicitly `sched_yield` in the artifact stage path to eliminate edge warnings under 4 GB peak IO.
+3. **Split peripheral into sub-items** (stage / copy / reduce), to precisely see which segment of the CPU path is the bottleneck.
+4. **Add warm-up + multi-sample to the benchmark**, so iter=1 first-round latency no longer dominates the single-shot latency users see.
 
-## 已知平台差异：macOS peer 进程无可视窗口
+## Known Platform Difference: macOS peer processes have no visible window
 
-`app/supervisor.py:215-242` 的 `_peer_popen_kwargs` 中，Windows 分支通过 `creationflags = CREATE_NEW_CONSOLE` 让 peer compute-node 子进程拥有独立的可视控制台窗口（docstring 明确说这是给 demo 看的）；POSIX 分支只返回空 kwargs，peer 直接作为后台子进程继承父进程 IO。结果：
+In `_peer_popen_kwargs` at `app/supervisor.py:215-242`, the Windows branch uses `creationflags = CREATE_NEW_CONSOLE` to give the peer compute-node subprocess its own visible console window (the docstring explicitly says this is for demo viewing); the POSIX branch only returns empty kwargs, and the peer simply runs as a background subprocess inheriting the parent's IO. Result:
 
-- **功能无影响** —— peer 的 TRACE/INFO 仍写入各自的 `worker-*.txt`、`bootstrap-*.txt`，诊断信息不会丢
-- **视觉差异** —— macOS 下用户无法直观看到"第二个 compute node 正在运行"，只有日志文件里能看到
+- **No functional impact** - the peer's TRACE/INFO is still written to its respective `worker-*.txt`, `bootstrap-*.txt`, no diagnostic information is lost
+- **Visual difference** - on macOS the user cannot intuitively see "the second compute node is running"; this can only be seen in the log files
 
-要对齐 Windows 的 demo 观感，POSIX 分支需要走 `osascript -e 'tell app "Terminal" to do script ...'` 开新窗口，但代价：
+To match the Windows demo experience, the POSIX branch would need to use `osascript -e 'tell app "Terminal" to do script ...'` to open a new window, but at the cost of:
 
-- Terminal.app 会成为新进程组 parent，supervisor 对 `_peer_process` 的 PID 追踪和 `peer_watcher` / `peer_heartbeat_watcher` 的 cleanup 路径都要重写
-- 不是所有 macOS 用户装了 Terminal.app（iTerm、Warp 等），需要先做应用探测
-- 干净关闭 peer 时需要同时终结壳 shell 和 Python 进程，信号链更复杂
+- Terminal.app would become the new process group parent, and the supervisor's PID tracking of `_peer_process` and the cleanup paths in `peer_watcher` / `peer_heartbeat_watcher` would all need to be rewritten
+- Not all macOS users have Terminal.app installed (iTerm, Warp, etc.), so application detection would be needed first
+- Cleanly shutting down a peer would require terminating both the shell and the Python process, making the signal chain more complex
 
-因此目前**有意保留这个差异**：demo 场景下用 `tail -f logs/worker-*.txt logs/main-*.txt` 或分别手开三个 Terminal 手动跑 `bootstrap.py --role ... --backend ...` 作为 workaround，功能完全等价，视觉上也满足"看到三个进程都活着"的需求。
+Therefore this difference is **intentionally retained for now**: in demo scenarios, use `tail -f logs/worker-*.txt logs/main-*.txt` or manually open three Terminals separately and run `bootstrap.py --role ... --backend ...` as a workaround. The functionality is fully equivalent, and visually the requirement of "seeing all three processes alive" is also satisfied.

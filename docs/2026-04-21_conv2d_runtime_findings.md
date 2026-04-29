@@ -1,73 +1,73 @@
-# Conv2d 运行时调试纪要 — 2026-04-21
+# Conv2d Runtime Debugging Notes — 2026-04-21
 
-这一轮针对 `compute_node/compute_methods/conv2d` 的调试，集中修了四个问题。每个都按「现象 / 根因 / 修复 / 验证」记录，方便后续复盘。
+This round of debugging on `compute_node/compute_methods/conv2d` concentrated on fixing four issues. Each is recorded under "Symptom / Root Cause / Fix / Verification" so it can be revisited later.
 
-## 1. Native runner stderr 在 TASK_FAIL 日志中丢失
+## 1. Native runner stderr lost in TASK_FAIL logs
 
-### 现象
-CUDA runner 崩溃时，主进程日志里只能看到 `subprocess.CalledProcessError: Command '[...]' returned non-zero exit status 1.`，看不到底层 CUDA 报错信息。上一次调试甚至因为集群整体退出，连 stderr 原文都来不及留在屏幕上。
+### Symptom
+When the CUDA runner crashed, the main process log only showed `subprocess.CalledProcessError: Command '[...]' returned non-zero exit status 1.`, with no underlying CUDA error information visible. The previous debugging session even ended with the cluster shutting down entirely, so the original stderr text never even survived on screen.
 
-### 根因
-两层叠加：
+### Root Cause
+Two layers compounded the problem:
 
-1. Conv2d 任务执行在 ProcessPoolExecutor 的子进程里。子进程默认没有配置任何 logging handler，`_LOGGER.error(...)` 在那里是 **死路** — 写进去也不会出现在主进程日志里。
-2. `subprocess.CalledProcessError.__str__()` 只包含 command 和 exit code，不包含 `stderr`。即使把它原样 raise 出去、通过 pickle 传回主进程，stderr 字段能穿过来，但格式化后的 TASK_FAIL 消息里看不到。
+1. The conv2d task runs inside a ProcessPoolExecutor child process. The child has no logging handlers configured by default, so `_LOGGER.error(...)` there is a **dead path** — anything written goes nowhere and never appears in the main process log.
+2. `subprocess.CalledProcessError.__str__()` only includes the command and exit code, not `stderr`. Even if you re-raise it as-is and let pickle carry it back to the main process, the stderr field does survive the trip but is invisible in the formatted TASK_FAIL message.
 
-### 修复
-`executor.py` 新增 `RunnerProcessError(RuntimeError)` 异常类型，构造时把 stderr 尾段直接嵌进 message 字符串。`_run_native_runner` 捕获 `CalledProcessError` / `TimeoutExpired` 后重新 raise 成 `RunnerProcessError`，message 里包含：
+### Fix
+`executor.py` introduces a new `RunnerProcessError(RuntimeError)` exception type whose constructor embeds the tail of stderr directly into the message string. After catching `CalledProcessError` / `TimeoutExpired`, `_run_native_runner` re-raises as `RunnerProcessError`, with a message that includes:
 
 - command
 - exit code
-- stderr 尾部 (`_tail_stream`, 2KB 上限)
-- stdout 尾部
+- stderr tail (`_tail_stream`, capped at 2KB)
+- stdout tail
 
-### 验证
-新增回归测试 `test_runner_process_error_carries_stderr_through_pickle`，确认 pickle round-trip 后 stderr 仍然在 `str(exc)` 里。之后复现 CUDA 716 时，主日志 TASK_FAIL 行里可直接看到 `stderr_tail='CUDA error at ... code=716 "misaligned address"'`。
+### Verification
+A new regression test `test_runner_process_error_carries_stderr_through_pickle` confirms that after a pickle round-trip, stderr is still present in `str(exc)`. When CUDA 716 was reproduced afterward, the main log's TASK_FAIL line directly showed `stderr_tail='CUDA error at ... code=716 "misaligned address"'`.
 
-### 教训
-**把诊断信息打包进异常的 str 里，不要依赖子进程的 logger。** 这条已写入 auto-memory `project_conv2d_runs_in_subprocess.md`。
+### Lesson
+**Pack diagnostic information into the exception's str; do not rely on the child process's logger.** This rule has been written into auto-memory `project_conv2d_runs_in_subprocess.md`.
 
 ---
 
 ## 2. CUDA `cudaErrorMisalignedAddress` (716)
 
-### 现象
-`c_out % 4 != 0` 的任务片会稳定触发 CUDA error 716。例如 `c_out=256` 切成 3 份，worker-1 拿到 `oc=0..121`、worker-2 拿到 `oc=121..242`，中间的 worker-2 起始 offset `121` 不是 4 的倍数，runner 崩在内核里。
+### Symptom
+Task slices where `c_out % 4 != 0` reliably triggered CUDA error 716. For example, `c_out=256` split into 3 parts gave worker-1 `oc=0..121` and worker-2 `oc=121..242`, where worker-2's starting offset of `121` is not a multiple of 4, and the runner crashed inside the kernel.
 
-### 根因
-`accumulate_output_lanes` / `store_output_lanes` 中使用 `float4` 一次加载/写入 4 个 lane。`float4` 要求指针按 16B 对齐。权重张量布局是 `[kh][kw][ic][oc]`，最内层 stride 是 `c_out`。只有当 `c_out` 以及任务起始 `oc` 都整除 4，float4 的起始地址才必然对齐；否则 runner 会触发 716。
+### Root Cause
+`accumulate_output_lanes` / `store_output_lanes` use `float4` to load/store 4 lanes at a time. `float4` requires the pointer to be 16B aligned. The weight tensor is laid out as `[kh][kw][ic][oc]`, with the innermost stride being `c_out`. Only when both `c_out` and the task's starting `oc` are divisible by 4 is the float4 starting address guaranteed to be aligned; otherwise the runner trips 716.
 
-### 修复
-内核在进入 `float4` 分支前加一道运行时对齐检查：
+### Fix
+The kernel adds a runtime alignment check before entering the `float4` branch:
 
 ```cpp
 if (valid_outputs == kOutputsPerThread &&
     (reinterpret_cast<uintptr_t>(weight_ptr) & 0xF) == 0) {
-    // float4 快路径
+    // float4 fast path
 } else {
-    // 标量回退
+    // scalar fallback
 }
 ```
 
-对 `output_ptr` 做同样处理。这样不限制上层切分策略，runner 自己吸收 stride 不整除 4 的情况。
+The same treatment is applied to `output_ptr`. This way the upper-layer partitioning strategy is not constrained, and the runner itself absorbs strides that are not divisible by 4.
 
-### 验证
-重新跑 `c_out=256 / 3 worker` 划分，不再出现 716；runner 正常退出 0。
+### Verification
+Re-running the `c_out=256 / 3 worker` partition no longer produced 716; the runner exited cleanly with 0.
 
 ---
 
-## 3. CUDA worker 比 CPU 慢 3.6–7.6× — autotune 每任务都跑
+## 3. CUDA worker 3.6–7.6× slower than CPU — autotune ran on every task
 
-### 现象
-第一次跑 3-worker 混合集群（2 CUDA + 1 CPU）时，CUDA 节点每通道 **比 CPU 还慢 3–7 倍**。直觉应该反过来。
+### Symptom
+The first run of a 3-worker mixed cluster (2 CUDA + 1 CPU) had the CUDA nodes coming in **3–7× slower per channel than the CPU**. Intuition says it should be the other way around.
 
-### 根因
-对比 Metal 和 CUDA 两个后端在 `executor.py` 里的命令行构造：Metal 分支从 `best_config` 里把 `block_size` / `tile_size` 传给 runner，CUDA 分支没有。
+### Root Cause
+Comparing the command-line construction for the Metal and CUDA backends in `executor.py`: the Metal branch passed `block_size` / `tile_size` from `best_config` to the runner, while the CUDA branch did not.
 
-CUDA runner 在没有显式 `--block-sizes` / `--tile-sizes` 时会走内置 autotune —— 14 个 tile 候选，每个候选跑 1 warmup + 1 measurement，加起来是 **每个任务 28 次完整前向**。基准扫表早就跑过一次（结果在 `result.json` 里），但运行时没吃这个缓存，每个下发任务从头扫一遍。
+When the CUDA runner has no explicit `--block-sizes` / `--tile-sizes`, it falls into its built-in autotune — 14 tile candidates, each running 1 warmup + 1 measurement, totaling **28 full forward passes per task**. The benchmark sweep had already run once (results stored in `result.json`), but the runtime was not consuming that cache and instead re-swept from scratch for every dispatched task.
 
-### 修复
-CUDA 分支也从 `best_config` 读 `block_size` / `tile_size`，有值就通过 `--block-sizes` / `--tile-sizes` pin 死给 runner：
+### Fix
+The CUDA branch now also reads `block_size` / `tile_size` from `best_config`, and when present pins them to the runner via `--block-sizes` / `--tile-sizes`:
 
 ```python
 elif backend_name == "cuda":
@@ -81,20 +81,20 @@ elif backend_name == "cuda":
         ])
 ```
 
-`test_task_executor.py` 新增了正向 / 反向断言测试。
+`test_task_executor.py` got new positive / negative assertion tests.
 
-### 验证
-大任务上每通道 compute 时间：**2918ms → 506ms**（≈5.8× 加速）。CUDA 单通道变成比 CPU 快 1.6–1.9×，和基准扫表得到的相对性能一致。
+### Verification
+Per-channel compute time on the large task: **2918ms → 506ms** (≈5.8× speedup). CUDA per-channel became 1.6–1.9× faster than CPU, consistent with the relative performance the benchmark sweep had reported.
 
-### 教训
-**运行时应该吃基准的结果，而不是每次重新扫表。** 两个后端分支需要对齐命令行构造习惯，否则任何一个后端默默走 autotune 都很难发现。
+### Lesson
+**The runtime should consume the benchmark's results, not re-sweep every time.** The two backend branches need their command-line construction conventions aligned, otherwise either backend silently falling into autotune is very hard to spot.
 
 ---
 
-## 4. 大任务 peripheral 时间异常 — 49 秒纯 Python 遍历
+## 4. Anomalous peripheral time on large tasks — 49 seconds of pure Python iteration
 
-### 现象
-修完 autotune 之后，`logs/main-20260421-231411.txt` 里的 `conv2d-3` 任务仍然有怪异开销：
+### Symptom
+Even after the autotune fix, `logs/main-20260421-231411.txt` showed strange overhead on the `conv2d-3` task:
 
 ```
 worker-3 (oc=242:256, 14 ch, CPU)  wall:20780ms  compute:13521ms  peripheral:7032ms
@@ -102,27 +102,27 @@ worker-1 (oc=0:121,  121 ch, CUDA) wall:110821ms compute:61180ms  peripheral:488
 worker-2 (oc=121:242,121 ch, CUDA) wall:111833ms compute:61665ms  peripheral:49121ms
 ```
 
-CUDA 节点 peripheral **48-49 秒**，CPU 节点只有 7 秒。compute 已经被修快了，peripheral 反而成了 wall-time 的主要来源。
+CUDA nodes had **48–49 seconds of peripheral**, while the CPU node only had 7. Compute had been sped up; now peripheral was the dominant contributor to wall time.
 
-### 根因
-`stats_only` 模式下，每个 worker 跑完 runner 之后要调 `_summarize_conv2d_slice_file` 扫一遍输出文件算 `sum` / `sum_sq` / samples。原实现是：
+### Root Cause
+In `stats_only` mode, after each worker finishes the runner, it calls `_summarize_conv2d_slice_file` to scan the output file and compute `sum` / `sum_sq` / samples. The original implementation was:
 
 ```python
-for x in values:           # array.array('f'), 纯 Python 迭代器
+for x in values:           # array.array('f'), pure Python iterator
     xf = float(x)
     sum_v += xf
     sum_sq += xf * xf
     ...
 ```
 
-CPython 解释器循环处理浮点的速度大约每秒 2-3M element：
-- CPU worker 输出 14×H×W ≈ 1.4 亿 float / 14 = **小 14 倍** → 7 秒；
-- CUDA worker 输出 121×H×W ≈ 1.2 亿 float → 49 秒。
+The CPython interpreter loop processes about 2–3M float elements per second:
+- CPU worker output is 14×H×W ≈ 140M float / 14 = **14× smaller** → 7 seconds;
+- CUDA worker output is 121×H×W ≈ 1.2 billion floats → 49 seconds.
 
-比例完全吻合。
+The ratio matches exactly.
 
-### 修复
-改成 `numpy` 矢量化，仍保留 1MB 分块流式读取以限制内存：
+### Fix
+Switch to `numpy` vectorization, while still keeping 1MB chunked streaming reads to bound memory:
 
 ```python
 with path.open("rb") as handle:
@@ -140,56 +140,56 @@ with path.open("rb") as handle:
             remaining -= take
 ```
 
-`float64` 累加器保持和原 Python `float` 累加器的精度一致。
+The `float64` accumulator preserves the same precision as the original Python `float` accumulator.
 
-### 验证
-- 参数一致性测试（100k float）：`sum` bit-exact，`sum_sq` 相对误差 `8e-14`，samples bit-exact。
-- 120M float 微基准：**49s → 435ms**（约 113× 加速）。
-- `tests/test_task_executor.py` + `tests/test_runner_failure_log.py` 共 18 个测试全通过。
+### Verification
+- Parameter consistency test (100k floats): `sum` is bit-exact, `sum_sq` has a relative error of `8e-14`, samples are bit-exact.
+- 120M float micro-benchmark: **49s → 435ms** (about 113× speedup).
+- All 18 tests in `tests/test_task_executor.py` + `tests/test_runner_failure_log.py` pass.
 
-### 教训
-**数值数据不要用 Python 循环。** array / list / 解释器每次 float 运算都要经过对象装箱，在 1e8 量级的数据上会把微秒级差异放大到几十秒。下一次看到 peripheral 大于 compute 的十分之一，先怀疑 Python 循环。
-
----
-
-## 5. Capacity alignment — dispatch 的默认入口由 benchmark 反转为单 pass
-
-### 现象
-第 3 节把 `block_size` / `tile_size` pin 死后，CUDA 单通道 compute 已经和基准扫表得到的相对性能一致。但上层 capacity bookkeeping 仍然失真：基准报的 per-channel 时间是 **单次 kernel 的 cudaEvent 时间**（毫秒量级），而 runtime 记录的 `computation_ms_total` 是 **subprocess wall-clock**，后者包含进程 spawn、CUDA context 初始化、D2H、checksum、写文件等常驻开销。CUDA 分到 9× 工作却比 CPU 后完成的异常，就是 subprocess wall 把这些常驻开销折算进了每通道时间。
-
-### 根因
-Runner 的**默认入口是 benchmark**：`main()` 进去就是 autotune 14 候选 + measurement 多 pass + 单独的 output/checksum pass。哪怕 executor 已经通过 `--block-sizes`/`--tile-sizes` pin 死了唯一候选，runner 依然要跑多 pass + 切开的 output pass。subprocess wall 天然等于「基准结构 + 进程常驻开销」，capacity 算法拿到的数字系统性偏大，且这个偏大对 CUDA 比对 CPU 更明显（context + D2H）。
-
-### 修复
-把 runner 的默认入口反转：**默认 dispatch，`--mode benchmark` 才触发 autotune + measurement**。
-
-- `conv2d_cuda_runner.cu`：新增 `enum class RunnerMode { Dispatch, Benchmark }`、`--mode` / `--shared-input` CLI；dispatch 分支把 kernel launch + sync + D2H + host copy 合在一个 `cudaEventRecord(start)..(stop)` bracket 里，JSON 新增 `mode` 与 `compute_event_ms`。只有 `--mode benchmark` 会走完整的 14 候选 autotune。（代价：dispatch 的 cudaEvent 里含 ~3ms D2H，相比 pure kernel 略虚高，但比 subprocess wall 贴近基准得多。）
-- `conv2d_cpu_windows.cpp` / `conv2d_cpu_macos.cpp`：同样的 `--mode` 分支。dispatch 用 `workers[0]`（由 executor 传入 benchmark 选中的值）跑一次 `run_multithreaded`，`compute_event_ms = chrono 单次 compute` 秒转毫秒。
-- `conv2d_metal_runner.mm`：`--mode dispatch` 默认只做一次 MPSGraph 提交；`--mode benchmark` 保留 autotune + measurement 双 pass。
-- `performance_metrics/conv2d/backends/{cuda,metal}_backend.py` 的 `_run_runner` 都显式注入 `--mode benchmark`，保证基准扫表路径和之前一致。
-- `executor.py`：dispatch 路径 pin 住 `--shared-input`（否则 `build_candidate_tiles` 会同时返回 shared=0/1 两个变体，dispatch 挑到的第一个可能与基准选中的不一致）；新增 `_parse_compute_event_ms`，从 runner stdout 的 JSON 解析 `compute_event_ms`，`computation_ms_total += min(subprocess_wall_ms, compute_event_ms)`，subprocess wall 只在回退路径保留。
-
-### 验证
-- Unit：306 passed / 8 skipped。新断言：`cuda_backend._run_runner` 命令中含 `--mode benchmark`；executor dispatch 命令含 `--shared-input` 且**不含** `--mode`（走默认 dispatch）。
-- Runner 冒烟（`h=w=64, c_in=32, c_out=64, k=3`）：
-  - CPU dispatch `compute_event_ms=27.01ms`（worker=1） vs. benchmark 扫 1/2/4 选中 `compute_event_ms=10.47ms`（autotune 9.95ms, 3 candidates）。
-  - CUDA dispatch `compute_event_ms=1.22ms`（默认 tile）vs. benchmark 扫 14 候选 `compute_event_ms=0.316ms`（autotune 0.302ms）。
-  - 两个后端在 dispatch 和 benchmark 两种 mode 下 JSON 都正确携带 `mode`/`compute_event_ms`/`trials_run` 字段。
-- Stage 6c 的 2-worker/3-worker 真集群对比（CUDA vs CPU per-channel 时间是否与基准比例吻合）属于 operator-in-loop 跑，留给下一次上集群时验证。
-
-### 教训
-**Capacity signal 必须和基准 signal 在同一个时间域里采样。** benchmark 报 cudaEvent 时间，runtime 就不能用 subprocess wall；否则两者差一个「进程常驻开销 + autotune 扫表 + 分离的 output pass」的系统性 offset，多机调度必然失真。默认入口也要选贴近真实下发路径的那个 —— autotune 作为显式 opt-in 比作为默认值更安全。
+### Lesson
+**Do not iterate numerical data with a Python loop.** array / list / interpreter object boxing on every float operation amplifies microsecond differences into tens of seconds at the 1e8 element scale. The next time peripheral is more than a tenth of compute, suspect a Python loop first.
 
 ---
 
-## 复盘
+## 5. Capacity alignment — dispatch's default entry point flipped from benchmark to single pass
 
-这五个问题有一个共同模式：**性能或错误信号被某一层默默吞掉了**。
+### Symptom
+After section 3 pinned `block_size` / `tile_size`, the CUDA per-channel compute was already consistent with the relative performance from the benchmark sweep. But the upper-layer capacity bookkeeping was still distorted: the benchmark's reported per-channel time is the **cudaEvent time of a single kernel** (millisecond range), while the runtime-recorded `computation_ms_total` is the **subprocess wall-clock**, which includes process spawn, CUDA context init, D2H, checksum, file writes, and other resident overhead. The anomaly where CUDA was assigned 9× the work yet finished after CPU was the subprocess wall folding this resident overhead into the per-channel time.
 
-- stderr 被子进程 logger 吞掉 → 包进异常 str
-- CUDA 对齐错误被 `CalledProcessError` 吞掉 → 同上
-- Autotune 被隐式启用，基准结果被无视 → 对齐两个后端的命令行
-- 解释器循环吞掉了 numpy 向量化的机会 → 换 numpy
-- Dispatch 把 autotune + 常驻开销当成 compute → runner 默认入口反转，改吃 `compute_event_ms`
+### Root Cause
+The runner's **default entry point is benchmark**: `main()` jumps straight into autotune over 14 candidates + multi-pass measurement + a separate output/checksum pass. Even when the executor has pinned a single candidate via `--block-sizes`/`--tile-sizes`, the runner still does multiple passes plus the separate output pass. The subprocess wall therefore naturally equals "benchmark structure + process resident overhead", and the number reaching the capacity algorithm is systematically inflated, with the inflation more pronounced for CUDA than for CPU (context + D2H).
 
-下一次遇到「数字和预期相差一个数量级」的情况，优先检查哪一环在默默地做了预期之外的工作。
+### Fix
+Flip the runner's default entry point: **dispatch by default, `--mode benchmark` triggers autotune + measurement**.
+
+- `conv2d_cuda_runner.cu`: introduces `enum class RunnerMode { Dispatch, Benchmark }`, adds `--mode` / `--shared-input` CLI; the dispatch branch wraps kernel launch + sync + D2H + host copy in a single `cudaEventRecord(start)..(stop)` bracket, and the JSON gains `mode` and `compute_event_ms`. Only `--mode benchmark` runs the full 14-candidate autotune. (Cost: dispatch's cudaEvent includes ~3ms of D2H, slightly inflated relative to pure kernel, but much closer to the benchmark than subprocess wall.)
+- `conv2d_cpu_windows.cpp` / `conv2d_cpu_macos.cpp`: same `--mode` branching. Dispatch uses `workers[0]` (passed in from the executor with the value selected by benchmark) to run `run_multithreaded` once, with `compute_event_ms = chrono single compute` converted from seconds to milliseconds.
+- `conv2d_metal_runner.mm`: `--mode dispatch` defaults to a single MPSGraph submission; `--mode benchmark` keeps the autotune + measurement two-pass.
+- `_run_runner` in `performance_metrics/conv2d/backends/{cuda,metal}_backend.py` explicitly injects `--mode benchmark`, ensuring the benchmark sweep path is unchanged from before.
+- `executor.py`: the dispatch path pins `--shared-input` (otherwise `build_candidate_tiles` returns both shared=0/1 variants, and the first one dispatch picks may not match what benchmark selected); a new `_parse_compute_event_ms` parses `compute_event_ms` from the runner stdout JSON, and `computation_ms_total += min(subprocess_wall_ms, compute_event_ms)`, with subprocess wall retained only on the fallback path.
+
+### Verification
+- Unit: 306 passed / 8 skipped. New assertions: `cuda_backend._run_runner` command contains `--mode benchmark`; the executor dispatch command contains `--shared-input` and **does not contain** `--mode` (so it takes the default dispatch).
+- Runner smoke test (`h=w=64, c_in=32, c_out=64, k=3`):
+  - CPU dispatch `compute_event_ms=27.01ms` (worker=1) vs. benchmark sweep over 1/2/4 selecting `compute_event_ms=10.47ms` (autotune 9.95ms, 3 candidates).
+  - CUDA dispatch `compute_event_ms=1.22ms` (default tile) vs. benchmark sweep over 14 candidates `compute_event_ms=0.316ms` (autotune 0.302ms).
+  - In both dispatch and benchmark modes, both backends correctly emit `mode`/`compute_event_ms`/`trials_run` fields in JSON.
+- Stage 6c's 2-worker/3-worker real-cluster comparison (whether CUDA vs CPU per-channel time matches the benchmark ratio) is operator-in-loop and is left for the next cluster run to verify.
+
+### Lesson
+**The capacity signal must be sampled in the same time domain as the benchmark signal.** If benchmark reports cudaEvent time, the runtime cannot use subprocess wall; otherwise the two differ by a systematic offset of "process resident overhead + autotune sweep + separate output pass", and multi-machine scheduling will inevitably be distorted. The default entry point should also be the one closer to the real dispatch path — autotune is safer as an explicit opt-in than as the default.
+
+---
+
+## Retrospective
+
+These five issues share one pattern: **a performance or error signal got silently swallowed at some layer**.
+
+- stderr swallowed by the child process logger → wrap into the exception str
+- CUDA alignment error swallowed by `CalledProcessError` → same as above
+- Autotune implicitly enabled, benchmark results ignored → align command-line construction across both backends
+- Interpreter loop swallowed the chance for numpy vectorization → switch to numpy
+- Dispatch treated autotune + resident overhead as compute → flip the runner's default entry point, consume `compute_event_ms`
+
+The next time a number is off by an order of magnitude from expectations, check first which link in the chain is silently doing more work than expected.
